@@ -5,6 +5,7 @@ import json
 import math
 import re
 import statistics
+import time
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,7 @@ WB_CONTENT_BASE = "https://content-api.wildberries.ru"
 WB_ANALYTICS_BASE = "https://seller-analytics-api.wildberries.ru"
 WB_PROMOTION_BASE = "https://advert-api.wildberries.ru"
 MPSTAT_BASE = "https://mpstats.io/api/wb/get"
+PAGINATION_RETRYABLE_STATUSES = {"429", "500", "REQUEST_ERROR"}
 
 
 def _today_local() -> date:
@@ -219,6 +221,75 @@ def _first_int(item: Mapping[str, Any], *keys: str) -> int | None:
             if value is not None:
                 return value
     return None
+
+
+def _copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(item, Mapping):
+            copied[key] = _copy_mapping(item)
+        elif isinstance(item, list):
+            copied[key] = list(item)
+        else:
+            copied[key] = item
+    return copied
+
+
+def _extract_total_hint(payload: Any) -> int | None:
+    candidates: list[Mapping[str, Any]] = []
+    if isinstance(payload, Mapping):
+        candidates.append(payload)
+        data = payload.get("data")
+        if isinstance(data, Mapping):
+            candidates.append(data)
+    for candidate in candidates:
+        for key in ("total", "count", "totalCount", "totalItems", "itemsCount"):
+            total_hint = _to_int(candidate.get(key))
+            if total_hint is not None:
+                return total_hint
+    return None
+
+
+def _signature_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return json.dumps(_copy_mapping(value), ensure_ascii=False, sort_keys=True)
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return value
+
+
+def _item_signature(item: Any) -> tuple[Any, ...]:
+    if not isinstance(item, Mapping):
+        return (str(item),)
+    return (
+        _signature_value(_first_non_empty(item.get("nmId"), item.get("nmID"), item.get("vendorCode"), item.get("text"), item.get("name"))),
+        _signature_value(_first_non_empty(item.get("text"), item.get("vendorCode"), item.get("name"))),
+        _signature_value(_first_non_empty(item.get("frequency"), item.get("views"), item.get("openCard"), item.get("stockCount"))),
+    )
+
+
+def _page_signature(items: Sequence[Any]) -> tuple[Any, ...]:
+    if not items:
+        return ("EMPTY",)
+    sample: list[Any] = []
+    head = list(items[:3])
+    tail = list(items[-3:]) if len(items) > 3 else []
+    for item in head + tail:
+        sample.append(_item_signature(item))
+    return tuple(sample + [len(items)])
+
+
+def _merge_payload_with_items(payload: Any, items: Sequence[Any]) -> dict[str, Any]:
+    merged_items = list(items)
+    if isinstance(payload, Mapping):
+        merged_payload = _copy_mapping(payload)
+        data = merged_payload.get("data")
+        if isinstance(data, Mapping):
+            data["items"] = merged_items
+        else:
+            merged_payload["data"] = {"items": merged_items}
+        return merged_payload
+    return {"data": {"items": merged_items}}
 
 
 def _parse_nm_id(text: str) -> int | None:
@@ -533,6 +604,134 @@ class MvpRealRun:
         except Exception:
             return status_code, None, "invalid_json_response"
 
+    def _request_offset_paginated(
+        self,
+        *,
+        url: str,
+        headers: Mapping[str, str],
+        json_body: Mapping[str, Any],
+        items_paths: Sequence[Sequence[str]],
+        limit: int,
+        max_pages: int,
+        page_sleep_seconds: int,
+        retry_sleep_seconds: int,
+        max_retries: int = 2,
+        timeout: int = 90,
+    ) -> tuple[str, Any, str, dict[str, Any]]:
+        all_items: list[Any] = []
+        page_logs: list[dict[str, Any]] = []
+        failed_pages: list[dict[str, Any]] = []
+        http_error_counts = {"429": 0, "500": 0, "REQUEST_ERROR": 0}
+        seen_signatures: set[tuple[Any, ...]] = set()
+        pagination_supported: bool | None = None
+        total_hint: int | None = None
+        offset = 0
+        last_payload: Any = None
+
+        for page_number in range(1, max_pages + 1):
+            page_body = _copy_mapping(json_body)
+            page_body["limit"] = limit
+            page_body["offset"] = offset
+
+            status = "REQUEST_ERROR"
+            payload: Any = None
+            error = ""
+            retry_count = 0
+            while True:
+                status, payload, error = self._request(
+                    "POST",
+                    url,
+                    headers,
+                    json_body=page_body,
+                    timeout=timeout,
+                )
+                if status == "200":
+                    break
+                if status in PAGINATION_RETRYABLE_STATUSES:
+                    http_error_counts[status] += 1
+                if status not in PAGINATION_RETRYABLE_STATUSES or retry_count >= max_retries:
+                    failed_pages.append(
+                        {
+                            "page_number": page_number,
+                            "offset": offset,
+                            "status": status,
+                            "error": error,
+                            "retry_count": retry_count,
+                        }
+                    )
+                    metadata = {
+                        "pages_loaded": len(page_logs),
+                        "page_logs": page_logs,
+                        "failed_pages": failed_pages,
+                        "http_error_counts": http_error_counts,
+                        "pagination_supported": pagination_supported,
+                        "total_hint": total_hint,
+                    }
+                    return status, None, error or "paginated_request_failed", metadata
+                retry_count += 1
+                time.sleep(retry_sleep_seconds * retry_count)
+
+            items = _list_from_payload(payload, *items_paths)
+            page_len = len(items)
+            total_hint = total_hint or _extract_total_hint(payload)
+            signature = _page_signature(items)
+            page_logs.append(
+                {
+                    "page_number": page_number,
+                    "offset": offset,
+                    "limit_requested": limit,
+                    "items_returned": page_len,
+                    "retry_count": retry_count,
+                }
+            )
+
+            if page_len == 0:
+                last_payload = payload
+                break
+            if signature in seen_signatures:
+                pagination_supported = False if page_number > 1 else pagination_supported
+                last_payload = payload
+                break
+
+            seen_signatures.add(signature)
+            if page_number > 1:
+                pagination_supported = True
+
+            all_items.extend(items)
+            last_payload = payload
+
+            if total_hint is not None and len(all_items) >= total_hint:
+                break
+
+            if page_len < limit:
+                break
+
+            offset += page_len
+            if page_number < max_pages:
+                time.sleep(page_sleep_seconds)
+        else:
+            metadata = {
+                "pages_loaded": len(page_logs),
+                "page_logs": page_logs,
+                "failed_pages": failed_pages,
+                "http_error_counts": http_error_counts,
+                "pagination_supported": pagination_supported,
+                "total_hint": total_hint,
+                "truncated": True,
+            }
+            return "PAGINATION_LIMIT_REACHED", None, "max_pages_reached_before_completion", metadata
+
+        metadata = {
+            "pages_loaded": len(page_logs),
+            "page_logs": page_logs,
+            "failed_pages": failed_pages,
+            "http_error_counts": http_error_counts,
+            "pagination_supported": pagination_supported,
+            "total_hint": total_hint,
+            "items_loaded": len(all_items),
+        }
+        return "200", _merge_payload_with_items(last_payload, all_items), "", metadata
+
     def _ensure_sheet_headers(self, sheet_name: str, headers: Sequence[str]) -> tuple[int, str]:
         if not self.spreadsheet_id:
             raise RuntimeError("GOOGLE_SHEET_ID is missing")
@@ -686,6 +885,27 @@ class MvpRealRun:
             json_body=payload,
         )
 
+    def _fetch_stocks_paginated(self, snapshot_date: date) -> tuple[str, Any, str, dict[str, Any]]:
+        payload = {
+            "nmIDs": list(self.nm_ids),
+            "currentPeriod": {"start": snapshot_date.isoformat(), "end": snapshot_date.isoformat()},
+            "stockType": "",
+            "skipDeletedNm": False,
+            "availabilityFilters": [],
+            "orderBy": {"field": "avgOrders", "mode": "asc"},
+        }
+        return self._request_offset_paginated(
+            url=f"{WB_ANALYTICS_BASE}/api/v2/stocks-report/products/products",
+            headers=self._headers_analytics(),
+            json_body=payload,
+            items_paths=(("data", "items"), ("items",)),
+            limit=100,
+            max_pages=20,
+            page_sleep_seconds=1,
+            retry_sleep_seconds=15,
+            max_retries=3,
+        )
+
     def _fetch_ad_costs(self, start: date, end: date) -> tuple[str, Any, str]:
         return self._request(
             "GET",
@@ -710,6 +930,28 @@ class MvpRealRun:
             f"{WB_ANALYTICS_BASE}/api/v2/search-report/product/search-texts",
             self._headers_analytics(),
             json_body=payload,
+        )
+
+    def _fetch_search_texts_paginated(self, day: date) -> tuple[str, Any, str, dict[str, Any]]:
+        payload = {
+            "currentPeriod": {"start": day.isoformat(), "end": day.isoformat()},
+            "pastPeriod": {"start": (day - timedelta(days=1)).isoformat(), "end": (day - timedelta(days=1)).isoformat()},
+            "nmIds": list(self.nm_ids),
+            "topOrderBy": "openCard",
+            "includeSubstitutedSKUs": True,
+            "includeSearchTexts": True,
+            "orderBy": {"field": "avgPosition", "mode": "asc"},
+        }
+        return self._request_offset_paginated(
+            url=f"{WB_ANALYTICS_BASE}/api/v2/search-report/product/search-texts",
+            headers=self._headers_analytics(),
+            json_body=payload,
+            items_paths=(("data", "items"), ("items",)),
+            limit=100,
+            max_pages=50,
+            page_sleep_seconds=20,
+            retry_sleep_seconds=25,
+            max_retries=2,
         )
 
     def _fetch_fullstats(self, campaign_ids: Sequence[int]) -> tuple[str, Any, str]:

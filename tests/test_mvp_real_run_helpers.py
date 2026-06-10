@@ -47,6 +47,61 @@ def test_fetch_search_texts_uses_runner_nm_ids(monkeypatch):
     assert captured["json_body"]["nmIds"] == [333, 444]
 
 
+def test_fetch_search_texts_paginated_merges_pages_and_advances_offset(monkeypatch):
+    run = MvpRealRun()
+    run.nm_ids = [333, 444]
+    offsets: list[int] = []
+    first_page_items = [{"nmId": 333, "text": f"q{index}"} for index in range(100)]
+    payloads = {
+        0: {"data": {"items": first_page_items}},
+        100: {"data": {"items": [{"nmId": 444, "text": "q100"}]}},
+    }
+
+    def fake_request(method, url, headers, json_body=None, params=None, timeout=90):
+        offset = json_body["offset"]
+        offsets.append(offset)
+        return "200", payloads[offset], ""
+
+    monkeypatch.setattr(run, "_request", fake_request)
+
+    status, payload, error, metadata = run._fetch_search_texts_paginated(run.date_to)
+
+    assert status == "200"
+    assert error == ""
+    assert offsets == [0, 100]
+    assert len(payload["data"]["items"]) == 101
+    assert payload["data"]["items"][-1]["text"] == "q100"
+    assert metadata["pages_loaded"] == 2
+
+
+def test_fetch_stocks_paginated_retries_request_error_and_returns_combined_items(monkeypatch):
+    run = MvpRealRun()
+    run.nm_ids = [111]
+    calls: list[int] = []
+    state = {"first_retry": True}
+
+    def fake_request(method, url, headers, json_body=None, params=None, timeout=90):
+        offset = json_body["offset"]
+        calls.append(offset)
+        if offset == 0 and state["first_retry"]:
+            state["first_retry"] = False
+            return "REQUEST_ERROR", None, "temporary"
+        if offset == 0:
+            return "200", {"data": {"items": [{"nmID": index, "vendorCode": f"A{index}"} for index in range(100)]}}, ""
+        return "200", {"data": {"items": []}}, ""
+
+    monkeypatch.setattr(run, "_request", fake_request)
+    monkeypatch.setattr("src.pipelines.mvp_real_run.time.sleep", lambda *_args, **_kwargs: None)
+
+    status, payload, error, metadata = run._fetch_stocks_paginated(run.date_to)
+
+    assert status == "200"
+    assert error == ""
+    assert calls == [0, 0, 100]
+    assert len(payload["data"]["items"]) == 100
+    assert metadata["http_error_counts"]["REQUEST_ERROR"] == 1
+
+
 def test_parse_nm_id_from_text():
     assert _parse_nm_id("Кампания ART 197330807 / 2026") == 197330807
     assert _parse_nm_id("no digits here") is None

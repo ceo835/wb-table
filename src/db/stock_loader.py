@@ -61,7 +61,7 @@ def collect_stock_rows(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     resolved_nm_ids = _resolve_nm_ids(nm_ids)
     runner.nm_ids = list(resolved_nm_ids)
-    stocks_status, stocks_payload, stocks_error = runner._fetch_stocks(snapshot_date)
+    stocks_status, stocks_payload, stocks_error, pagination_metadata = runner._fetch_stocks_paginated(snapshot_date)
     if stocks_status != "200":
         raise RuntimeError(f"Stocks request failed: {stocks_status} {stocks_error}")
 
@@ -80,6 +80,11 @@ def collect_stock_rows(
         "error": stocks_error,
         "rows_fetched": len(stock_rows),
         "snapshot_date": snapshot_date.isoformat(),
+        "pages_loaded": int(pagination_metadata.get("pages_loaded", 0) or 0),
+        "page_logs": list(pagination_metadata.get("page_logs", [])),
+        "failed_pages": list(pagination_metadata.get("failed_pages", [])),
+        "http_error_counts": dict(pagination_metadata.get("http_error_counts", {})),
+        "pagination_supported": pagination_metadata.get("pagination_supported"),
     }
 
 
@@ -170,4 +175,9 @@ def load_stocks_to_db(snapshot_date: date, nm_ids: Sequence[int] | None = None) 
         "null_mp_stock_rows": null_mp_stock_rows,
         "mock_like_rows": mock_like_rows,
         "status": metadata["status"],
+        "pages_loaded": metadata["pages_loaded"],
+        "page_logs": metadata["page_logs"],
+        "failed_pages": metadata["failed_pages"],
+        "http_error_counts": metadata["http_error_counts"],
+        "pagination_supported": metadata["pagination_supported"],
     }

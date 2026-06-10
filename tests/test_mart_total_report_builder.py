@@ -202,6 +202,37 @@ def test_build_mart_total_report_row_keeps_manual_blocks_null_and_flags_sources(
     assert row["has_search"] is False
 
 
+def test_build_mart_total_report_row_sets_has_funnel_false_for_empty_funnel_payload():
+    row = build_mart_total_report_row(
+        funnel_row=SimpleNamespace(
+            date=date(2026, 6, 1),
+            nm_id=197330807,
+            impressions=None,
+            card_clicks=None,
+            ctr=None,
+            cart_count=None,
+            order_count=None,
+            order_sum=None,
+            buyout_count=None,
+            buyout_sum=None,
+            buyout_percent=None,
+            add_to_cart_conversion=None,
+            cart_to_order_conversion=None,
+            wishlist_count=None,
+            avg_delivery_time=None,
+            local_orders_percent=None,
+            loaded_at=datetime(2026, 6, 5, 10, 0, tzinfo=timezone.utc),
+        ),
+        stock_row=None,
+        ad_cost_stats=None,
+        ad_campaign_stats={},
+        search_stats={},
+        localization_stats={},
+    )
+
+    assert row["has_funnel"] is False
+
+
 def test_prepare_mart_total_report_upsert_rows_deduplicates():
     rows = prepare_mart_total_report_upsert_rows(
         [

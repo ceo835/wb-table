@@ -117,8 +117,8 @@ def collect_search_query_rows(
         stock_rows = _read_processed_csv_rows(DATA_DIR / "fact_stock_snapshot.csv")
         reference_index = _build_reference_index(funnel_rows, stock_rows)
 
-    current_status, current_payload, current_error = runner._fetch_search_texts(end)
-    prev_status, prev_payload, prev_error = runner._fetch_search_texts(start)
+    current_status, current_payload, current_error, current_pagination = runner._fetch_search_texts_paginated(end)
+    prev_status, prev_payload, prev_error, prev_pagination = runner._fetch_search_texts_paginated(start)
     if current_status != "200":
         raise RuntimeError(f"Search texts current request failed: {current_status} {current_error}")
     if prev_status != "200":
@@ -134,6 +134,16 @@ def collect_search_query_rows(
         "current_status": current_status,
         "prev_status": prev_status,
         "rows_fetched": len(search_rows),
+        "current_pages_loaded": int(current_pagination.get("pages_loaded", 0) or 0),
+        "prev_pages_loaded": int(prev_pagination.get("pages_loaded", 0) or 0),
+        "current_page_logs": list(current_pagination.get("page_logs", [])),
+        "prev_page_logs": list(prev_pagination.get("page_logs", [])),
+        "current_http_error_counts": dict(current_pagination.get("http_error_counts", {})),
+        "prev_http_error_counts": dict(prev_pagination.get("http_error_counts", {})),
+        "current_failed_pages": list(current_pagination.get("failed_pages", [])),
+        "prev_failed_pages": list(prev_pagination.get("failed_pages", [])),
+        "current_pagination_supported": current_pagination.get("pagination_supported"),
+        "prev_pagination_supported": prev_pagination.get("pagination_supported"),
     }
 
 
@@ -329,4 +339,14 @@ def load_search_queries_to_db(
         "mock_like_rows": mock_like_rows,
         "current_status": metadata["current_status"],
         "prev_status": metadata["prev_status"],
+        "current_pages_loaded": metadata["current_pages_loaded"],
+        "prev_pages_loaded": metadata["prev_pages_loaded"],
+        "current_page_logs": metadata["current_page_logs"],
+        "prev_page_logs": metadata["prev_page_logs"],
+        "current_http_error_counts": metadata["current_http_error_counts"],
+        "prev_http_error_counts": metadata["prev_http_error_counts"],
+        "current_failed_pages": metadata["current_failed_pages"],
+        "prev_failed_pages": metadata["prev_failed_pages"],
+        "current_pagination_supported": metadata["current_pagination_supported"],
+        "prev_pagination_supported": metadata["prev_pagination_supported"],
     }

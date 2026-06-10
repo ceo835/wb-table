@@ -107,6 +107,22 @@ def build_calc_metrics(
     }
 
 
+def _has_meaningful_funnel_metrics(row: Mapping[str, Any]) -> bool:
+    meaningful_fields = (
+        "card_clicks",
+        "cart_count",
+        "order_count",
+        "order_sum",
+        "add_to_cart_conversion",
+        "cart_to_order_conversion",
+        "add_to_cart_conversion_calc",
+        "cart_to_order_conversion_calc",
+        "buyout_count",
+        "buyout_sum",
+    )
+    return any(_to_decimal_or_none(row.get(field)) is not None for field in meaningful_fields)
+
+
 def _date_range(start: date, end: date) -> list[date]:
     days: list[date] = []
     current = start
@@ -322,7 +338,7 @@ def build_mart_total_report_row(
     search_stats = search_stats or {}
     localization_stats = localization_stats or {}
 
-    return {
+    row = {
         "report_date": report_date,
         "nm_id": nm_id,
         "supplier_article": None,
@@ -370,7 +386,7 @@ def build_mart_total_report_row(
         "current_mp_stock_qty": stock_row.mp_stock_qty if stock_row else None,
         "vbro_organic_sales_qty": None,
         "vbro_operating_profit": None,
-        "has_funnel": True,
+        "has_funnel": False,
         "has_stock": stock_row is not None,
         "has_ad_cost": bool(ad_cost_stats),
         "has_ad_campaign": bool(ad_campaign_stats),
@@ -385,6 +401,8 @@ def build_mart_total_report_row(
         "source_status": "PARTIAL",
         "loaded_at": funnel_row.loaded_at,
     }
+    row["has_funnel"] = _has_meaningful_funnel_metrics(row)
+    return row
 
 
 def _build_mart_total_report_v2_row(
@@ -465,7 +483,7 @@ def _build_mart_total_report_v2_row(
         "current_mp_stock_qty": stock_row.mp_stock_qty if stock_row else None,
         "vbro_organic_sales_qty": None,
         "vbro_operating_profit": None,
-        "has_funnel": funnel_row is not None,
+        "has_funnel": False,
         "has_stock": stock_row is not None,
         "has_ad_cost": bool(ad_cost_stats),
         "has_ad_campaign": bool(ad_campaign_stats),
@@ -506,6 +524,7 @@ def _build_mart_total_report_v2_row(
             ad_orders=row["ad_orders_total"],
         )
     )
+    row["has_funnel"] = _has_meaningful_funnel_metrics(row)
     return row
 
 
