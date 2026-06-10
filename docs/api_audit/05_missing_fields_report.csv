@@ -1,0 +1,9 @@
+﻿tab,field_or_need,status,why_missing,best_available_source,next_step
+ТочкаВх,entry points feed,NOT_FOUND,No public WB seller API endpoint found,UI/private export if exists,Additional source required
+Локализация,exact locality KPI,PARTIAL,"Regional sales and stock regions exist, exact locality field not confirmed",Derived or additional source,Clarify target metric
+Остатки,daily stock direct JSON endpoint,CSV_ONLY,Daily history is served via STOCK_HISTORY_DAILY_CSV,wb_stock_history_daily.csv,Automate create/list/download flow
+РасходРК,nmId-level spend full coverage,PARTIAL,"adv/upd gives advertId, not full product mapping",Join with fullstats,Add allocation rules
+ВБро,cost_of_goods,NOT_FOUND,COGS absent from WB API,ERP/Google Sheet/COGS registry,Required for exact operating profit
+ВБро,exact operating profit,CALCULATED,Requires formula over finance + ads + COGS,wb_report_detail_by_period + wb_adv_costs + external COGS,Agree business formula
+Сравнение карточек,direct competitor feed,UNKNOWN,Tested MPStat endpoints gave strong item/day metrics but not direct competitor list,Additional MPStat endpoint or category seed,May require broader MPStat contract
+Сравнение карточек,search-position dedicated endpoint,ACCESS_ERROR,Endpoint from .env returns SKU contract error,Use mpstats_item_sales.search_position_avg,Clarify endpoint contract if needed

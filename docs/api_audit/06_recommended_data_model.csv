@@ -1,0 +1,17 @@
+﻿model_name,grain,core_fields,preferred_source,source_status,notes
+dim_product,nmId,"nmId,vendorCode,title,brand,subjectName,photos,dimensions",WB content cards,AVAILABLE,Directory dimension
+fact_funnel_day,nmId+date,"openCount,cartCount,orderCount,orderSum,buyoutCount,buyoutSum,buyoutPercent,addToCartConversion,cartToOrderConversion,addToWishlistCount",WB sales funnel history,AVAILABLE,Daily funnel tab
+fact_stock_snapshot,nmId+snapshotDate,"stockCount,stockSum,saleRate,toClientCount,fromClientCount,availability,currentPrice",WB stocks products,AVAILABLE,Current stocks
+fact_stock_region_snapshot,regionName+officeID+snapshotDate,"stockCount,stockSum,saleRate,toClientCount,fromClientCount",WB stocks offices,AVAILABLE,Regional stock breakdown
+fact_stock_day,nmId+date,"stockCount,stockSum,toClientCount,fromClientCount,saleRate",WB STOCK_HISTORY_DAILY_CSV,CSV_ONLY,Daily stock history
+fact_region_sales_period,windowStart+windowEnd+nmId+country+region+city,"saleItemInvoiceQty,saleInvoiceCostPrice,saleInvoiceCostPricePerc",WB region-sale,PARTIAL,Regional sales period slice
+fact_ad_cost_event,advertId+updTime,"updSum,paymentType,advertType,advertStatus,campName,currency",WB adv/upd,AVAILABLE,Raw ad spend events
+fact_ad_campaign_day,advertId+date,"views,clicks,ctr,cpc,orders,atbs,sum,sum_price,currency",WB adv/fullstats,AVAILABLE,Daily campaign metrics
+fact_ad_campaign_nm_day,advertId+date+nmId+appType,"views,clicks,orders,atbs,sum,sum_price,name",WB adv/fullstats,AVAILABLE,Campaign-product join
+fact_search_query_metric,nmId+searchText+date_or_period,"frequency,weekFrequency,medianPosition,avgPosition,visibility,openCard,addToCart,openToCart,orders,cartToOrder",WB search-report,AVAILABLE,Jam search analytics
+fact_finance_realization_line,rrd_id,"sale_dt,nm_id,doc_type_name,quantity,retail_amount,ppvz_for_pay,ppvz_sales_commission,acquiring_fee,delivery_rub,storage_fee,acceptance,deduction,penalty",WB reportDetailByPeriod,AVAILABLE,Finance line base
+fact_profit_day,nmId+date,"netPayout,logistics,storage,acceptance,deductions,adSpend,cogs,operatingProfit",WB finance + ads + external COGS,CALCULATED,Needs agreed formula
+ext_mpstats_item_meta,nmId,"rating,comments,price,final_price,wallet_price,discount,seller,brand",MPStat item full,EXTERNAL_SOURCE,External card metrics
+ext_mpstats_item_day,nmId+date,"sales,balance,search_position_avg,search_visibility,search_words_count,comments,final_price,revenue_top_products_in_subject",MPStat item sales,EXTERNAL_SOURCE,External item/day metrics
+ext_mpstats_item_category_day,nmId+date,"sales,balance,final_price",MPStat item by category,EXTERNAL_SOURCE,External category series
+fact_entry_point_day,entryPoint+date,"views,opens,carts,orders,conversion",N/A,NOT_FOUND,No confirmed public API

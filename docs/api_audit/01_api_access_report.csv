@@ -1,0 +1,12 @@
+﻿block,status,source_system,token_name,method_label,raw_file,notes
+1. Справочник товаров,AVAILABLE,WB,WB_TOKEN,wb_content_cards_list,wb_content_cards_list.json,"10 test nmID: [243774773, 243774196, 1008581026, 1008578197, 187029454, 895521471, 895711726, 279857790, 370654254, 222850731]"
+2. Воронка на день,AVAILABLE,WB,WB_ANALYTICS_TOKEN,wb_sales_funnel_history,wb_sales_funnel_history.json,7-day daily funnel incl. 2026-05-27 and 2026-05-26
+3. Остатки,PARTIAL,WB,WB_ANALYTICS_TOKEN,wb_stocks_products + wb_stocks_offices + wb_stock_history_daily_zip,wb_stocks_products.json;wb_stocks_offices.json;wb_stock_history_daily.csv,Current snapshot direct; day history via CSV
+4. Расходы РК,PARTIAL,WB,WB_TOKEN,wb_adv_costs,wb_adv_costs.json,Spend direct on advertId; nmId mapping needs join
+5. Статистика РК,AVAILABLE,WB,WB_TOKEN,wb_adv_fullstats,wb_adv_fullstats.json,views/clicks/ctr/cpc/orders/spend/revenue present
+6. Ассоциированные корзины РК,AVAILABLE,WB,WB_TOKEN,wb_adv_fullstats,wb_adv_fullstats.json,atbs present on campaign/day/app/nm
+7. Точки входа,NOT_FOUND,WB,,,,No public seller API endpoint confirmed
+8. Локализация/регионы,PARTIAL,WB,WB_ANALYTICS_TOKEN,wb_region_sale + wb_stocks_offices,wb_region_sale.json;wb_stocks_offices.json,Regional sales and stock regions available; exact locality KPI not confirmed
+9. Поисковые запросы (Джем),AVAILABLE,WB,WB_ANALYTICS_TOKEN,wb_search_texts + wb_search_orders,wb_search_texts.json;wb_search_orders.json,Jam confirmed with 200 responses
+10. ВБро/операционная прибыль,CALCULATED,WB,WB_TOKEN,wb_report_detail_by_period,wb_report_detail_by_period.json,Need formula and external COGS
+11. Сравнение карточек и конкурентные данные через MPStat,PARTIAL,MPSTAT,MPSTATS_API_TOKEN,mpstats_item_full + mpstats_item_sales + mpstats_item_by_category,mpstats_item_full.json;mpstats_item_sales.json;mpstats_item_by_category.json,Item/day metrics available; direct competitor feed not assembled

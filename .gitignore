@@ -1,0 +1,69 @@
+```
+# Environment variables
+.env
+.env.local
+.env.*
+!.env.example
+secrets.toml
+.streamlit/secrets.toml
+credentials.json
+
+# Dependencies
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+
+# Build and distribution artifacts
+dist/
+build/
+*.egg
+*.whl
+pip-wheel-metadata/
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local data and uploads
+data/
+_api_audit_raw/
+data/raw/
+data/tmp/
+data/processed/*.csv
+*.xlsx
+*.xlsm
+*.tmp
+.tmp_*.xlsx
+*.local.xlsx
+*.local.xlsm
+
+# Python specific
+*.py[cod]
+*$py.class
+*$pyc.*
+*$pyo.*
+*.pot
+*.po
+*~
+.pytest_cache/
+.pytest_tmp/
+.coverage
+htmlcov/
+.coverage.*
+.nox/
+.tox/
+```
