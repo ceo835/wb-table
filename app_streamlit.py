@@ -263,6 +263,23 @@ SOURCE_FLAG_COLUMNS = [
     "has_localization_partial",
 ]
 
+PERIOD_DATA_METRIC_COLUMNS = [
+    "impressions",
+    "card_clicks",
+    "cart_count",
+    "order_count",
+    "order_sum",
+    "ad_campaign_spend_total",
+    "ad_views_total",
+    "ad_clicks_total",
+    "ad_atbs_total",
+    "ad_orders_total",
+    "current_stock_qty",
+    "current_mp_stock_qty",
+    "search_queries_count",
+    "local_orders_percent",
+]
+
 SUMMARY_KPI_CONFIG = [
     ("impressions", "Показы", 0, False),
     ("cart_count", "Корзины", 0, False),
@@ -799,6 +816,24 @@ def prepare_ad_campaign_product_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return prepared
 
 
+def filter_products_with_period_data(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "nm_id" not in df.columns:
+        return df.copy()
+
+    metric_columns = [column for column in PERIOD_DATA_METRIC_COLUMNS if column in df.columns]
+    if not metric_columns:
+        return df.copy()
+
+    has_period_data = (
+        df[metric_columns]
+        .notna()
+        .any(axis=1)
+        .groupby(df["nm_id"])
+        .transform("any")
+    )
+    return df[has_period_data].copy()
+
+
 def load_app_dataset() -> tuple[pd.DataFrame, str]:
     data_source = resolve_data_source()
     if data_source == "db":
@@ -1011,6 +1046,10 @@ def build_filtered_dataset(df: pd.DataFrame) -> pd.DataFrame:
         ads_only = st.checkbox("Показывать только товары с рекламой")
         if ads_only:
             filtered = filtered[filtered["has_ad_campaign"] | filtered["has_ad_cost"]]
+
+        show_products_without_data = st.checkbox("Показывать товары без данных", value=False)
+        if not show_products_without_data:
+            filtered = filter_products_with_period_data(filtered)
 
         no_data_only = st.checkbox("Показывать только товары без данных")
         if no_data_only:

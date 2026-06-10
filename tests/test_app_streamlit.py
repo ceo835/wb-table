@@ -7,6 +7,7 @@ from app_streamlit import (
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
     build_export_dataframe,
     build_data_quality_label,
+    filter_products_with_period_data,
     build_grouped_by_date_dataset,
     build_import_format_error,
     build_last_upload_result,
@@ -923,3 +924,120 @@ def test_password_helpers_allow_open_access_when_password_missing(monkeypatch) -
 
     assert get_app_password() is None
     assert is_password_protection_enabled() is False
+
+
+def test_filter_products_with_period_data_hides_products_without_any_business_metrics() -> None:
+    filtered = filter_products_with_period_data(
+        pd.DataFrame(
+            [
+                {
+                    "nm_id": 1,
+                    "supplier_article": "BlackWOM5",
+                    "report_date": "2026-06-06",
+                    "impressions": None,
+                    "card_clicks": None,
+                    "cart_count": None,
+                    "order_count": None,
+                    "order_sum": None,
+                    "ad_campaign_spend_total": None,
+                    "ad_views_total": None,
+                    "ad_clicks_total": None,
+                    "ad_atbs_total": None,
+                    "ad_orders_total": None,
+                    "current_stock_qty": None,
+                    "current_mp_stock_qty": None,
+                    "search_queries_count": None,
+                    "local_orders_percent": None,
+                },
+                {
+                    "nm_id": 1,
+                    "supplier_article": "BlackWOM5",
+                    "report_date": "2026-06-07",
+                    "impressions": 138486,
+                    "card_clicks": 6125,
+                    "cart_count": 818,
+                    "order_count": 218,
+                    "order_sum": 308241,
+                    "ad_campaign_spend_total": 26391.1,
+                    "ad_views_total": 128847,
+                    "ad_clicks_total": 3396,
+                    "ad_atbs_total": 614,
+                    "ad_orders_total": 161,
+                    "current_stock_qty": 8285,
+                    "current_mp_stock_qty": None,
+                    "search_queries_count": 100,
+                    "local_orders_percent": 72,
+                },
+                {
+                    "nm_id": 2,
+                    "supplier_article": "NoData",
+                    "report_date": "2026-06-06",
+                    "impressions": None,
+                    "card_clicks": None,
+                    "cart_count": None,
+                    "order_count": None,
+                    "order_sum": None,
+                    "ad_campaign_spend_total": None,
+                    "ad_views_total": None,
+                    "ad_clicks_total": None,
+                    "ad_atbs_total": None,
+                    "ad_orders_total": None,
+                    "current_stock_qty": None,
+                    "current_mp_stock_qty": None,
+                    "search_queries_count": None,
+                    "local_orders_percent": None,
+                },
+                {
+                    "nm_id": 2,
+                    "supplier_article": "NoData",
+                    "report_date": "2026-06-07",
+                    "impressions": None,
+                    "card_clicks": None,
+                    "cart_count": None,
+                    "order_count": None,
+                    "order_sum": None,
+                    "ad_campaign_spend_total": None,
+                    "ad_views_total": None,
+                    "ad_clicks_total": None,
+                    "ad_atbs_total": None,
+                    "ad_orders_total": None,
+                    "current_stock_qty": None,
+                    "current_mp_stock_qty": None,
+                    "search_queries_count": None,
+                    "local_orders_percent": None,
+                },
+            ]
+        )
+    )
+
+    assert filtered["nm_id"].unique().tolist() == [1]
+
+
+def test_filter_products_with_period_data_keeps_products_with_zero_but_non_null_metrics() -> None:
+    filtered = filter_products_with_period_data(
+        pd.DataFrame(
+            [
+                {
+                    "nm_id": 10,
+                    "supplier_article": "ZeroButReal",
+                    "report_date": "2026-06-07",
+                    "impressions": 0,
+                    "card_clicks": 0,
+                    "cart_count": 0,
+                    "order_count": 0,
+                    "order_sum": 0,
+                    "ad_campaign_spend_total": None,
+                    "ad_views_total": None,
+                    "ad_clicks_total": None,
+                    "ad_atbs_total": None,
+                    "ad_orders_total": None,
+                    "current_stock_qty": 0,
+                    "current_mp_stock_qty": None,
+                    "search_queries_count": 0,
+                    "local_orders_percent": 0,
+                }
+            ]
+        )
+    )
+
+    assert filtered["nm_id"].unique().tolist() == [10]
