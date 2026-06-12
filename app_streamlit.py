@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from sqlalchemy import select
@@ -39,6 +40,8 @@ AD_CAMPAIGN_PRODUCT_LABEL = "РК по товару"
 
 LATEST_MODE_LABEL = "Последняя дата + динамика"
 BY_DATE_MODE_LABEL = "По датам"
+CHART_THRESHOLD_CART_COST = 35.0
+CHART_THRESHOLD_CPO = 150.0
 
 DISPLAY_COLUMNS_BY_DATE = [
     "product_group_label",
@@ -680,7 +683,7 @@ def render_delta_metric(
 
 
 @st.cache_data(show_spinner=False)
-def load_dataset(path: str) -> pd.DataFrame:
+def load_dataset(path: str, cache_buster: float | None = None) -> pd.DataFrame:
     return prepare_dataframe(pd.read_csv(path))
 
 
@@ -857,11 +860,11 @@ def load_app_dataset() -> tuple[pd.DataFrame, str]:
     if not DATASET_PATH.exists():
         st.error("Сначала соберите dataset командой scripts/export_streamlit_v1_dataset.py")
         st.stop()
-    return load_dataset(str(DATASET_PATH)), "csv"
+    return load_dataset(str(DATASET_PATH), DATASET_PATH.stat().st_mtime), "csv"
 
 
 @st.cache_data(show_spinner=False)
-def load_ad_campaign_product_dataset(path: str) -> pd.DataFrame:
+def load_ad_campaign_product_dataset(path: str, cache_buster: float | None = None) -> pd.DataFrame:
     return prepare_ad_campaign_product_dataframe(pd.read_csv(path))
 
 
@@ -885,7 +888,10 @@ def load_ad_campaign_product_app_dataset(data_source: str) -> tuple[pd.DataFrame
         return pd.DataFrame(columns=AD_CAMPAIGN_PRODUCT_COLUMNS), (
             "Сначала соберите dataset командой scripts/export_ad_campaign_product_dataset.py"
         )
-    return load_ad_campaign_product_dataset(str(AD_CAMPAIGN_PRODUCT_DATASET_PATH)), None
+    return load_ad_campaign_product_dataset(
+        str(AD_CAMPAIGN_PRODUCT_DATASET_PATH),
+        AD_CAMPAIGN_PRODUCT_DATASET_PATH.stat().st_mtime,
+    ), None
 
 
 def save_uploaded_file_to_temp(uploaded_file: Any) -> Path:
@@ -986,12 +992,22 @@ def render_last_upload_result(last_result: dict[str, object] | None) -> None:
     st.dataframe(pd.DataFrame([last_result]), width="stretch", hide_index=True)
 
 
+def clear_streamlit_data_caches() -> None:
+    for cached_func in (
+        load_dataset,
+        load_dataset_from_db,
+        load_ad_campaign_product_dataset,
+        load_ad_campaign_product_dataset_from_db,
+    ):
+        try:
+            cached_func.clear()
+        except Exception:
+            pass
+
+
 def rebuild_mart_for_date(report_date: date) -> dict[str, Any]:
     result = build_mart_total_report(report_date, report_date, version="v2")
-    try:
-        load_dataset_from_db.clear()
-    except Exception:
-        pass
+    clear_streamlit_data_caches()
     return result
 
 
@@ -1000,10 +1016,7 @@ def refresh_streamlit_dataset() -> dict[str, Any]:
     if min_date is None or max_date is None:
         raise RuntimeError("В mart_total_report нет дат для экспорта dataset.")
     result = export_streamlit_v1_dataset(min_date, max_date)
-    try:
-        load_dataset.clear()
-    except Exception:
-        pass
+    clear_streamlit_data_caches()
     return result
 
 
@@ -1252,8 +1265,10 @@ def build_warnings(row: pd.Series, previous_row: pd.Series | None = None) -> lis
         warnings.append("Нет данных по товару")
     if bool(row.get("has_ad_campaign")) and (pd.isna(row.get("order_count")) or float(row.get("order_count") or 0) <= 0):
         warnings.append("Есть реклама, но нет заказов")
-    if not pd.isna(row.get("ad_cpo_calc")) and float(row["ad_cpo_calc"]) > 100:
+    if not pd.isna(row.get("ad_cpo_calc")) and float(row["ad_cpo_calc"]) > CHART_THRESHOLD_CPO:
         warnings.append("Высокий CPO")
+    if not pd.isna(row.get("ad_cost_per_cart_calc")) and float(row["ad_cost_per_cart_calc"]) > CHART_THRESHOLD_CART_COST:
+        warnings.append("Высокая стоимость корзины")
     if pd.isna(row.get("current_stock_qty")) or float(row.get("current_stock_qty") or 0) <= 0:
         warnings.append("Нет остатка")
     if row.get("entry_point_status") == "FILE_IMPORT_PENDING":
@@ -1262,6 +1277,11 @@ def build_warnings(row: pd.Series, previous_row: pd.Series | None = None) -> lis
         warnings.append("География ожидает файл")
     if row.get("vbro_status") == "MANUAL_PENDING":
         warnings.append("ВБро ожидает ручной ввод")
+    report_date = row.get("report_date")
+    if not pd.isna(report_date):
+        report_date_value = pd.to_datetime(report_date, errors="coerce")
+        if not pd.isna(report_date_value) and report_date_value.date() > (datetime.now().date() - timedelta(days=2)):
+            warnings.append("РК-данные за последние 1–2 дня могут быть неполными")
 
     if previous_row is not None:
         if not pd.isna(previous_row.get("order_count")) and float(previous_row.get("order_count") or 0) > 0:
@@ -1448,22 +1468,89 @@ def render_info_field(container: Any, label: str, value: object) -> None:
     container.write(fmt_text(value))
 
 
+def build_key_value_table(rows: list[tuple[str, object, int | None]]) -> pd.DataFrame:
+    formatted_rows: list[dict[str, str]] = []
+    for label, value, digits in rows:
+        if digits is None:
+            formatted_value = fmt_text(value)
+        else:
+            formatted_value = fmt_num(value, digits)
+        formatted_rows.append({"Показатель": label, "Значение": formatted_value})
+    return pd.DataFrame(formatted_rows)
+
+
+def render_compact_metric_table(title: str, rows: list[tuple[str, object, int | None]]) -> None:
+    st.subheader(title)
+    st.dataframe(
+        build_key_value_table(rows),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Показатель": st.column_config.TextColumn("Показатель", width="medium"),
+            "Значение": st.column_config.TextColumn("Значение", width="medium"),
+        },
+    )
+
+
+def render_grouped_kpi_row(
+    latest_row: pd.Series,
+    previous_row: pd.Series | None,
+    previous_date: object,
+    configs: list[tuple[str, str, int, bool, float | None, str | None]],
+) -> None:
+    cols = st.columns(len(configs))
+    for column, config in zip(cols, configs):
+        field_name, label, digits, lower_is_better, threshold, threshold_label = config
+        with column:
+            render_delta_metric(
+                label,
+                latest_row.get(field_name),
+                None if previous_row is None else previous_row.get(field_name),
+                previous_date,
+                digits=digits,
+                lower_is_better=lower_is_better,
+            )
+            value = latest_row.get(field_name)
+            if threshold is not None and not pd.isna(value) and float(value) > threshold and threshold_label:
+                st.caption(f"Превышение: {threshold_label}")
+
+
 def render_summary_kpis(latest_row: pd.Series, previous_row: pd.Series | None, previous_date: object) -> None:
     st.subheader("Основные KPI по последней дате")
-    metric_rows = [SUMMARY_KPI_CONFIG[:5], SUMMARY_KPI_CONFIG[5:]]
-    for config_row in metric_rows:
-        cols = st.columns(len(config_row))
-        for column, config in zip(cols, config_row):
-            field_name, label, digits, lower_is_better = config
-            with column:
-                render_delta_metric(
-                    label,
-                    latest_row.get(field_name),
-                    None if previous_row is None else previous_row.get(field_name),
-                    previous_date,
-                    digits=digits,
-                    lower_is_better=lower_is_better,
-                )
+    st.caption("Дельта считается к предыдущей доступной дате по товару.")
+    render_grouped_kpi_row(
+        latest_row,
+        previous_row,
+        previous_date,
+        [
+            ("cart_count", "Корзины", 0, False, None, None),
+            ("order_count", "Заказы", 0, False, None, None),
+            ("order_sum", "Сумма заказов", 2, False, None, None),
+            ("ad_cpo_calc", "CPO", 2, True, CHART_THRESHOLD_CPO, "CPO выше 150 руб."),
+        ],
+    )
+    render_grouped_kpi_row(
+        latest_row,
+        previous_row,
+        previous_date,
+        [
+            ("ad_campaign_spend_total", "Расход РК", 2, False, None, None),
+            ("ad_atbs_total", "Корзины РК", 0, False, None, None),
+            ("ad_orders_total", "Заказы РК", 0, False, None, None),
+            ("ad_cost_per_cart_calc", "Цена рекламной корзины", 2, True, CHART_THRESHOLD_CART_COST, "Цена корзины выше 35 руб."),
+        ],
+    )
+    render_grouped_kpi_row(
+        latest_row,
+        previous_row,
+        previous_date,
+        [
+            ("impressions", "Показы", 0, False, None, None),
+            ("search_queries_count", "Поисковые запросы", 0, False, None, None),
+            ("current_stock_qty", "Текущий остаток", 0, False, None, None),
+            ("ad_share_of_revenue_calc", "ДРР", 2, True, None, None),
+        ],
+    )
 
 
 def render_formula_details(detail_row: pd.Series, detail_date: object) -> None:
@@ -1524,28 +1611,82 @@ def render_formula_details(detail_row: pd.Series, detail_date: object) -> None:
     )
 
 
-def render_product_timeline_table(product_rows: pd.DataFrame) -> None:
-    st.subheader("Динамика по датам")
-    timeline = build_product_timeline_dataset(product_rows)
-    st.dataframe(
-        timeline,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "report_date": st.column_config.DateColumn("Дата"),
-            "impressions": st.column_config.NumberColumn("Показы", format="%.0f"),
-            "cart_count": st.column_config.NumberColumn("Корзины", format="%.0f"),
-            "order_count": st.column_config.NumberColumn("Заказы", format="%.0f"),
-            "order_sum": st.column_config.NumberColumn("Сумма заказов", format="%.2f"),
-            "ad_campaign_spend_total": st.column_config.NumberColumn("Расход РК по статистике", format="%.2f"),
-            "ad_atbs_total": st.column_config.NumberColumn("Корзины РК", format="%.0f"),
-            "ad_orders_total": st.column_config.NumberColumn("Заказы РК", format="%.0f"),
-            "ad_cpo_calc": st.column_config.NumberColumn("CPO", format="%.2f"),
-            "search_queries_count": st.column_config.NumberColumn("Поисковых запросов", format="%.0f"),
-            "current_stock_qty": st.column_config.NumberColumn("Текущий остаток", format="%.0f"),
-            "data_quality_status": st.column_config.TextColumn("Статус данных"),
-        },
+def render_product_charts_section(product_rows: pd.DataFrame) -> None:
+    st.subheader("Динамика товара")
+    chart_df = build_chart_metrics_by_date(product_rows)
+    if chart_df.empty:
+        st.info("Нет данных за выбранный период.")
+        return
+
+    carts_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map={"cart_count": "Итоговые корзины", "ad_atbs_total": "Корзины РК"},
+        y_title="Корзины, шт.",
+        tooltip_value_title="Значение, шт.",
+        value_format=".0f",
+        line_colors=["#2563eb", "#f97316"],
     )
+    st.markdown("#### Корзины товара")
+    if carts_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(carts_chart, width="stretch")
+
+    cart_cost_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map={"total_cart_cost": "Стоимость корзины ИТОГ", "ad_cart_cost": "Стоимость корзины РК"},
+        y_title="Стоимость, руб.",
+        tooltip_value_title="Стоимость, руб.",
+        value_format=".1f",
+        line_colors=["#0f766e", "#f59e0b"],
+        threshold=CHART_THRESHOLD_CART_COST,
+        threshold_label="Порог 35 руб.",
+    )
+    st.markdown("#### Стоимость корзины товара")
+    if cart_cost_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(cart_cost_chart, width="stretch")
+
+    cpo_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map={"total_cpo": "CPO ИТОГ", "ad_cpo": "CPO РК"},
+        y_title="CPO, руб.",
+        tooltip_value_title="CPO, руб.",
+        value_format=".1f",
+        line_colors=["#7c3aed", "#ef4444"],
+        threshold=CHART_THRESHOLD_CPO,
+        threshold_label="Порог 150 руб.",
+    )
+    st.markdown("#### CPO товара")
+    if cpo_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(cpo_chart, width="stretch")
+
+
+def render_product_timeline_table(product_rows: pd.DataFrame) -> None:
+    with st.expander("Таблица динамики по датам", expanded=False):
+        timeline = build_product_timeline_dataset(product_rows)
+        st.dataframe(
+            timeline,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "report_date": st.column_config.DateColumn("Дата"),
+                "impressions": st.column_config.NumberColumn("Показы", format="%.0f"),
+                "cart_count": st.column_config.NumberColumn("Корзины", format="%.0f"),
+                "order_count": st.column_config.NumberColumn("Заказы", format="%.0f"),
+                "order_sum": st.column_config.NumberColumn("Сумма заказов", format="%.2f"),
+                "ad_campaign_spend_total": st.column_config.NumberColumn("Расход РК по статистике", format="%.2f"),
+                "ad_atbs_total": st.column_config.NumberColumn("Корзины РК", format="%.0f"),
+                "ad_orders_total": st.column_config.NumberColumn("Заказы РК", format="%.0f"),
+                "ad_cpo_calc": st.column_config.NumberColumn("CPO", format="%.2f"),
+                "search_queries_count": st.column_config.NumberColumn("Поисковых запросов", format="%.0f"),
+                "current_stock_qty": st.column_config.NumberColumn("Текущий остаток", format="%.0f"),
+                "data_quality_status": st.column_config.TextColumn("Статус данных"),
+            },
+        )
 
 
 def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object) -> None:
@@ -1558,22 +1699,26 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
     period_end = context["period_end"]
 
     st.subheader("Карточка товара")
+    st.markdown(f"**{fmt_text(latest_row.get('supplier_article'))} | {fmt_text(latest_row.get('nm_id'))}**")
+    st.caption(fmt_text(latest_row.get("title")))
 
-    info_cols = st.columns(4)
-    render_info_field(info_cols[0], "Товар", latest_row.get("supplier_article"))
-    render_info_field(info_cols[1], "Артикул WB", latest_row.get("nm_id"))
-    render_info_field(info_cols[2], "Бренд", latest_row.get("brand"))
-    render_info_field(info_cols[3], "Предмет", latest_row.get("subject"))
+    passport_cols_top = st.columns(3)
+    render_info_field(passport_cols_top[0], "Артикул продавца", latest_row.get("supplier_article"))
+    render_info_field(passport_cols_top[1], "Артикул WB", latest_row.get("nm_id"))
+    render_info_field(passport_cols_top[2], "Бренд", latest_row.get("brand"))
 
-    extra_cols = st.columns(4)
-    render_info_field(extra_cols[0], "Название", latest_row.get("title"))
-    render_info_field(extra_cols[1], "Доступный период", f"{period_start} — {period_end}")
-    render_info_field(extra_cols[2], "Последняя дата", latest_date)
+    passport_cols_mid = st.columns(3)
+    render_info_field(passport_cols_mid[0], "Предмет", latest_row.get("subject"))
+    render_info_field(passport_cols_mid[1], "Доступный период", f"{period_start} — {period_end}")
+    render_info_field(passport_cols_mid[2], "Последняя дата", latest_date)
+
+    passport_cols_bottom = st.columns(2)
     render_info_field(
-        extra_cols[3],
+        passport_cols_bottom[0],
         "Дата сравнения",
         previous_date if previous_date is not None else "Нет предыдущей даты для сравнения",
     )
+    render_info_field(passport_cols_bottom[1], "Статус данных", latest_row.get("data_quality_label"))
 
     render_summary_kpis(latest_row, previous_row, previous_date)
 
@@ -1584,50 +1729,66 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
         st.error("Не удалось найти строку для выбранной даты детализации.")
         return
 
-    st.subheader("Воронка за дату")
-    funnel_cols = st.columns(5)
-    funnel_cols[0].metric("Показы", fmt_num(detail_row.get("impressions"), 0))
-    funnel_cols[1].metric("Переходы в карточку", fmt_num(detail_row.get("card_clicks"), 0))
-    funnel_cols[2].metric("CTR", fmt_num(detail_row.get("ctr_calc")))
-    funnel_cols[3].metric("Корзины", fmt_num(detail_row.get("cart_count"), 0))
-    funnel_cols[4].metric("Конверсия в корзину", fmt_num(detail_row.get("add_to_cart_conversion_calc")))
+    render_compact_metric_table(
+        "Воронка за дату",
+        [
+            ("Показы", detail_row.get("impressions"), 0),
+            ("Переходы в карточку", detail_row.get("card_clicks"), 0),
+            ("CTR", detail_row.get("ctr_calc"), 2),
+            ("Корзины", detail_row.get("cart_count"), 0),
+            ("Конверсия в корзину", detail_row.get("add_to_cart_conversion_calc"), 2),
+            ("Заказы", detail_row.get("order_count"), 0),
+            ("Конверсия корзина → заказ", detail_row.get("cart_to_order_conversion_calc"), 2),
+            ("Сумма заказов", detail_row.get("order_sum"), 2),
+        ],
+    )
 
-    funnel_cols2 = st.columns(3)
-    funnel_cols2[0].metric("Заказы", fmt_num(detail_row.get("order_count"), 0))
-    funnel_cols2[1].metric("Конверсия корзина → заказ", fmt_num(detail_row.get("cart_to_order_conversion_calc")))
-    funnel_cols2[2].metric("Сумма заказов", fmt_num(detail_row.get("order_sum")))
+    render_compact_metric_table(
+        "Реклама за дату",
+        [
+            ("Финансовые списания рекламы", detail_row.get("ad_cost_writeoff_total"), 2),
+            ("Расход РК по статистике", detail_row.get("ad_campaign_spend_total"), 2),
+            ("Показы РК", detail_row.get("ad_views_total"), 0),
+            ("Клики РК", detail_row.get("ad_clicks_total"), 0),
+            ("Корзины РК", detail_row.get("ad_atbs_total"), 0),
+            ("Заказы РК", detail_row.get("ad_orders_total"), 0),
+            ("CPC", detail_row.get("ad_cpc_calc"), 2),
+            ("CPM", detail_row.get("ad_cpm_calc"), 2),
+            ("Цена рекламной корзины", detail_row.get("ad_cost_per_cart_calc"), 2),
+            ("CPO", detail_row.get("ad_cpo_calc"), 2),
+            ("ДРР / Доля рекламы от суммы заказов, %", detail_row.get("ad_share_of_revenue_calc"), 2),
+        ],
+    )
+    with st.expander("Техническое пояснение", expanded=False):
+        st.markdown(
+            """
+            - `Финансовые списания рекламы` = данные из `ad_cost_writeoff_total`
+            - `Расход РК по статистике` = данные из `ad_campaign_spend_total`
+            """
+        )
 
-    st.subheader("Реклама за дату")
-    st.caption("ad_cost_writeoff_total = списания / РасходРК, ad_campaign_spend_total = fullstats / РК стата")
-    ad_cols = st.columns(5)
-    ad_cols[0].metric("Финансовые списания рекламы", fmt_num(detail_row.get("ad_cost_writeoff_total")))
-    ad_cols[1].metric("Расход РК по статистике", fmt_num(detail_row.get("ad_campaign_spend_total")))
-    ad_cols[2].metric("Показы РК", fmt_num(detail_row.get("ad_views_total"), 0))
-    ad_cols[3].metric("Клики РК", fmt_num(detail_row.get("ad_clicks_total"), 0))
-    ad_cols[4].metric("Корзины РК", fmt_num(detail_row.get("ad_atbs_total"), 0))
+    render_compact_metric_table(
+        "Корзины рекламы по типам",
+        [
+            ("Прямые", detail_row.get("direct_ad_atbs"), 0),
+            ("Ассоциированные", detail_row.get("associated_ad_atbs"), 0),
+            ("Мультикарточка", detail_row.get("multicard_ad_atbs"), 0),
+            ("Unknown", detail_row.get("unknown_ad_atbs"), 0),
+        ],
+    )
 
-    ad_cols2 = st.columns(5)
-    ad_cols2[0].metric("Заказы РК", fmt_num(detail_row.get("ad_orders_total"), 0))
-    ad_cols2[1].metric("CPC", fmt_num(detail_row.get("ad_cpc_calc")))
-    ad_cols2[2].metric("CPM", fmt_num(detail_row.get("ad_cpm_calc")))
-    ad_cols2[3].metric("Цена рекламной корзины", fmt_num(detail_row.get("ad_cost_per_cart_calc")))
-    ad_cols2[4].metric("CPO", fmt_num(detail_row.get("ad_cpo_calc")))
+    render_compact_metric_table(
+        "Поиск и остатки за дату",
+        [
+            ("Количество поисковых запросов", detail_row.get("search_queries_count"), 0),
+            ("Текущий остаток", detail_row.get("current_stock_qty"), 0),
+        ],
+    )
 
-    st.metric("Доля рекламы от суммы заказов, %", fmt_num(detail_row.get("ad_share_of_revenue_calc")))
+    with st.expander("Проверка формул", expanded=False):
+        render_formula_details(detail_row, detail_date)
 
-    st.subheader("Корзины рекламы по типам")
-    bucket_cols = st.columns(4)
-    bucket_cols[0].metric("Прямые", fmt_num(detail_row.get("direct_ad_atbs"), 0))
-    bucket_cols[1].metric("Ассоциированные", fmt_num(detail_row.get("associated_ad_atbs"), 0))
-    bucket_cols[2].metric("Мультикарточка", fmt_num(detail_row.get("multicard_ad_atbs"), 0))
-    bucket_cols[3].metric("Unknown", fmt_num(detail_row.get("unknown_ad_atbs"), 0))
-
-    st.subheader("Поиск и остатки за дату")
-    other_cols = st.columns(2)
-    other_cols[0].metric("Количество поисковых запросов", fmt_num(detail_row.get("search_queries_count"), 0))
-    other_cols[1].metric("Текущий остаток", fmt_num(detail_row.get("current_stock_qty"), 0))
-
-    render_formula_details(detail_row, detail_date)
+    render_product_charts_section(product_rows)
     render_product_timeline_table(product_rows)
 
     st.subheader("Внимание")
@@ -1639,26 +1800,389 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
         st.success("Явных предупреждений по товару нет")
 
 
-def render_charts_tab(product_rows: pd.DataFrame) -> None:
-    title = f"{fmt_text(product_rows.iloc[0].get('supplier_article'))} / {int(product_rows.iloc[0]['nm_id'])}"
-    st.subheader(f"Динамика товара {title}")
-    st.caption("Данные по доступным датам из текущего dataset")
-    if len(product_rows["report_date"].dropna().unique()) < 2:
-        st.info("Для графика нужно больше дат")
+def safe_chart_divide(numerator: object, denominator: object) -> float | None:
+    if pd.isna(numerator) or pd.isna(denominator):
+        return None
+    denominator_value = float(denominator)
+    if denominator_value == 0:
+        return None
+    return float(numerator) / denominator_value
+
+
+def build_chart_scope_rows(
+    filtered: pd.DataFrame,
+    aggregation_level: str,
+    selected_product_label: str | None,
+    option_map: dict[str, dict[str, object]],
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    if aggregation_level == "Артикул" and selected_product_label:
+        product_rows = get_selected_product_rows(filtered, selected_product_label, option_map).copy()
+        first_row = product_rows.iloc[0] if not product_rows.empty else pd.Series(dtype=object)
+        context = {
+            "scope": aggregation_level,
+            "supplier_article": first_row.get("supplier_article"),
+            "nm_id": first_row.get("nm_id"),
+            "title": first_row.get("title"),
+        }
+        return product_rows, context
+
+    context = {
+        "scope": "Кабинет",
+        "supplier_article": "Все товары",
+        "nm_id": None,
+        "title": "Сумма по выбранным товарам",
+    }
+    return filtered.copy(), context
+
+
+def build_chart_metrics_by_date(scope_rows: pd.DataFrame) -> pd.DataFrame:
+    if scope_rows.empty:
+        return pd.DataFrame()
+
+    aggregation_columns = [
+        "cart_count",
+        "ad_atbs_total",
+        "order_count",
+        "ad_orders_total",
+        "ad_campaign_spend_total",
+    ]
+    available_columns = [column for column in aggregation_columns if column in scope_rows.columns]
+    if not available_columns:
+        return pd.DataFrame()
+
+    grouped = (
+        scope_rows.dropna(subset=["report_date"])
+        .groupby("report_date", as_index=False)[available_columns]
+        .sum(min_count=1)
+        .sort_values("report_date")
+    )
+    grouped["total_cart_cost"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("cart_count")),
+        axis=1,
+    )
+    grouped["ad_cart_cost"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("ad_atbs_total")),
+        axis=1,
+    )
+    grouped["total_cpo"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("order_count")),
+        axis=1,
+    )
+    grouped["ad_cpo"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("ad_orders_total")),
+        axis=1,
+    )
+    return grouped
+
+
+def build_chart_series_dataframe(
+    chart_df: pd.DataFrame,
+    series_map: dict[str, str],
+    threshold: float | None = None,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for source_column, label in series_map.items():
+        if source_column not in chart_df.columns:
+            continue
+        frame = chart_df[["report_date", source_column]].rename(columns={source_column: "value"}).copy()
+        frame["series"] = label
+        frame = frame[frame["value"].notna()]
+        if frame.empty:
+            continue
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(columns=["report_date", "value", "series", "is_alert"])
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["report_date"] = pd.to_datetime(combined["report_date"], errors="coerce").dt.date
+    combined["is_alert"] = False if threshold is None else combined["value"] > threshold
+    return combined
+
+
+def build_user_friendly_chart(
+    *,
+    chart_df: pd.DataFrame,
+    series_map: dict[str, str],
+    y_title: str,
+    tooltip_value_title: str,
+    value_format: str,
+    line_colors: list[str],
+    threshold: float | None = None,
+    threshold_label: str | None = None,
+) -> alt.Chart | None:
+    series_df = build_chart_series_dataframe(chart_df, series_map, threshold=threshold)
+    if series_df.empty:
+        return None
+
+    base = alt.Chart(series_df).encode(
+        x=alt.X(
+            "report_date:T",
+            title="Дата",
+            axis=alt.Axis(format="%d.%m", labelAngle=0, tickCount=min(max(len(chart_df), 2), 10)),
+        ),
+        y=alt.Y(
+            "value:Q",
+            title=y_title,
+            axis=alt.Axis(format=value_format),
+            scale=alt.Scale(zero=True, nice=True),
+        ),
+        color=alt.Color(
+            "series:N",
+            title="Показатель",
+            scale=alt.Scale(domain=list(series_map.values()), range=line_colors[: len(series_map)]),
+        ),
+        tooltip=[
+            alt.Tooltip("report_date:T", title="Дата", format="%d.%m.%Y"),
+            alt.Tooltip("series:N", title="Показатель"),
+            alt.Tooltip("value:Q", title=tooltip_value_title, format=value_format),
+        ],
+    )
+
+    layers: list[alt.Chart] = [
+        base.mark_line(strokeWidth=3),
+        base.mark_circle(size=55),
+    ]
+
+    if threshold is not None and threshold_label:
+        threshold_df = pd.DataFrame({"threshold": [threshold], "label": [threshold_label]})
+        layers.append(
+            alt.Chart(threshold_df).mark_rule(color="#dc2626", strokeDash=[6, 4]).encode(y="threshold:Q")
+        )
+        layers.append(
+            alt.Chart(threshold_df)
+            .mark_text(color="#dc2626", align="left", dx=8, dy=-6, fontSize=12)
+            .encode(x=alt.value(8), y="threshold:Q", text="label:N")
+        )
+        alert_df = series_df[series_df["is_alert"]].copy()
+        if not alert_df.empty:
+            layers.append(
+                alt.Chart(alert_df)
+                .mark_circle(size=90, color="#dc2626")
+                .encode(
+                    x=alt.X("report_date:T", title="Дата", axis=alt.Axis(format="%d.%m", labelAngle=0)),
+                    y=alt.Y("value:Q", title=y_title, axis=alt.Axis(format=value_format)),
+                    tooltip=[
+                        alt.Tooltip("report_date:T", title="Дата", format="%d.%m.%Y"),
+                        alt.Tooltip("series:N", title="Показатель"),
+                        alt.Tooltip("value:Q", title=tooltip_value_title, format=value_format),
+                    ],
+                )
+            )
+
+    return alt.layer(*layers).resolve_scale(color="shared").properties(height=320)
+
+
+def format_chart_kpi_value(value: float | None, digits: int = 1, suffix: str = "") -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    if digits == 0:
+        return f"{int(round(float(value))):,}".replace(",", " ") + suffix
+    return f"{float(value):,.{digits}f}".replace(",", " ") + suffix
+
+
+def render_chart_kpi_card(
+    *,
+    label: str,
+    value: float | None,
+    digits: int,
+    suffix: str = "",
+    threshold: float | None = None,
+) -> None:
+    is_alert = threshold is not None and value is not None and not pd.isna(value) and float(value) > threshold
+    background = "#fff1f2" if is_alert else "#f8fafc"
+    border = "#ef4444" if is_alert else "#dbe4ee"
+    caption = f"Порог превышен: {threshold:g}{suffix}" if is_alert and threshold is not None else "&nbsp;"
+    st.markdown(
+        f"""
+        <div style="border:1px solid {border}; background:{background}; border-radius:12px; padding:14px; min-height:120px;">
+            <div style="font-size:13px; color:#475569; margin-bottom:8px;">{label}</div>
+            <div style="font-size:28px; font-weight:700; color:#0f172a;">{format_chart_kpi_value(value, digits, suffix)}</div>
+            <div style="font-size:12px; color:#b91c1c; margin-top:8px;">{caption}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def build_threshold_breaches_table(chart_df: pd.DataFrame, context: dict[str, object]) -> pd.DataFrame:
+    if chart_df.empty:
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = []
+    metrics = [
+        ("total_cart_cost", "Стоимость корзины ИТОГО", CHART_THRESHOLD_CART_COST),
+        ("ad_cart_cost", "Стоимость корзины РК", CHART_THRESHOLD_CART_COST),
+        ("total_cpo", "CPO ИТОГО", CHART_THRESHOLD_CPO),
+        ("ad_cpo", "CPO РК", CHART_THRESHOLD_CPO),
+    ]
+    for _, row in chart_df.iterrows():
+        for field_name, label, threshold in metrics:
+            value = row.get(field_name)
+            if pd.isna(value) or float(value) <= threshold:
+                continue
+            rows.append(
+                {
+                    "Дата": row.get("report_date"),
+                    "Артикул продавца": context.get("supplier_article") or "Все товары",
+                    "Артикул WB": context.get("nm_id"),
+                    "Название товара": context.get("title") or "Сумма по выбранным товарам",
+                    "Показатель": label,
+                    "Значение": round(float(value), 1),
+                    "Порог": threshold,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def render_charts_tab(
+    filtered: pd.DataFrame,
+    preselected_product_label: str | None,
+    option_map: dict[str, dict[str, object]],
+) -> None:
+    st.subheader("Корзины и эффективность")
+    st.caption("Динамика корзин, стоимости корзины и CPO по выбранному периоду.")
+
+    aggregation_level = st.radio("Уровень агрегации", options=["Кабинет", "Артикул"], horizontal=True)
+    selected_product_label = preselected_product_label
+    if aggregation_level == "Артикул":
+        product_options = list(option_map.keys())
+        if not product_options:
+            st.info("Нет данных за выбранный период.")
+            return
+        default_index = product_options.index(preselected_product_label) if preselected_product_label in product_options else 0
+        selected_product_label = st.selectbox("Артикул", options=product_options, index=default_index)
+
+    scope_rows, context = build_chart_scope_rows(filtered, aggregation_level, selected_product_label, option_map)
+    chart_df = build_chart_metrics_by_date(scope_rows)
+    if chart_df.empty:
+        st.info("Нет данных за выбранный период.")
         return
 
-    chart_df = product_rows.sort_values("report_date").set_index("report_date")
-    st.write("**Заказы по датам**")
-    st.line_chart(chart_df[["order_count"]], width="stretch")
-    st.write("**Сумма заказов по датам**")
-    st.line_chart(chart_df[["order_sum"]], width="stretch")
-
-    ad_chart_df = chart_df[["ad_campaign_spend_total", "ad_cpo_calc"]].copy()
-    if ad_chart_df.dropna(how="all").empty:
-        st.info("Для графика нужно больше данных по рекламе")
+    if aggregation_level == "Кабинет":
+        st.info("Графики построены по сумме всех товаров, попавших в текущие фильтры периода.")
     else:
-        st.write("**Расход рекламы и CPO по датам**")
-        st.line_chart(ad_chart_df, width="stretch")
+        article_caption = f"{fmt_text(context.get('supplier_article'))} | {fmt_text(context.get('nm_id'))} | {fmt_text(context.get('title'))}"
+        st.caption(f"Выбранный товар: {article_caption}")
+
+    total_carts = chart_df["cart_count"].sum(min_count=1) if "cart_count" in chart_df.columns else None
+    ad_carts = chart_df["ad_atbs_total"].sum(min_count=1) if "ad_atbs_total" in chart_df.columns else None
+    total_orders = chart_df["order_count"].sum(min_count=1) if "order_count" in chart_df.columns else None
+    ad_orders = chart_df["ad_orders_total"].sum(min_count=1) if "ad_orders_total" in chart_df.columns else None
+    ad_spend = chart_df["ad_campaign_spend_total"].sum(min_count=1) if "ad_campaign_spend_total" in chart_df.columns else None
+
+    total_cart_cost = safe_chart_divide(ad_spend, total_carts)
+    ad_cart_cost = safe_chart_divide(ad_spend, ad_carts)
+    total_cpo = safe_chart_divide(ad_spend, total_orders)
+    ad_cpo = safe_chart_divide(ad_spend, ad_orders)
+
+    kpi_cols = st.columns(6)
+    with kpi_cols[0]:
+        render_chart_kpi_card(label="Итоговые корзины", value=total_carts, digits=0)
+    with kpi_cols[1]:
+        render_chart_kpi_card(label="Корзины РК", value=ad_carts, digits=0)
+    with kpi_cols[2]:
+        render_chart_kpi_card(
+            label="Стоимость корзины ИТОГО",
+            value=total_cart_cost,
+            digits=1,
+            suffix=" руб.",
+            threshold=CHART_THRESHOLD_CART_COST,
+        )
+    with kpi_cols[3]:
+        render_chart_kpi_card(
+            label="Стоимость корзины РК",
+            value=ad_cart_cost,
+            digits=1,
+            suffix=" руб.",
+            threshold=CHART_THRESHOLD_CART_COST,
+        )
+    with kpi_cols[4]:
+        render_chart_kpi_card(
+            label="CPO ИТОГО",
+            value=total_cpo,
+            digits=1,
+            suffix=" руб.",
+            threshold=CHART_THRESHOLD_CPO,
+        )
+    with kpi_cols[5]:
+        render_chart_kpi_card(
+            label="CPO РК",
+            value=ad_cpo,
+            digits=1,
+            suffix=" руб.",
+            threshold=CHART_THRESHOLD_CPO,
+        )
+
+    latest_report_date = chart_df["report_date"].dropna().max() if "report_date" in chart_df.columns else None
+    if latest_report_date and latest_report_date > (datetime.now().date() - timedelta(days=2)):
+        st.warning("Корзины РК за последние 1–2 дня могут быть неполными.")
+
+    st.markdown("### Динамика корзин")
+    st.caption("Итоговые корзины и корзины из рекламы по дням.")
+    carts_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map={"cart_count": "Итоговые корзины", "ad_atbs_total": "Корзины РК"},
+        y_title="Корзины, шт.",
+        tooltip_value_title="Значение, шт.",
+        value_format=".0f",
+        line_colors=["#2563eb", "#f97316"],
+    )
+    if carts_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(carts_chart, width="stretch")
+
+    st.markdown("### Стоимость корзины")
+    st.caption("Сколько рублей рекламного расхода приходится на одну корзину.")
+    cart_cost_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map={"total_cart_cost": "Стоимость корзины ИТОГО", "ad_cart_cost": "Стоимость корзины РК"},
+        y_title="Стоимость, руб.",
+        tooltip_value_title="Стоимость, руб.",
+        value_format=".1f",
+        line_colors=["#0f766e", "#f59e0b"],
+        threshold=CHART_THRESHOLD_CART_COST,
+        threshold_label="Порог 35 руб.",
+    )
+    if cart_cost_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(cart_cost_chart, width="stretch")
+
+    st.markdown("### CPO")
+    st.caption("Стоимость одного заказа.")
+    cpo_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map={"total_cpo": "CPO ИТОГО", "ad_cpo": "CPO РК"},
+        y_title="CPO, руб.",
+        tooltip_value_title="CPO, руб.",
+        value_format=".1f",
+        line_colors=["#7c3aed", "#ef4444"],
+        threshold=CHART_THRESHOLD_CPO,
+        threshold_label="Порог 150 руб.",
+    )
+    if cpo_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(cpo_chart, width="stretch")
+
+    st.markdown("### Превышения порогов")
+    breaches_df = build_threshold_breaches_table(chart_df, context)
+    if breaches_df.empty:
+        st.success("Превышений по выбранному периоду нет.")
+    else:
+        st.dataframe(
+            breaches_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Дата": st.column_config.DateColumn("Дата"),
+                "Артикул WB": st.column_config.NumberColumn("Артикул WB", format="%d"),
+                "Значение": st.column_config.NumberColumn("Значение", format="%.1f"),
+                "Порог": st.column_config.NumberColumn("Порог", format="%.1f"),
+            },
+        )
 
 
 def render_sources_tab(latest_row: pd.Series) -> None:
@@ -1942,6 +2466,9 @@ def main() -> None:
     st.title("WB ИТОГО")
     st.caption("Витрина по товарам на основе mart_total_report v2")
     render_password_gate()
+    if st.button("Обновить данные из источника", width="content"):
+        clear_streamlit_data_caches()
+        st.rerun()
 
     df, data_source = load_app_dataset()
     ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
@@ -1981,7 +2508,7 @@ def main() -> None:
     with tab_product:
         render_product_tab(product_rows, default_detail_date)
     with tab_charts:
-        render_charts_tab(product_rows)
+        render_charts_tab(filtered, selected_product_label, option_map)
     with tab_sources:
         render_sources_tab(latest_row)
     with tab_upload:

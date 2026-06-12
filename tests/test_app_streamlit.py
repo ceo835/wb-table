@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pandas as pd
 
 from app_streamlit import (
+    CHART_THRESHOLD_CART_COST,
+    CHART_THRESHOLD_CPO,
     DISPLAY_COLUMNS_BY_DATE,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
+    build_chart_metrics_by_date,
+    build_threshold_breaches_table,
     build_export_dataframe,
     build_data_quality_label,
     filter_products_with_period_data,
@@ -267,6 +273,88 @@ def test_build_export_dataframe_fills_group_label_for_every_row() -> None:
     assert export_df.iloc[1, 0] == "BlackWOM5 | 197330807"
 
 
+def test_build_chart_metrics_by_date_calculates_user_friendly_metrics() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-05",
+                "cart_count": 10,
+                "ad_atbs_total": 5,
+                "order_count": 4,
+                "ad_orders_total": 2,
+                "ad_campaign_spend_total": 200,
+            },
+            {
+                "report_date": "2026-06-05",
+                "cart_count": 5,
+                "ad_atbs_total": 5,
+                "order_count": 1,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 100,
+            },
+            {
+                "report_date": "2026-06-06",
+                "cart_count": None,
+                "ad_atbs_total": 0,
+                "order_count": 0,
+                "ad_orders_total": None,
+                "ad_campaign_spend_total": 50,
+            },
+        ]
+    )
+
+    result = build_chart_metrics_by_date(source_df)
+
+    first = result.iloc[0]
+    second = result.iloc[1]
+    assert float(first["cart_count"]) == 15.0
+    assert float(first["ad_atbs_total"]) == 10.0
+    assert float(first["total_cart_cost"]) == 20.0
+    assert float(first["ad_cart_cost"]) == 30.0
+    assert float(first["total_cpo"]) == 60.0
+    assert float(first["ad_cpo"]) == 100.0
+    assert pd.isna(second["total_cart_cost"])
+    assert pd.isna(second["ad_cart_cost"])
+    assert pd.isna(second["total_cpo"])
+    assert pd.isna(second["ad_cpo"])
+
+
+def test_build_threshold_breaches_table_returns_only_rows_above_thresholds() -> None:
+    chart_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-05",
+                "total_cart_cost": CHART_THRESHOLD_CART_COST + 1,
+                "ad_cart_cost": CHART_THRESHOLD_CART_COST - 1,
+                "total_cpo": CHART_THRESHOLD_CPO + 5,
+                "ad_cpo": CHART_THRESHOLD_CPO + 10,
+            },
+            {
+                "report_date": "2026-06-06",
+                "total_cart_cost": CHART_THRESHOLD_CART_COST - 1,
+                "ad_cart_cost": CHART_THRESHOLD_CART_COST - 1,
+                "total_cpo": CHART_THRESHOLD_CPO - 1,
+                "ad_cpo": CHART_THRESHOLD_CPO - 1,
+            },
+        ]
+    )
+
+    context = {
+        "supplier_article": "BlackWOM5",
+        "nm_id": 197330807,
+        "title": "Трусы",
+    }
+    result = build_threshold_breaches_table(chart_df, context)
+
+    assert len(result) == 3
+    assert set(result["Показатель"].tolist()) == {
+        "Стоимость корзины ИТОГО",
+        "CPO ИТОГО",
+        "CPO РК",
+    }
+    assert set(result["Артикул продавца"].tolist()) == {"BlackWOM5"}
+
+
 def test_prepare_dataframe_keeps_new_itogo_formula_fields() -> None:
     df = pd.DataFrame(
         [
@@ -363,6 +451,29 @@ def test_build_warnings_includes_dynamic_warnings() -> None:
     assert "Расход рекламы вырос" in warnings
     assert "CPO вырос" in warnings
     assert "Остаток снизился" in warnings
+
+
+def test_build_warnings_includes_threshold_and_recent_ad_warnings() -> None:
+    row = pd.Series(
+        {
+            "data_quality_status": "OK_PARTIAL_SOURCES",
+            "has_ad_campaign": False,
+            "order_count": 1,
+            "current_stock_qty": 10,
+            "entry_point_status": None,
+            "orders_geography_status": None,
+            "vbro_status": None,
+            "ad_cpo_calc": 151,
+            "ad_cost_per_cart_calc": 36,
+            "report_date": (datetime.now().date() - timedelta(days=1)).isoformat(),
+        }
+    )
+
+    warnings = build_warnings(row, None)
+
+    assert "Высокий CPO" in warnings
+    assert "Высокая стоимость корзины" in warnings
+    assert "РК-данные за последние 1–2 дня могут быть неполными" in warnings
 
 
 def test_build_data_quality_label_maps_user_friendly_labels() -> None:
