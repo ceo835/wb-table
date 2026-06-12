@@ -27,6 +27,8 @@ from src.db.session import session_scope
 from src.importers.entry_points_importer import import_entry_points_xlsx
 from src.importers.orders_geography_importer import import_orders_geography_xlsx
 from src.streamlit_dataset import (
+    AD_ZERO_FILL_FIELDS,
+    FUNNEL_ZERO_FILL_FIELDS,
     NOTE_COLUMNS,
     build_data_quality_label as shared_build_data_quality_label,
     enrich_streamlit_row as shared_enrich_streamlit_row,
@@ -85,6 +87,7 @@ DISPLAY_COLUMNS_BY_DATE = [
 TECHNICAL_NOTE_COLUMNS = [
     "impressions_source_note",
     "funnel_data_note",
+    "ad_data_note",
     "card_clicks_note",
     "search_data_note",
     "stock_data_note",
@@ -364,6 +367,7 @@ EXPORT_COLUMN_LABELS = {
     "data_quality_status": "Технический статус данных",
     "data_quality_label": "Статус данных",
     "funnel_data_note": "Note: Воронка",
+    "ad_data_note": "Note: Реклама",
     "card_clicks_note": "Note: Переходы в карточку",
     "search_data_note": "Note: Поиск",
     "stock_data_note": "Note: Остатки",
@@ -803,6 +807,7 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for column in NOTE_COLUMNS:
         if column not in enriched.columns:
             enriched[column] = "—"
+    enriched.attrs["display_coverage"] = build_display_coverage_summary(prepared, enriched)
     return enriched
 
 
@@ -835,6 +840,57 @@ def filter_products_with_period_data(df: pd.DataFrame) -> pd.DataFrame:
         .transform("any")
     )
     return df[has_period_data].copy()
+
+
+def build_debug_snapshot(stage: str, df: pd.DataFrame) -> dict[str, object]:
+    return {
+        "stage": stage,
+        "rows": int(len(df)),
+        "unique_nm": int(df["nm_id"].nunique()) if "nm_id" in df.columns else 0,
+    }
+
+
+def build_debug_trace_frame(trace: list[dict[str, object]]) -> pd.DataFrame:
+    return pd.DataFrame(trace, columns=["stage", "rows", "unique_nm"])
+
+
+def build_display_coverage_summary(original_df: pd.DataFrame, enriched_df: pd.DataFrame) -> pd.DataFrame:
+    coverage_rows: list[dict[str, object]] = []
+    coverage_fields = list(dict.fromkeys(FUNNEL_ZERO_FILL_FIELDS + AD_ZERO_FILL_FIELDS))
+    original = original_df.reset_index(drop=True)
+    enriched = enriched_df.reset_index(drop=True)
+
+    for field in coverage_fields:
+        if field not in original.columns and field not in enriched.columns:
+            continue
+
+        before_source = original[field] if field in original.columns else pd.Series([pd.NA] * len(original), index=original.index)
+        after_source = enriched[field] if field in enriched.columns else pd.Series([pd.NA] * len(enriched), index=enriched.index)
+        before = pd.to_numeric(before_source, errors="coerce")
+        after = pd.to_numeric(after_source, errors="coerce")
+        if field in FUNNEL_ZERO_FILL_FIELDS:
+            source_mask = original.get("has_funnel", pd.Series(False, index=original.index)).fillna(False).astype(bool)
+            source_name = "funnel"
+        else:
+            has_ad_cost = original.get("has_ad_cost", pd.Series(False, index=original.index)).fillna(False).astype(bool)
+            has_ad_campaign = original.get("has_ad_campaign", pd.Series(False, index=original.index)).fillna(False).astype(bool)
+            source_mask = ~(has_ad_cost | has_ad_campaign)
+            source_name = "ads"
+
+        null_before = before.isna() & source_mask
+        became_zero = null_before & after.fillna(pd.NA).eq(0)
+        positive_after = after.gt(0) & source_mask
+        coverage_rows.append(
+            {
+                "source": source_name,
+                "field": field,
+                "null_before": int(null_before.sum()),
+                "became_zero": int(became_zero.sum()),
+                "positive_after": int(positive_after.sum()),
+            }
+        )
+
+    return pd.DataFrame(coverage_rows, columns=["source", "field", "null_before", "became_zero", "positive_after"])
 
 
 def load_app_dataset() -> tuple[pd.DataFrame, str]:
@@ -1020,8 +1076,9 @@ def refresh_streamlit_dataset() -> dict[str, Any]:
     return result
 
 
-def build_filtered_dataset(df: pd.DataFrame) -> pd.DataFrame:
+def build_filtered_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, object]]]:
     filtered = df.copy()
+    debug_trace = [build_debug_snapshot("rows_after_load_dataset_from_db", filtered)]
 
     with st.sidebar:
         st.header("Фильтры")
@@ -1030,43 +1087,52 @@ def build_filtered_dataset(df: pd.DataFrame) -> pd.DataFrame:
         selected_dates = st.multiselect("Дата", options=available_dates, default=available_dates)
         if selected_dates:
             filtered = filtered[filtered["report_date"].isin(selected_dates)]
+        debug_trace.append(build_debug_snapshot("rows_after_date_filter", filtered))
 
         supplier_search = st.text_input("Поиск по артикулу продавца")
         if supplier_search:
             filtered = filtered[
                 filtered["supplier_article"].fillna("").str.contains(supplier_search, case=False, na=False)
             ]
+        debug_trace.append(build_debug_snapshot("rows_after_supplier_article_filter", filtered))
 
         nm_search = st.text_input("Поиск по nm_id")
         if nm_search:
             filtered = filtered[filtered["nm_id"].astype(str).str.contains(nm_search, case=False, na=False)]
+        debug_trace.append(build_debug_snapshot("rows_after_nm_id_filter", filtered))
 
         brand_options = sorted(b for b in filtered["brand"].dropna().astype(str).unique().tolist())
         selected_brands = st.multiselect("Бренд", options=brand_options)
         if selected_brands:
             filtered = filtered[filtered["brand"].isin(selected_brands)]
+        debug_trace.append(build_debug_snapshot("rows_after_brand_filter", filtered))
 
         subject_options = sorted(s for s in filtered["subject"].dropna().astype(str).unique().tolist())
         selected_subjects = st.multiselect("Предмет", options=subject_options)
         if selected_subjects:
             filtered = filtered[filtered["subject"].isin(selected_subjects)]
+        debug_trace.append(build_debug_snapshot("rows_after_subject_filter", filtered))
 
         status_options = sorted(s for s in filtered["data_quality_status"].dropna().astype(str).unique().tolist())
         selected_statuses = st.multiselect("data_quality_status", options=status_options)
         if selected_statuses:
             filtered = filtered[filtered["data_quality_status"].isin(selected_statuses)]
+        debug_trace.append(build_debug_snapshot("rows_after_data_quality_status_filter", filtered))
 
         ads_only = st.checkbox("Показывать только товары с рекламой")
         if ads_only:
             filtered = filtered[filtered["has_ad_campaign"] | filtered["has_ad_cost"]]
+        debug_trace.append(build_debug_snapshot("rows_after_ads_only_filter", filtered))
 
         show_products_without_data = st.checkbox("Показывать товары без данных", value=False)
         if not show_products_without_data:
             filtered = filter_products_with_period_data(filtered)
+        debug_trace.append(build_debug_snapshot("rows_after_products_without_data_filter", filtered))
 
         no_data_only = st.checkbox("Показывать только товары без данных")
         if no_data_only:
             filtered = filtered[filtered["data_quality_status"] == "NO_DATA"]
+        debug_trace.append(build_debug_snapshot("rows_after_no_data_only_filter", filtered))
 
         pending_only = st.checkbox("Показывать только товары с pending-источниками")
         if pending_only:
@@ -1076,12 +1142,15 @@ def build_filtered_dataset(df: pd.DataFrame) -> pd.DataFrame:
                 | filtered["vbro_status"].eq("MANUAL_PENDING")
             )
             filtered = filtered[pending_mask]
+        debug_trace.append(build_debug_snapshot("rows_after_pending_only_filter", filtered))
 
-    return filtered.sort_values(
+    filtered = filtered.sort_values(
         by=["report_date", "order_sum", "order_count"],
         ascending=[False, False, False],
         na_position="last",
     )
+    debug_trace.append(build_debug_snapshot("rows_after_all_filters", filtered))
+    return filtered, debug_trace
 
 
 def build_latest_snapshot_dataset(filtered: pd.DataFrame) -> pd.DataFrame:
@@ -1311,7 +1380,11 @@ def build_warnings(row: pd.Series, previous_row: pd.Series | None = None) -> lis
     return warnings
 
 
-def render_overview_tab(filtered: pd.DataFrame) -> tuple[int, int]:
+def render_overview_tab(
+    filtered: pd.DataFrame,
+    filter_debug_trace: list[dict[str, object]],
+    display_coverage: pd.DataFrame | None = None,
+) -> tuple[int, int]:
     view_mode = st.radio(
         "Вид таблицы",
         options=[LATEST_MODE_LABEL, BY_DATE_MODE_LABEL],
@@ -1338,8 +1411,19 @@ def render_overview_tab(filtered: pd.DataFrame) -> tuple[int, int]:
 
     table_display_df = table_df.reindex(columns=display_columns).copy()
     export_df = build_export_dataframe(table_df, export_columns)
+    export_debug_trace = [
+        build_debug_snapshot("rows_before_export_table_df", table_df),
+        build_debug_snapshot("rows_before_export_export_df", export_df),
+    ]
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(download_label, data=csv_bytes, file_name="streamlit_v1_filtered.csv", mime="text/csv")
+    with st.expander("Debug фильтрации и экспорта"):
+        st.caption("Экспорт CSV строится не из полного load_dataset_from_db(), а из текущего table_df после всех применённых фильтров.")
+        st.dataframe(build_debug_trace_frame(filter_debug_trace), width="stretch", hide_index=True)
+        st.dataframe(build_debug_trace_frame(export_debug_trace), width="stretch", hide_index=True)
+        if display_coverage is not None and not display_coverage.empty:
+            st.caption("Coverage по display-заменам: сколько значений были NULL, сколько стали 0 по правилам display-слоя, сколько осталось реально > 0.")
+            st.dataframe(display_coverage, width="stretch", hide_index=True)
     st.dataframe(
         style_table(table_display_df, status_column=status_column),
         width="stretch",
@@ -1429,6 +1513,7 @@ def render_overview_tab(filtered: pd.DataFrame) -> tuple[int, int]:
             "data_quality_status": st.column_config.TextColumn("Технический статус данных", width="medium"),
             "data_quality_label": st.column_config.TextColumn("Статус данных", width="medium"),
             "funnel_data_note": st.column_config.TextColumn("Note: Воронка", width="large"),
+            "ad_data_note": st.column_config.TextColumn("Note: Реклама", width="medium"),
             "card_clicks_note": st.column_config.TextColumn("Note: Переходы в карточку", width="large"),
             "search_data_note": st.column_config.TextColumn("Note: Поиск", width="large"),
             "stock_data_note": st.column_config.TextColumn("Note: Остатки", width="large"),
@@ -2471,10 +2556,11 @@ def main() -> None:
         st.rerun()
 
     df, data_source = load_app_dataset()
+    display_coverage = df.attrs.get("display_coverage")
     ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
     st.caption(f"Источник данных: {'PostgreSQL' if data_source == 'db' else 'CSV'}")
     render_available_dates_summary(df)
-    filtered = build_filtered_dataset(df)
+    filtered, filter_debug_trace = build_filtered_dataset(df)
 
     metric_cols = st.columns(7)
     metric_cols[0].metric("Всего строк", f"{len(filtered):,}".replace(",", " "))
@@ -2502,7 +2588,7 @@ def main() -> None:
         ["ИТОГО", AD_CAMPAIGN_PRODUCT_LABEL, "Карточка товара", "Графики", "Источники", UPLOAD_TAB_TITLE]
     )
     with tab_overview:
-        render_overview_tab(filtered)
+        render_overview_tab(filtered, filter_debug_trace, display_coverage)
     with tab_ad_campaign:
         render_ad_campaign_product_tab(ad_campaign_product_df, data_source, ad_campaign_product_error)
     with tab_product:

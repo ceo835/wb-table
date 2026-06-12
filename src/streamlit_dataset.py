@@ -75,6 +75,7 @@ STREAMLIT_V1_COLUMNS = [
     "data_quality_status",
     "data_quality_label",
     "funnel_data_note",
+    "ad_data_note",
     "card_clicks_note",
     "search_data_note",
     "stock_data_note",
@@ -100,6 +101,7 @@ DATA_QUALITY_LABELS = {
 
 NOTE_COLUMNS = [
     "funnel_data_note",
+    "ad_data_note",
     "card_clicks_note",
     "impressions_source_note",
     "search_data_note",
@@ -107,6 +109,31 @@ NOTE_COLUMNS = [
     "localization_data_note",
     "entry_point_data_note",
     "vbro_data_note",
+]
+
+FUNNEL_ZERO_FILL_FIELDS = [
+    "card_clicks",
+    "cart_count",
+    "add_to_cart_conversion_calc",
+    "order_count",
+    "cart_to_order_conversion_calc",
+    "order_sum",
+    "buyout_count",
+    "buyout_sum",
+    "buyout_percent",
+]
+
+AD_ZERO_FILL_FIELDS = [
+    "ad_cost_writeoff_total",
+    "ad_campaign_spend_total",
+    "ad_views_total",
+    "ad_clicks_total",
+    "ad_atbs_total",
+    "ad_orders_total",
+    "direct_ad_atbs",
+    "associated_ad_atbs",
+    "multicard_ad_atbs",
+    "unknown_ad_atbs",
 ]
 
 
@@ -178,6 +205,8 @@ def build_note_columns(row: Mapping[str, Any]) -> dict[str, str]:
     else:
         funnel_data_note = "OK"
 
+    ad_data_note = "OK" if (_to_bool(row.get("has_ad_cost")) or _to_bool(row.get("has_ad_campaign"))) else "Нет рекламы"
+
     search_data_note = "OK" if has_search else "Нет данных поиска за дату или источник не отдал"
     stock_data_note = "OK" if has_stock else "Нет snapshot остатков за дату"
 
@@ -200,6 +229,7 @@ def build_note_columns(row: Mapping[str, Any]) -> dict[str, str]:
 
     return {
         "funnel_data_note": funnel_data_note,
+        "ad_data_note": ad_data_note,
         "card_clicks_note": card_clicks_note,
         "impressions_source_note": impressions_source_note,
         "search_data_note": search_data_note,
@@ -228,4 +258,15 @@ def enrich_streamlit_row(row: Mapping[str, Any]) -> dict[str, Any]:
         enriched["data_quality_status"] = compute_data_quality_status(enriched)
     enriched["data_quality_label"] = build_data_quality_label(enriched["data_quality_status"])
     enriched.update(build_note_columns(enriched))
+
+    if _to_bool(enriched.get("has_funnel")):
+        for field in FUNNEL_ZERO_FILL_FIELDS:
+            if _is_missing(enriched.get(field)):
+                enriched[field] = 0
+
+    if not (_to_bool(enriched.get("has_ad_cost")) or _to_bool(enriched.get("has_ad_campaign"))):
+        for field in AD_ZERO_FILL_FIELDS:
+            if _is_missing(enriched.get(field)):
+                enriched[field] = 0
+
     return enriched

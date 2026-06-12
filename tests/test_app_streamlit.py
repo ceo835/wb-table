@@ -9,6 +9,9 @@ from app_streamlit import (
     CHART_THRESHOLD_CPO,
     DISPLAY_COLUMNS_BY_DATE,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
+    build_display_coverage_summary,
+    build_debug_snapshot,
+    build_debug_trace_frame,
     build_chart_metrics_by_date,
     build_threshold_breaches_table,
     build_export_dataframe,
@@ -64,6 +67,83 @@ def test_prepare_dataframe_builds_data_quality_status_when_missing() -> None:
     assert "data_quality_status" in prepared.columns
     assert prepared.loc[0, "data_quality_status"] == "OK_PARTIAL_SOURCES"
     assert prepared.loc[1, "data_quality_status"] == "NO_DATA"
+
+
+def test_build_debug_snapshot_and_trace_frame_report_rows_and_unique_nm() -> None:
+    df = pd.DataFrame(
+        [
+            {"nm_id": 1, "report_date": "2026-06-04"},
+            {"nm_id": 1, "report_date": "2026-06-05"},
+            {"nm_id": 2, "report_date": "2026-06-04"},
+        ]
+    )
+
+    snapshot = build_debug_snapshot("rows_after_load_dataset_from_db", df)
+    trace_df = build_debug_trace_frame([snapshot])
+
+    assert snapshot == {
+        "stage": "rows_after_load_dataset_from_db",
+        "rows": 3,
+        "unique_nm": 2,
+    }
+    assert trace_df.to_dict(orient="records") == [snapshot]
+
+
+def test_build_display_coverage_summary_counts_null_to_zero_and_positive() -> None:
+    original = pd.DataFrame(
+        [
+            {
+                "has_funnel": True,
+                "has_ad_cost": False,
+                "has_ad_campaign": False,
+                "card_clicks": None,
+                "order_count": 5,
+                "ad_views_total": None,
+                "ad_orders_total": None,
+            },
+            {
+                "has_funnel": True,
+                "has_ad_cost": True,
+                "has_ad_campaign": False,
+                "card_clicks": 7,
+                "order_count": None,
+                "ad_views_total": 10,
+                "ad_orders_total": None,
+            },
+        ]
+    )
+    enriched = pd.DataFrame(
+        [
+            {
+                "has_funnel": True,
+                "has_ad_cost": False,
+                "has_ad_campaign": False,
+                "card_clicks": 0,
+                "order_count": 5,
+                "ad_views_total": 0,
+                "ad_orders_total": 0,
+            },
+            {
+                "has_funnel": True,
+                "has_ad_cost": True,
+                "has_ad_campaign": False,
+                "card_clicks": 7,
+                "order_count": 0,
+                "ad_views_total": 10,
+                "ad_orders_total": 0,
+            },
+        ]
+    )
+
+    coverage = build_display_coverage_summary(original, enriched)
+    coverage_by_field = {row["field"]: row for row in coverage.to_dict(orient="records")}
+
+    assert coverage_by_field["card_clicks"]["null_before"] == 1
+    assert coverage_by_field["card_clicks"]["became_zero"] == 1
+    assert coverage_by_field["card_clicks"]["positive_after"] == 1
+    assert coverage_by_field["ad_views_total"]["null_before"] == 1
+    assert coverage_by_field["ad_views_total"]["became_zero"] == 1
+    assert coverage_by_field["ad_views_total"]["positive_after"] == 0
 
 
 def test_prepare_dataframe_keeps_existing_data_quality_status() -> None:
