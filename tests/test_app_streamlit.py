@@ -9,6 +9,7 @@ from app_streamlit import (
     CHART_THRESHOLD_CPO,
     DISPLAY_COLUMNS_BY_DATE,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
+    build_chart_series_dataframe,
     build_display_coverage_summary,
     build_debug_snapshot,
     build_debug_trace_frame,
@@ -144,6 +145,25 @@ def test_build_display_coverage_summary_counts_null_to_zero_and_positive() -> No
     assert coverage_by_field["ad_views_total"]["null_before"] == 1
     assert coverage_by_field["ad_views_total"]["became_zero"] == 1
     assert coverage_by_field["ad_views_total"]["positive_after"] == 0
+
+
+def test_build_chart_series_dataframe_ignores_problematic_dataframe_attrs() -> None:
+    chart_df = pd.DataFrame(
+        [
+            {"report_date": "2026-06-06", "order_count": 10, "order_sum": 1000},
+            {"report_date": "2026-06-07", "order_count": 12, "order_sum": 1200},
+        ]
+    )
+    chart_df.attrs["display_coverage"] = pd.DataFrame([{"field": "order_count", "null_before": 0}])
+
+    result = build_chart_series_dataframe(
+        chart_df,
+        {"order_count": "Заказы", "order_sum": "Сумма заказов"},
+    )
+
+    assert len(result) == 4
+    assert set(result["series"]) == {"Заказы", "Сумма заказов"}
+    assert result["is_alert"].eq(False).all()
 
 
 def test_prepare_dataframe_keeps_existing_data_quality_status() -> None:

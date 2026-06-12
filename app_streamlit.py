@@ -1965,21 +1965,24 @@ def build_chart_series_dataframe(
     series_map: dict[str, str],
     threshold: float | None = None,
 ) -> pd.DataFrame:
-    frames: list[pd.DataFrame] = []
+    safe_frames: list[pd.DataFrame] = []
     for source_column, label in series_map.items():
         if source_column not in chart_df.columns:
             continue
         frame = chart_df[["report_date", source_column]].rename(columns={source_column: "value"}).copy()
         frame["series"] = label
         frame = frame[frame["value"].notna()]
-        if frame.empty:
+        if frame is None or frame.empty:
             continue
-        frames.append(frame)
+        safe_frame = frame.copy()
+        safe_frame.attrs = {}
+        safe_frames.append(safe_frame)
 
-    if not frames:
+    if not safe_frames:
         return pd.DataFrame(columns=["report_date", "value", "series", "is_alert"])
 
-    combined = pd.concat(frames, ignore_index=True)
+    combined = pd.concat(safe_frames, ignore_index=True)
+    combined.attrs = {}
     combined["report_date"] = pd.to_datetime(combined["report_date"], errors="coerce").dt.date
     combined["is_alert"] = False if threshold is None else combined["value"] > threshold
     return combined
