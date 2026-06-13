@@ -1283,14 +1283,16 @@ def prepare_dataframe_for_streamlit_display(
     df: pd.DataFrame,
     status_column: str | None = None,
 ) -> pd.DataFrame | pd.io.formats.style.Styler:
+    safe_df = df.copy()
+    safe_df.attrs = {}
     cells_count = int(df.shape[0]) * int(df.shape[1])
     if cells_count > STYLER_MAX_CELLS:
         st.caption(
             f"Большая таблица: {df.shape[0]} строк × {df.shape[1]} колонок = {cells_count:,} ячеек. "
             "Цветовое оформление отключено для стабильной загрузки."
         )
-        return df
-    return style_table(df, status_column=status_column)
+        return safe_df
+    return style_table(safe_df, status_column=status_column)
 
 
 def build_export_dataframe(table_df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
