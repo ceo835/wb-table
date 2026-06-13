@@ -45,6 +45,23 @@ BY_DATE_MODE_LABEL = "По датам"
 CHART_THRESHOLD_CART_COST = 35.0
 CHART_THRESHOLD_CPO = 150.0
 STYLER_MAX_CELLS = 250_000
+CHART_LEVEL_CABINET = "Кабинет"
+CHART_LEVEL_CATEGORY = "Категория"
+CHART_LEVEL_ARTICLE = "Артикул"
+CHART_LEVEL_CONVERSION = "Тип WB / конверсии"
+CHART_AGGREGATION_LEVELS = [
+    CHART_LEVEL_CABINET,
+    CHART_LEVEL_CATEGORY,
+    CHART_LEVEL_ARTICLE,
+    CHART_LEVEL_CONVERSION,
+]
+CHART_ALL_CATEGORIES_LABEL = "Все категории"
+CHART_ALL_CONVERSION_TYPES_LABEL = "Все типы WB"
+UNKNOWN_WB_TYPE_LABEL = "Неизвестный тип WB 64"
+UNKNOWN_WB_TYPE_HELP_TEXT = (
+    "Тип WB 64 пришёл из рекламного API WB, но в публичной документации код не расшифрован. "
+    "Поэтому он не переименован в «склейку» или «мультикарту»."
+)
 
 DISPLAY_COLUMNS_BY_DATE = [
     "product_group_label",
@@ -1914,6 +1931,113 @@ def safe_chart_divide(numerator: object, denominator: object) -> float | None:
     return float(numerator) / denominator_value
 
 
+def format_wb_conversion_type_label(value: object) -> str:
+    if pd.isna(value) or value in (None, ""):
+        return "—"
+    if str(value) == "UNKNOWN_CODE_64":
+        return UNKNOWN_WB_TYPE_LABEL
+    return str(value)
+
+
+def build_chart_product_options(
+    filtered: pd.DataFrame,
+    *,
+    ads_only: bool,
+) -> tuple[list[str], dict[str, dict[str, object]]]:
+    if filtered.empty:
+        return [], {}
+
+    source_df = filtered.copy()
+    if ads_only:
+        ad_activity_columns = [
+            column
+            for column in (
+                "ad_campaign_spend_total",
+                "ad_atbs_total",
+                "ad_orders_total",
+                "ad_views_total",
+                "ad_clicks_total",
+            )
+            if column in source_df.columns
+        ]
+        if ad_activity_columns:
+            ad_activity_mask = pd.Series(False, index=source_df.index)
+            for column in ad_activity_columns:
+                ad_activity_mask |= pd.to_numeric(source_df[column], errors="coerce").fillna(0).gt(0)
+            active_nm_ids = source_df.loc[ad_activity_mask, "nm_id"].dropna().unique().tolist()
+            source_df = source_df[source_df["nm_id"].isin(active_nm_ids)]
+
+    if source_df.empty:
+        return [], {}
+
+    sort_columns = [
+        column for column in ["supplier_article", "nm_id", "subject", "title"] if column in source_df.columns
+    ]
+    product_rows = source_df.sort_values(sort_columns, na_position="last").drop_duplicates(subset=["nm_id"]).copy()
+    option_map: dict[str, dict[str, object]] = {}
+    options: list[str] = []
+    for _, row in product_rows.iterrows():
+        label = f"{fmt_text(row.get('supplier_article'))} | {fmt_text(row.get('nm_id'))} | {fmt_text(row.get('subject'))}"
+        option_map[label] = {"nm_id": int(row["nm_id"])}
+        options.append(label)
+    return options, option_map
+
+
+def build_category_summary_table(filtered: pd.DataFrame) -> pd.DataFrame:
+    if filtered.empty or "subject" not in filtered.columns:
+        return pd.DataFrame()
+
+    metric_columns = [
+        column
+        for column in ("cart_count", "ad_atbs_total", "ad_campaign_spend_total", "ad_orders_total")
+        if column in filtered.columns
+    ]
+    if not metric_columns:
+        return pd.DataFrame()
+
+    grouped = (
+        filtered.dropna(subset=["subject"])
+        .groupby("subject", as_index=False)[metric_columns]
+        .sum(min_count=1)
+        .rename(columns={"subject": "Категория"})
+    )
+    grouped["Стоимость корзины РК"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("ad_atbs_total")),
+        axis=1,
+    )
+    grouped["CPO РК"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("ad_orders_total")),
+        axis=1,
+    )
+    grouped["Флаг превышения"] = grouped.apply(
+        lambda row: "Да"
+        if (
+            (not pd.isna(row.get("Стоимость корзины РК")) and float(row.get("Стоимость корзины РК")) > CHART_THRESHOLD_CART_COST)
+            or (not pd.isna(row.get("CPO РК")) and float(row.get("CPO РК")) > CHART_THRESHOLD_CPO)
+        )
+        else "—",
+        axis=1,
+    )
+    grouped = grouped.rename(
+        columns={
+            "cart_count": "Итоговые корзины",
+            "ad_atbs_total": "Корзины РК",
+            "ad_campaign_spend_total": "Расход",
+        }
+    )
+    return grouped[
+        [
+            "Категория",
+            "Итоговые корзины",
+            "Корзины РК",
+            "Расход",
+            "Стоимость корзины РК",
+            "CPO РК",
+            "Флаг превышения",
+        ]
+    ].sort_values(["Корзины РК", "Итоговые корзины"], ascending=[False, False], na_position="last")
+
+
 def build_chart_scope_rows(
     filtered: pd.DataFrame,
     aggregation_level: str,
@@ -2293,6 +2417,427 @@ def render_charts_tab(
         )
 
 
+def render_not_applicable_kpi_card(*, label: str, reason: str = "Не применяется") -> None:
+    st.markdown(
+        f"""
+        <div style="border:1px solid #dbe4ee; background:#f8fafc; border-radius:12px; padding:14px; min-height:120px;">
+            <div style="font-size:13px; color:#475569; margin-bottom:8px;">{label}</div>
+            <div style="font-size:24px; font-weight:700; color:#94a3b8;">—</div>
+            <div style="font-size:12px; color:#64748b; margin-top:8px;">{reason}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def build_chart_scope_rows(
+    filtered: pd.DataFrame,
+    aggregation_level: str,
+    selected_product_label: str | None,
+    option_map: dict[str, dict[str, object]],
+    *,
+    selected_subject: str | None = None,
+    ad_campaign_product_df: pd.DataFrame | None = None,
+    selected_conversion_type: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    if aggregation_level == CHART_LEVEL_ARTICLE and selected_product_label:
+        product_rows = get_selected_product_rows(filtered, selected_product_label, option_map).copy()
+        first_row = product_rows.iloc[0] if not product_rows.empty else pd.Series(dtype=object)
+        context = {
+            "scope": aggregation_level,
+            "supplier_article": first_row.get("supplier_article"),
+            "nm_id": first_row.get("nm_id"),
+            "title": first_row.get("title"),
+            "level_value": (
+                f"{fmt_text(first_row.get('supplier_article'))} | {fmt_text(first_row.get('nm_id'))} | {fmt_text(first_row.get('subject'))}"
+                if not first_row.empty
+                else "—"
+            ),
+        }
+        return product_rows, context
+
+    if aggregation_level == CHART_LEVEL_CATEGORY:
+        scope_rows = filtered.copy()
+        if selected_subject and selected_subject != CHART_ALL_CATEGORIES_LABEL:
+            scope_rows = scope_rows[scope_rows["subject"] == selected_subject].copy()
+        context = {
+            "scope": aggregation_level,
+            "supplier_article": "Все товары",
+            "nm_id": None,
+            "title": "Сумма по выбранным товарам",
+            "level_value": selected_subject or CHART_ALL_CATEGORIES_LABEL,
+        }
+        return scope_rows, context
+
+    if aggregation_level == CHART_LEVEL_CONVERSION:
+        scope_rows = ad_campaign_product_df.copy() if ad_campaign_product_df is not None else pd.DataFrame()
+        if scope_rows.empty:
+            return scope_rows, {
+                "scope": aggregation_level,
+                "supplier_article": "Все товары",
+                "nm_id": None,
+                "title": "Рекламная детализация по типу WB",
+                "level_value": (
+                    format_wb_conversion_type_label(selected_conversion_type)
+                    if selected_conversion_type
+                    else CHART_ALL_CONVERSION_TYPES_LABEL
+                ),
+                "technical_level_value": selected_conversion_type,
+            }
+        visible_dates = set(filtered["report_date"].dropna().tolist()) if "report_date" in filtered.columns else set()
+        visible_nm_ids = set(filtered["nm_id"].dropna().astype(int).tolist()) if "nm_id" in filtered.columns else set()
+        if visible_dates:
+            scope_rows = scope_rows[scope_rows["report_date"].isin(visible_dates)].copy()
+        if visible_nm_ids:
+            scope_rows = scope_rows[scope_rows["nm_id"].isin(visible_nm_ids)].copy()
+        if selected_conversion_type:
+            scope_rows = scope_rows[scope_rows["conversion_type"].astype(str) == str(selected_conversion_type)].copy()
+        scope_rows = scope_rows.rename(
+            columns={
+                "campaign_spend": "ad_campaign_spend_total",
+                "ad_atbs": "ad_atbs_total",
+                "ad_orders": "ad_orders_total",
+            }
+        )
+        context = {
+            "scope": aggregation_level,
+            "supplier_article": "Все товары",
+            "nm_id": None,
+            "title": "Рекламная детализация по типу WB",
+            "level_value": (
+                format_wb_conversion_type_label(selected_conversion_type)
+                if selected_conversion_type
+                else CHART_ALL_CONVERSION_TYPES_LABEL
+            ),
+            "technical_level_value": selected_conversion_type,
+        }
+        return scope_rows, context
+
+    context = {
+        "scope": CHART_LEVEL_CABINET,
+        "supplier_article": "Все товары",
+        "nm_id": None,
+        "title": "Сумма по выбранным товарам",
+        "level_value": "Все товары",
+    }
+    return filtered.copy(), context
+
+
+def build_threshold_breaches_table(
+    chart_df: pd.DataFrame,
+    context: dict[str, object],
+    metrics: list[tuple[str, str, float]] | None = None,
+) -> pd.DataFrame:
+    if chart_df.empty:
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = []
+    metrics = metrics or [
+        ("total_cart_cost", "Стоимость корзины ИТОГО", CHART_THRESHOLD_CART_COST),
+        ("ad_cart_cost", "Стоимость корзины РК", CHART_THRESHOLD_CART_COST),
+        ("total_cpo", "CPO ИТОГО", CHART_THRESHOLD_CPO),
+        ("ad_cpo", "CPO РК", CHART_THRESHOLD_CPO),
+    ]
+    for _, row in chart_df.iterrows():
+        for field_name, label, threshold in metrics:
+            value = row.get(field_name)
+            if pd.isna(value) or float(value) <= threshold:
+                continue
+            rows.append(
+                {
+                    "Дата": row.get("report_date"),
+                    "Уровень": context.get("scope") or CHART_LEVEL_CABINET,
+                    "Значение уровня": context.get("level_value") or "Все товары",
+                    "Артикул продавца": context.get("supplier_article") or "Все товары",
+                    "Артикул WB": context.get("nm_id"),
+                    "Название товара": context.get("title") or "Сумма по выбранным товарам",
+                    "Показатель": label,
+                    "Значение": round(float(value), 1),
+                    "Порог": threshold,
+                    "Превышение": "Да",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def render_charts_tab(
+    filtered: pd.DataFrame,
+    preselected_product_label: str | None,
+    option_map: dict[str, dict[str, object]],
+    ad_campaign_product_df: pd.DataFrame | None = None,
+) -> None:
+    st.subheader("Корзины и эффективность")
+    st.caption("Динамика корзин, стоимости корзины и CPO по выбранному периоду.")
+    st.warning(
+        "Важно: корзины из РК могут быть доступны с задержкой до позавчера. "
+        "Итоговые корзины и расходы могут быть доступны за вчера. "
+        "Из-за этого за последние даты сравнение «Итого vs РК» может быть неполным."
+    )
+
+    aggregation_level = st.radio("Уровень агрегации", options=CHART_AGGREGATION_LEVELS, horizontal=True)
+    selected_product_label = preselected_product_label
+    selected_subject: str | None = None
+    selected_conversion_type: str | None = None
+
+    if aggregation_level == CHART_LEVEL_CATEGORY:
+        category_summary_df = build_category_summary_table(filtered)
+        category_options = [CHART_ALL_CATEGORIES_LABEL]
+        if not category_summary_df.empty:
+            category_options.extend(category_summary_df["Категория"].astype(str).tolist())
+        else:
+            category_options.extend(sorted(filtered["subject"].dropna().astype(str).unique().tolist()))
+        selected_subject = st.selectbox("Категория / предмет", options=category_options, index=0)
+        if not category_summary_df.empty:
+            st.caption("Сводка по категориям за выбранный период.")
+            st.dataframe(
+                category_summary_df,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Итоговые корзины": st.column_config.NumberColumn("Итоговые корзины", format="%.0f"),
+                    "Корзины РК": st.column_config.NumberColumn("Корзины РК", format="%.0f"),
+                    "Расход": st.column_config.NumberColumn("Расход", format="%.2f"),
+                    "Стоимость корзины РК": st.column_config.NumberColumn("Стоимость корзины РК", format="%.1f"),
+                    "CPO РК": st.column_config.NumberColumn("CPO РК", format="%.1f"),
+                },
+            )
+    elif aggregation_level == CHART_LEVEL_ARTICLE:
+        show_only_ad_active_products = st.checkbox(
+            "Показывать только артикулы с рекламной активностью",
+            value=True,
+        )
+        product_options, chart_option_map = build_chart_product_options(filtered, ads_only=show_only_ad_active_products)
+        if not product_options:
+            if show_only_ad_active_products:
+                st.info("За выбранный период нет артикулов с рекламной активностью.")
+            else:
+                st.info("Нет данных за выбранный период.")
+            return
+        preselected_nm_id = option_map.get(preselected_product_label or "", {}).get("nm_id")
+        default_index = 0
+        if preselected_nm_id is not None:
+            for index, label in enumerate(product_options):
+                if chart_option_map[label]["nm_id"] == preselected_nm_id:
+                    default_index = index
+                    break
+        selected_product_label = st.selectbox("Артикул", options=product_options, index=default_index)
+        option_map = chart_option_map
+    elif aggregation_level == CHART_LEVEL_CONVERSION:
+        visible_dates = set(filtered["report_date"].dropna().tolist()) if "report_date" in filtered.columns else set()
+        visible_nm_ids = set(filtered["nm_id"].dropna().astype(int).tolist()) if "nm_id" in filtered.columns else set()
+        conversion_scope = ad_campaign_product_df.copy() if ad_campaign_product_df is not None else pd.DataFrame()
+        if visible_dates:
+            conversion_scope = conversion_scope[conversion_scope["report_date"].isin(visible_dates)]
+        if visible_nm_ids:
+            conversion_scope = conversion_scope[conversion_scope["nm_id"].isin(visible_nm_ids)]
+        conversion_values = sorted(
+            value
+            for value in conversion_scope.get("conversion_type", pd.Series(dtype=object)).dropna().astype(str).unique().tolist()
+        )
+        if not conversion_values:
+            st.info("За выбранный период нет рекламных данных по типам WB / конверсии.")
+            return
+        conversion_display_map = {
+            format_wb_conversion_type_label(value): value
+            for value in conversion_values
+        }
+        conversion_display_options = [CHART_ALL_CONVERSION_TYPES_LABEL] + list(conversion_display_map.keys())
+        selected_conversion_display = st.selectbox(
+            "Тип WB / конверсии",
+            options=conversion_display_options,
+            index=0,
+        )
+        selected_conversion_type = conversion_display_map.get(selected_conversion_display)
+        if selected_conversion_type == "UNKNOWN_CODE_64":
+            st.caption(UNKNOWN_WB_TYPE_HELP_TEXT)
+
+    scope_rows, context = build_chart_scope_rows(
+        filtered,
+        aggregation_level,
+        selected_product_label,
+        option_map,
+        selected_subject=selected_subject,
+        ad_campaign_product_df=ad_campaign_product_df,
+        selected_conversion_type=selected_conversion_type,
+    )
+    chart_df = build_chart_metrics_by_date(scope_rows)
+    if chart_df.empty:
+        st.info("Нет данных за выбранный период.")
+        return
+
+    if aggregation_level == CHART_LEVEL_CABINET:
+        st.info("Графики построены по сумме всех товаров, попавших в текущие фильтры периода.")
+    elif aggregation_level == CHART_LEVEL_CATEGORY:
+        st.caption(f"Выбранная категория: {context.get('level_value')}")
+    elif aggregation_level == CHART_LEVEL_CONVERSION:
+        st.caption(f"Выбранный тип WB / конверсии: {context.get('level_value')}")
+    else:
+        article_caption = f"{fmt_text(context.get('supplier_article'))} | {fmt_text(context.get('nm_id'))} | {fmt_text(context.get('title'))}"
+        st.caption(f"Выбранный товар: {article_caption}")
+
+    total_carts = chart_df["cart_count"].sum(min_count=1) if "cart_count" in chart_df.columns else None
+    ad_carts = chart_df["ad_atbs_total"].sum(min_count=1) if "ad_atbs_total" in chart_df.columns else None
+    total_orders = chart_df["order_count"].sum(min_count=1) if "order_count" in chart_df.columns else None
+    ad_orders = chart_df["ad_orders_total"].sum(min_count=1) if "ad_orders_total" in chart_df.columns else None
+    ad_spend = chart_df["ad_campaign_spend_total"].sum(min_count=1) if "ad_campaign_spend_total" in chart_df.columns else None
+
+    total_cart_cost = safe_chart_divide(ad_spend, total_carts)
+    ad_cart_cost = safe_chart_divide(ad_spend, ad_carts)
+    total_cpo = safe_chart_divide(ad_spend, total_orders)
+    ad_cpo = safe_chart_divide(ad_spend, ad_orders)
+
+    is_conversion_level = aggregation_level == CHART_LEVEL_CONVERSION
+    kpi_cols = st.columns(6)
+    with kpi_cols[0]:
+        if is_conversion_level:
+            render_not_applicable_kpi_card(label="Итоговые корзины", reason="Метрика не применяется на уровне типа WB")
+        else:
+            render_chart_kpi_card(label="Итоговые корзины", value=total_carts, digits=0)
+    with kpi_cols[1]:
+        render_chart_kpi_card(label="Корзины РК", value=ad_carts, digits=0)
+    with kpi_cols[2]:
+        if is_conversion_level:
+            render_not_applicable_kpi_card(label="Стоимость корзины ИТОГО", reason="Метрика не применяется на уровне типа WB")
+        else:
+            render_chart_kpi_card(
+                label="Стоимость корзины ИТОГО",
+                value=total_cart_cost,
+                digits=1,
+                suffix=" руб.",
+                threshold=CHART_THRESHOLD_CART_COST,
+            )
+    with kpi_cols[3]:
+        render_chart_kpi_card(
+            label="Стоимость корзины РК",
+            value=ad_cart_cost,
+            digits=1,
+            suffix=" руб.",
+            threshold=CHART_THRESHOLD_CART_COST,
+        )
+    with kpi_cols[4]:
+        if is_conversion_level:
+            render_not_applicable_kpi_card(label="CPO ИТОГО", reason="Метрика не применяется на уровне типа WB")
+        else:
+            render_chart_kpi_card(
+                label="CPO ИТОГО",
+                value=total_cpo,
+                digits=1,
+                suffix=" руб.",
+                threshold=CHART_THRESHOLD_CPO,
+            )
+    with kpi_cols[5]:
+        render_chart_kpi_card(
+            label="CPO РК",
+            value=ad_cpo,
+            digits=1,
+            suffix=" руб.",
+            threshold=CHART_THRESHOLD_CPO,
+        )
+    st.caption(f"Расход РК за период: {format_chart_kpi_value(ad_spend, digits=2, suffix=' руб.')}")
+
+    latest_report_date = chart_df["report_date"].dropna().max() if "report_date" in chart_df.columns else None
+    if latest_report_date and latest_report_date > (datetime.now().date() - timedelta(days=2)):
+        st.caption("Статус корзин РК: MAY_BE_INCOMPLETE")
+
+    st.markdown("### Динамика корзин")
+    st.caption(
+        "Итоговые корзины и корзины из рекламы по дням."
+        if not is_conversion_level
+        else "Корзины РК по выбранному типу WB / конверсии."
+    )
+    carts_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map=(
+            {"cart_count": "Итоговые корзины", "ad_atbs_total": "Корзины РК"}
+            if not is_conversion_level
+            else {"ad_atbs_total": "Корзины РК"}
+        ),
+        y_title="Корзины, шт.",
+        tooltip_value_title="Значение, шт.",
+        value_format=".0f",
+        line_colors=["#2563eb", "#f97316"],
+    )
+    if carts_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(carts_chart, width="stretch")
+
+    st.markdown("### Стоимость корзины")
+    st.caption(
+        "Сколько рублей рекламного расхода приходится на одну корзину."
+        if not is_conversion_level
+        else "Сколько рублей рекламного расхода приходится на одну рекламную корзину."
+    )
+    cart_cost_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map=(
+            {"total_cart_cost": "Стоимость корзины ИТОГО", "ad_cart_cost": "Стоимость корзины РК"}
+            if not is_conversion_level
+            else {"ad_cart_cost": "Стоимость корзины РК"}
+        ),
+        y_title="Стоимость, руб.",
+        tooltip_value_title="Стоимость, руб.",
+        value_format=".1f",
+        line_colors=["#0f766e", "#f59e0b"],
+        threshold=CHART_THRESHOLD_CART_COST,
+        threshold_label="Порог 35 руб.",
+    )
+    if cart_cost_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(cart_cost_chart, width="stretch")
+
+    st.markdown("### CPO")
+    st.caption(
+        "Стоимость одного заказа."
+        if not is_conversion_level
+        else "Стоимость одного рекламного заказа."
+    )
+    cpo_chart = build_user_friendly_chart(
+        chart_df=chart_df,
+        series_map=(
+            {"total_cpo": "CPO ИТОГО", "ad_cpo": "CPO РК"}
+            if not is_conversion_level
+            else {"ad_cpo": "CPO РК"}
+        ),
+        y_title="CPO, руб.",
+        tooltip_value_title="CPO, руб.",
+        value_format=".1f",
+        line_colors=["#7c3aed", "#ef4444"],
+        threshold=CHART_THRESHOLD_CPO,
+        threshold_label="Порог 150 руб.",
+    )
+    if cpo_chart is None:
+        st.info("Нет данных за выбранный период.")
+    else:
+        st.altair_chart(cpo_chart, width="stretch")
+
+    st.markdown("### Превышения порогов")
+    breaches_metrics = (
+        [
+            ("ad_cart_cost", "Стоимость корзины РК", CHART_THRESHOLD_CART_COST),
+            ("ad_cpo", "CPO РК", CHART_THRESHOLD_CPO),
+        ]
+        if is_conversion_level
+        else None
+    )
+    breaches_df = build_threshold_breaches_table(chart_df, context, metrics=breaches_metrics)
+    if breaches_df.empty:
+        st.success("Превышений по выбранному периоду нет.")
+    else:
+        st.dataframe(
+            breaches_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Дата": st.column_config.DateColumn("Дата"),
+                "Артикул WB": st.column_config.NumberColumn("Артикул WB", format="%d"),
+                "Значение": st.column_config.NumberColumn("Значение", format="%.1f"),
+                "Порог": st.column_config.NumberColumn("Порог", format="%.1f"),
+            },
+        )
+
+
 def render_sources_tab(latest_row: pd.Series) -> None:
     st.subheader("Статусы источников")
     st.markdown(
@@ -2617,7 +3162,7 @@ def main() -> None:
     with tab_product:
         render_product_tab(product_rows, default_detail_date)
     with tab_charts:
-        render_charts_tab(filtered, selected_product_label, option_map)
+        render_charts_tab(filtered, selected_product_label, option_map, ad_campaign_product_df)
     with tab_sources:
         render_sources_tab(latest_row)
     with tab_upload:

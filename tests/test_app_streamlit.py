@@ -2,22 +2,28 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import app_streamlit
 import pandas as pd
+from pandas.io.formats.style import Styler
 
 from app_streamlit import (
     CHART_THRESHOLD_CART_COST,
     CHART_THRESHOLD_CPO,
     DISPLAY_COLUMNS_BY_DATE,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
+    build_category_summary_table,
     build_chart_series_dataframe,
     build_display_coverage_summary,
     build_debug_snapshot,
     build_debug_trace_frame,
     build_chart_metrics_by_date,
+    build_chart_product_options,
+    build_chart_scope_rows,
     build_threshold_breaches_table,
     build_export_dataframe,
     build_data_quality_label,
     filter_products_with_period_data,
+    format_wb_conversion_type_label,
     build_grouped_by_date_dataset,
     build_import_format_error,
     build_last_upload_result,
@@ -31,6 +37,7 @@ from app_streamlit import (
     get_latest_product_context,
     get_previous_product_date,
     is_password_protection_enabled,
+    prepare_dataframe_for_streamlit_display,
     resolve_data_source,
     prepare_dataframe,
     resolve_effective_import_date,
@@ -145,6 +152,49 @@ def test_build_display_coverage_summary_counts_null_to_zero_and_positive() -> No
     assert coverage_by_field["ad_views_total"]["null_before"] == 1
     assert coverage_by_field["ad_views_total"]["became_zero"] == 1
     assert coverage_by_field["ad_views_total"]["positive_after"] == 0
+
+
+def test_prepare_dataframe_for_streamlit_display_uses_styler_for_small_tables(monkeypatch) -> None:
+    captions: list[str] = []
+    monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
+    df = pd.DataFrame([{"data_quality_label": "Частично", "ad_cpo_calc": 50}])
+
+    result = prepare_dataframe_for_streamlit_display(df, status_column="data_quality_label")
+
+    assert isinstance(result, Styler)
+    assert captions == []
+
+
+def test_prepare_dataframe_for_streamlit_display_clears_problematic_dataframe_attrs(monkeypatch) -> None:
+    captions: list[str] = []
+    monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
+    df = pd.DataFrame([{"data_quality_label": "Частично", "ad_cpo_calc": 50}])
+    df.attrs["display_coverage"] = pd.DataFrame([{"field": "x", "null_before": 0}])
+
+    result = prepare_dataframe_for_streamlit_display(df, status_column="data_quality_label")
+
+    assert isinstance(result, Styler)
+    assert result.data.attrs == {}
+    result.data.astype(str)
+    assert captions == []
+
+
+def test_prepare_dataframe_for_streamlit_display_skips_styler_for_large_tables(monkeypatch) -> None:
+    captions: list[str] = []
+    monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
+    monkeypatch.setattr(app_streamlit, "STYLER_MAX_CELLS", 3)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("style_table should not be called for oversized tables")
+
+    monkeypatch.setattr(app_streamlit, "style_table", fail_if_called)
+    df = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3, "b": 4}])
+
+    result = prepare_dataframe_for_streamlit_display(df, status_column=None)
+
+    assert result.equals(df)
+    assert len(captions) == 1
+    assert "Цветовое оформление отключено" in captions[0]
 
 
 def test_build_chart_series_dataframe_ignores_problematic_dataframe_attrs() -> None:
@@ -419,6 +469,164 @@ def test_build_chart_metrics_by_date_calculates_user_friendly_metrics() -> None:
     assert pd.isna(second["ad_cpo"])
 
 
+def test_build_chart_product_options_filters_to_ad_active_products_by_default() -> None:
+    filtered = pd.DataFrame(
+        [
+            {
+                "supplier_article": "BlackWOM5",
+                "nm_id": 197330807,
+                "subject": "Трусы",
+                "ad_campaign_spend_total": 100,
+                "ad_atbs_total": 5,
+                "ad_orders_total": 1,
+                "ad_views_total": 10,
+                "ad_clicks_total": 2,
+            },
+            {
+                "supplier_article": "NoAds",
+                "nm_id": 2,
+                "subject": "Топы",
+                "ad_campaign_spend_total": None,
+                "ad_atbs_total": None,
+                "ad_orders_total": None,
+                "ad_views_total": None,
+                "ad_clicks_total": None,
+            },
+        ]
+    )
+
+    active_options, active_map = build_chart_product_options(filtered, ads_only=True)
+    all_options, all_map = build_chart_product_options(filtered, ads_only=False)
+
+    assert active_options == ["BlackWOM5 | 197330807 | Трусы"]
+    assert active_map["BlackWOM5 | 197330807 | Трусы"]["nm_id"] == 197330807
+    assert all_options == [
+        "BlackWOM5 | 197330807 | Трусы",
+        "NoAds | 2 | Топы",
+    ]
+    assert all_map["NoAds | 2 | Топы"]["nm_id"] == 2
+
+
+def test_build_chart_scope_rows_returns_category_slice_and_context() -> None:
+    filtered = pd.DataFrame(
+        [
+            {"report_date": "2026-06-06", "nm_id": 1, "subject": "Трусы", "cart_count": 5},
+            {"report_date": "2026-06-06", "nm_id": 2, "subject": "Топы", "cart_count": 3},
+        ]
+    )
+
+    scope_rows, context = build_chart_scope_rows(
+        filtered=filtered,
+        aggregation_level="Категория",
+        selected_product_label=None,
+        option_map={},
+        selected_subject="Трусы",
+        ad_campaign_product_df=pd.DataFrame(),
+        selected_conversion_type=None,
+    )
+
+    assert scope_rows["subject"].tolist() == ["Трусы"]
+    assert context["scope"] == "Категория"
+    assert context["level_value"] == "Трусы"
+
+
+def test_build_chart_scope_rows_returns_conversion_scope_from_ad_dataset() -> None:
+    filtered = pd.DataFrame(
+        [
+            {"report_date": pd.to_datetime("2026-06-07").date(), "nm_id": 197330807},
+            {"report_date": pd.to_datetime("2026-06-07").date(), "nm_id": 37320545},
+        ]
+    )
+    ad_campaign_product_df = pd.DataFrame(
+        [
+            {
+                "report_date": pd.to_datetime("2026-06-07").date(),
+                "nm_id": 197330807,
+                "conversion_type": "UNKNOWN_CODE_64",
+                "campaign_spend": 150,
+                "ad_atbs": 5,
+                "ad_orders": 2,
+            },
+            {
+                "report_date": pd.to_datetime("2026-06-07").date(),
+                "nm_id": 999,
+                "conversion_type": "UNKNOWN_CODE_64",
+                "campaign_spend": 999,
+                "ad_atbs": 99,
+                "ad_orders": 9,
+            },
+            {
+                "report_date": pd.to_datetime("2026-06-07").date(),
+                "nm_id": 197330807,
+                "conversion_type": "Прямая",
+                "campaign_spend": 120,
+                "ad_atbs": 4,
+                "ad_orders": 1,
+            },
+        ]
+    )
+
+    scope_rows, context = build_chart_scope_rows(
+        filtered=filtered,
+        aggregation_level="Тип WB / конверсии",
+        selected_product_label=None,
+        option_map={},
+        selected_subject=None,
+        ad_campaign_product_df=ad_campaign_product_df,
+        selected_conversion_type="UNKNOWN_CODE_64",
+    )
+
+    assert len(scope_rows) == 1
+    assert float(scope_rows.iloc[0]["ad_campaign_spend_total"]) == 150.0
+    assert float(scope_rows.iloc[0]["ad_atbs_total"]) == 5.0
+    assert float(scope_rows.iloc[0]["ad_orders_total"]) == 2.0
+    assert context["scope"] == "Тип WB / конверсии"
+    assert context["level_value"] == "Неизвестный тип WB 64"
+    assert context["technical_level_value"] == "UNKNOWN_CODE_64"
+
+
+def test_build_category_summary_table_aggregates_categories_and_flags_thresholds() -> None:
+    filtered = pd.DataFrame(
+        [
+            {
+                "subject": "Трусы",
+                "cart_count": 10,
+                "ad_atbs_total": 2,
+                "ad_campaign_spend_total": 100,
+                "ad_orders_total": 1,
+            },
+                {
+                    "subject": "Трусы",
+                    "cart_count": 5,
+                    "ad_atbs_total": 3,
+                    "ad_campaign_spend_total": 100,
+                    "ad_orders_total": 1,
+                },
+            {
+                "subject": "Топы",
+                "cart_count": 8,
+                "ad_atbs_total": 4,
+                "ad_campaign_spend_total": 80,
+                "ad_orders_total": 2,
+            },
+        ]
+    )
+
+    summary_df = build_category_summary_table(filtered)
+
+    assert summary_df["Категория"].tolist() == ["Трусы", "Топы"]
+    assert float(summary_df.iloc[0]["Корзины РК"]) == 5.0
+    assert float(summary_df.iloc[0]["CPO РК"]) == 100.0
+    assert summary_df.iloc[0]["Флаг превышения"] == "Да"
+    assert summary_df.iloc[1]["Флаг превышения"] == "—"
+
+
+def test_format_wb_conversion_type_label_maps_unknown_code_for_ui() -> None:
+    assert format_wb_conversion_type_label("Прямая") == "Прямая"
+    assert format_wb_conversion_type_label("UNKNOWN_CODE_64") == "Неизвестный тип WB 64"
+    assert format_wb_conversion_type_label(None) == "—"
+
+
 def test_build_threshold_breaches_table_returns_only_rows_above_thresholds() -> None:
     chart_df = pd.DataFrame(
         [
@@ -453,6 +661,35 @@ def test_build_threshold_breaches_table_returns_only_rows_above_thresholds() -> 
         "CPO РК",
     }
     assert set(result["Артикул продавца"].tolist()) == {"BlackWOM5"}
+
+
+def test_build_threshold_breaches_table_includes_level_context_columns() -> None:
+    chart_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-07",
+                "ad_cart_cost": CHART_THRESHOLD_CART_COST + 3,
+            }
+        ]
+    )
+
+    context = {
+        "scope": "Категория",
+        "level_value": "Трусы",
+        "supplier_article": "Все товары",
+        "nm_id": None,
+        "title": "Сумма по выбранным товарам",
+    }
+
+    result = build_threshold_breaches_table(
+        chart_df,
+        context,
+        metrics=[("ad_cart_cost", "Стоимость корзины РК", CHART_THRESHOLD_CART_COST)],
+    )
+
+    assert result.iloc[0]["Уровень"] == "Категория"
+    assert result.iloc[0]["Значение уровня"] == "Трусы"
+    assert result.iloc[0]["Превышение"] == "Да"
 
 
 def test_prepare_dataframe_keeps_new_itogo_formula_fields() -> None:
