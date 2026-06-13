@@ -1983,7 +1983,11 @@ def build_chart_product_options(
     return options, option_map
 
 
-def build_category_summary_table(filtered: pd.DataFrame) -> pd.DataFrame:
+def build_category_summary_table(
+    filtered: pd.DataFrame,
+    *,
+    reference_date: date | None = None,
+) -> pd.DataFrame:
     if filtered.empty or "subject" not in filtered.columns:
         return pd.DataFrame()
 
@@ -1995,18 +1999,46 @@ def build_category_summary_table(filtered: pd.DataFrame) -> pd.DataFrame:
     if not metric_columns:
         return pd.DataFrame()
 
-    grouped = (
-        filtered.dropna(subset=["subject"])
-        .groupby("subject", as_index=False)[metric_columns]
-        .sum(min_count=1)
-        .rename(columns={"subject": "Категория"})
+    if "report_date" not in filtered.columns:
+        grouped = (
+            filtered.dropna(subset=["subject"])
+            .groupby("subject", as_index=False)[metric_columns]
+            .sum(min_count=1)
+            .rename(columns={"subject": "Категория"})
+        )
+    else:
+        cutoffs = get_chart_metric_cutoffs(reference_date)
+        base_df = filtered.dropna(subset=["subject"]).copy()
+        base_df["report_date"] = pd.to_datetime(base_df["report_date"], errors="coerce").dt.date
+        total_df = base_df[base_df["report_date"].le(cutoffs["total_metrics_cutoff"])].copy()
+        confirmed_df = base_df[base_df["report_date"].le(cutoffs["ad_attribution_cutoff"])].copy()
+
+        total_grouped = (
+            total_df.groupby("subject", as_index=False)[["cart_count", "ad_campaign_spend_total"]]
+            .sum(min_count=1)
+            .rename(columns={"subject": "Категория"})
+        )
+        confirmed_grouped = (
+            confirmed_df.groupby("subject", as_index=False)[["ad_atbs_total", "ad_orders_total", "ad_campaign_spend_total"]]
+            .sum(min_count=1)
+            .rename(
+                columns={
+                    "subject": "Категория",
+                    "ad_campaign_spend_total": "ad_campaign_spend_total_confirmed",
+                }
+            )
+        )
+        grouped = total_grouped.merge(confirmed_grouped, on="Категория", how="outer")
+
+    spend_for_ad_metrics = (
+        "ad_campaign_spend_total_confirmed" if "ad_campaign_spend_total_confirmed" in grouped.columns else "ad_campaign_spend_total"
     )
     grouped["Стоимость корзины РК"] = grouped.apply(
-        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("ad_atbs_total")),
+        lambda row: safe_chart_divide(row.get(spend_for_ad_metrics), row.get("ad_atbs_total")),
         axis=1,
     )
     grouped["CPO РК"] = grouped.apply(
-        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("ad_orders_total")),
+        lambda row: safe_chart_divide(row.get(spend_for_ad_metrics), row.get("ad_orders_total")),
         axis=1,
     )
     grouped["Флаг превышения"] = grouped.apply(
@@ -2064,7 +2096,81 @@ def build_chart_scope_rows(
     return filtered.copy(), context
 
 
-def build_chart_metrics_by_date(scope_rows: pd.DataFrame) -> pd.DataFrame:
+def get_chart_metric_cutoffs(reference_date: date | None = None) -> dict[str, date]:
+    today = reference_date or datetime.now().date()
+    return {
+        "total_metrics_cutoff": today - timedelta(days=1),
+        "ad_spend_cutoff": today - timedelta(days=1),
+        "ad_attribution_cutoff": today - timedelta(days=2),
+    }
+
+
+def sum_chart_metric(
+    chart_df: pd.DataFrame,
+    column: str,
+    mask: pd.Series | None = None,
+) -> float | None:
+    if column not in chart_df.columns:
+        return None
+    series = pd.to_numeric(chart_df[column], errors="coerce")
+    if mask is not None:
+        series = series[mask]
+    return series.sum(min_count=1)
+
+
+def build_chart_period_summary(
+    chart_df: pd.DataFrame,
+    *,
+    reference_date: date | None = None,
+) -> dict[str, object]:
+    if chart_df.empty or "report_date" not in chart_df.columns:
+        return {
+            "total_carts": None,
+            "ad_carts": None,
+            "total_orders": None,
+            "ad_orders": None,
+            "ad_spend_total": None,
+            "ad_spend_confirmed": None,
+            "total_cart_cost": None,
+            "ad_cart_cost": None,
+            "total_cpo": None,
+            "ad_cpo": None,
+            "has_lagged_ad_attribution": False,
+        }
+
+    report_dates = pd.to_datetime(chart_df["report_date"], errors="coerce").dt.date
+    cutoffs = get_chart_metric_cutoffs(reference_date)
+    total_mask = report_dates.notna() & report_dates.le(cutoffs["total_metrics_cutoff"])
+    ad_spend_mask = report_dates.notna() & report_dates.le(cutoffs["ad_spend_cutoff"])
+    ad_attribution_mask = report_dates.notna() & report_dates.le(cutoffs["ad_attribution_cutoff"])
+
+    total_carts = sum_chart_metric(chart_df, "cart_count", total_mask)
+    total_orders = sum_chart_metric(chart_df, "order_count", total_mask)
+    ad_spend_total = sum_chart_metric(chart_df, "ad_campaign_spend_total", ad_spend_mask)
+    ad_carts = sum_chart_metric(chart_df, "ad_atbs_total_confirmed", ad_attribution_mask)
+    ad_orders = sum_chart_metric(chart_df, "ad_orders_total_confirmed", ad_attribution_mask)
+    ad_spend_confirmed = sum_chart_metric(chart_df, "ad_spend_confirmed", ad_attribution_mask)
+
+    return {
+        "total_carts": total_carts,
+        "ad_carts": ad_carts,
+        "total_orders": total_orders,
+        "ad_orders": ad_orders,
+        "ad_spend_total": ad_spend_total,
+        "ad_spend_confirmed": ad_spend_confirmed,
+        "total_cart_cost": safe_chart_divide(ad_spend_total, total_carts),
+        "ad_cart_cost": safe_chart_divide(ad_spend_confirmed, ad_carts),
+        "total_cpo": safe_chart_divide(ad_spend_total, total_orders),
+        "ad_cpo": safe_chart_divide(ad_spend_confirmed, ad_orders),
+        "has_lagged_ad_attribution": bool((report_dates > cutoffs["ad_attribution_cutoff"]).any()),
+    }
+
+
+def build_chart_metrics_by_date(
+    scope_rows: pd.DataFrame,
+    *,
+    reference_date: date | None = None,
+) -> pd.DataFrame:
     if scope_rows.empty:
         return pd.DataFrame()
 
@@ -2085,12 +2191,22 @@ def build_chart_metrics_by_date(scope_rows: pd.DataFrame) -> pd.DataFrame:
         .sum(min_count=1)
         .sort_values("report_date")
     )
+    grouped["report_date"] = pd.to_datetime(grouped["report_date"], errors="coerce").dt.date
+    cutoffs = get_chart_metric_cutoffs(reference_date)
+    lagged_mask = grouped["report_date"].gt(cutoffs["ad_attribution_cutoff"])
+    grouped["ad_attribution_status"] = lagged_mask.map({True: "AD_ATTRIBUTION_LAGGED", False: "OK"})
+    if "ad_atbs_total" in grouped.columns:
+        grouped["ad_atbs_total_confirmed"] = grouped["ad_atbs_total"].where(~lagged_mask)
+    if "ad_orders_total" in grouped.columns:
+        grouped["ad_orders_total_confirmed"] = grouped["ad_orders_total"].where(~lagged_mask)
+    if "ad_campaign_spend_total" in grouped.columns:
+        grouped["ad_spend_confirmed"] = grouped["ad_campaign_spend_total"].where(~lagged_mask)
     grouped["total_cart_cost"] = grouped.apply(
         lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("cart_count")),
         axis=1,
     )
     grouped["ad_cart_cost"] = grouped.apply(
-        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("ad_atbs_total")),
+        lambda row: safe_chart_divide(row.get("ad_spend_confirmed"), row.get("ad_atbs_total_confirmed")),
         axis=1,
     )
     grouped["total_cpo"] = grouped.apply(
@@ -2098,7 +2214,7 @@ def build_chart_metrics_by_date(scope_rows: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
     grouped["ad_cpo"] = grouped.apply(
-        lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("ad_orders_total")),
+        lambda row: safe_chart_divide(row.get("ad_spend_confirmed"), row.get("ad_orders_total_confirmed")),
         axis=1,
     )
     return grouped
@@ -2291,22 +2407,28 @@ def render_charts_tab(
         st.info("Нет данных за выбранный период.")
         return
 
+    st.caption(
+        "Важно: рекламные корзины и рекламные заказы могут быть доступны только до позавчера. "
+        "Поэтому стоимость корзины РК и CPO РК считаются только по датам с подтверждённой рекламной статистикой. "
+        "Итоговые корзины, итоговые заказы и расходы могут отображаться за вчера."
+    )
+
     if aggregation_level == "Кабинет":
         st.info("Графики построены по сумме всех товаров, попавших в текущие фильтры периода.")
     else:
         article_caption = f"{fmt_text(context.get('supplier_article'))} | {fmt_text(context.get('nm_id'))} | {fmt_text(context.get('title'))}"
         st.caption(f"Выбранный товар: {article_caption}")
 
-    total_carts = chart_df["cart_count"].sum(min_count=1) if "cart_count" in chart_df.columns else None
-    ad_carts = chart_df["ad_atbs_total"].sum(min_count=1) if "ad_atbs_total" in chart_df.columns else None
-    total_orders = chart_df["order_count"].sum(min_count=1) if "order_count" in chart_df.columns else None
-    ad_orders = chart_df["ad_orders_total"].sum(min_count=1) if "ad_orders_total" in chart_df.columns else None
-    ad_spend = chart_df["ad_campaign_spend_total"].sum(min_count=1) if "ad_campaign_spend_total" in chart_df.columns else None
-
-    total_cart_cost = safe_chart_divide(ad_spend, total_carts)
-    ad_cart_cost = safe_chart_divide(ad_spend, ad_carts)
-    total_cpo = safe_chart_divide(ad_spend, total_orders)
-    ad_cpo = safe_chart_divide(ad_spend, ad_orders)
+    period_summary = build_chart_period_summary(chart_df)
+    total_carts = period_summary["total_carts"]
+    ad_carts = period_summary["ad_carts"]
+    total_orders = period_summary["total_orders"]
+    ad_orders = period_summary["ad_orders"]
+    ad_spend = period_summary["ad_spend_total"]
+    total_cart_cost = period_summary["total_cart_cost"]
+    ad_cart_cost = period_summary["ad_cart_cost"]
+    total_cpo = period_summary["total_cpo"]
+    ad_cpo = period_summary["ad_cpo"]
 
     kpi_cols = st.columns(6)
     with kpi_cols[0]:
@@ -2322,13 +2444,16 @@ def render_charts_tab(
             threshold=CHART_THRESHOLD_CART_COST,
         )
     with kpi_cols[3]:
-        render_chart_kpi_card(
-            label="Стоимость корзины РК",
-            value=ad_cart_cost,
-            digits=1,
-            suffix=" руб.",
-            threshold=CHART_THRESHOLD_CART_COST,
-        )
+        if period_summary["has_lagged_ad_attribution"] and ad_cart_cost is None:
+            render_not_applicable_kpi_card(label="Стоимость корзины РК", reason="Корзины РК ещё не доступны")
+        else:
+            render_chart_kpi_card(
+                label="Стоимость корзины РК",
+                value=ad_cart_cost,
+                digits=1,
+                suffix=" руб.",
+                threshold=CHART_THRESHOLD_CART_COST,
+            )
     with kpi_cols[4]:
         render_chart_kpi_card(
             label="CPO ИТОГО",
@@ -2338,13 +2463,16 @@ def render_charts_tab(
             threshold=CHART_THRESHOLD_CPO,
         )
     with kpi_cols[5]:
-        render_chart_kpi_card(
-            label="CPO РК",
-            value=ad_cpo,
-            digits=1,
-            suffix=" руб.",
-            threshold=CHART_THRESHOLD_CPO,
-        )
+        if period_summary["has_lagged_ad_attribution"] and ad_cpo is None:
+            render_not_applicable_kpi_card(label="CPO РК", reason="Заказы РК ещё не доступны")
+        else:
+            render_chart_kpi_card(
+                label="CPO РК",
+                value=ad_cpo,
+                digits=1,
+                suffix=" руб.",
+                threshold=CHART_THRESHOLD_CPO,
+            )
 
     latest_report_date = chart_df["report_date"].dropna().max() if "report_date" in chart_df.columns else None
     if latest_report_date and latest_report_date > (datetime.now().date() - timedelta(days=2)):
@@ -2569,9 +2697,9 @@ def render_charts_tab(
     st.subheader("Корзины и эффективность")
     st.caption("Динамика корзин, стоимости корзины и CPO по выбранному периоду.")
     st.warning(
-        "Важно: корзины из РК могут быть доступны с задержкой до позавчера. "
-        "Итоговые корзины и расходы могут быть доступны за вчера. "
-        "Из-за этого за последние даты сравнение «Итого vs РК» может быть неполным."
+        "Важно: рекламные корзины и рекламные заказы могут быть доступны только до позавчера. "
+        "Поэтому стоимость корзины РК и CPO РК считаются только по датам с подтверждённой рекламной статистикой. "
+        "Итоговые корзины, итоговые заказы и расходы могут отображаться за вчера."
     )
 
     aggregation_level = st.radio("Уровень агрегации", options=CHART_AGGREGATION_LEVELS, horizontal=True)
@@ -2675,16 +2803,16 @@ def render_charts_tab(
         article_caption = f"{fmt_text(context.get('supplier_article'))} | {fmt_text(context.get('nm_id'))} | {fmt_text(context.get('title'))}"
         st.caption(f"Выбранный товар: {article_caption}")
 
-    total_carts = chart_df["cart_count"].sum(min_count=1) if "cart_count" in chart_df.columns else None
-    ad_carts = chart_df["ad_atbs_total"].sum(min_count=1) if "ad_atbs_total" in chart_df.columns else None
-    total_orders = chart_df["order_count"].sum(min_count=1) if "order_count" in chart_df.columns else None
-    ad_orders = chart_df["ad_orders_total"].sum(min_count=1) if "ad_orders_total" in chart_df.columns else None
-    ad_spend = chart_df["ad_campaign_spend_total"].sum(min_count=1) if "ad_campaign_spend_total" in chart_df.columns else None
-
-    total_cart_cost = safe_chart_divide(ad_spend, total_carts)
-    ad_cart_cost = safe_chart_divide(ad_spend, ad_carts)
-    total_cpo = safe_chart_divide(ad_spend, total_orders)
-    ad_cpo = safe_chart_divide(ad_spend, ad_orders)
+    period_summary = build_chart_period_summary(chart_df)
+    total_carts = period_summary["total_carts"]
+    ad_carts = period_summary["ad_carts"]
+    total_orders = period_summary["total_orders"]
+    ad_orders = period_summary["ad_orders"]
+    ad_spend = period_summary["ad_spend_total"]
+    total_cart_cost = period_summary["total_cart_cost"]
+    ad_cart_cost = period_summary["ad_cart_cost"]
+    total_cpo = period_summary["total_cpo"]
+    ad_cpo = period_summary["ad_cpo"]
 
     is_conversion_level = aggregation_level == CHART_LEVEL_CONVERSION
     kpi_cols = st.columns(6)
@@ -2707,13 +2835,16 @@ def render_charts_tab(
                 threshold=CHART_THRESHOLD_CART_COST,
             )
     with kpi_cols[3]:
-        render_chart_kpi_card(
-            label="Стоимость корзины РК",
-            value=ad_cart_cost,
-            digits=1,
-            suffix=" руб.",
-            threshold=CHART_THRESHOLD_CART_COST,
-        )
+        if period_summary["has_lagged_ad_attribution"] and ad_cart_cost is None:
+            render_not_applicable_kpi_card(label="Стоимость корзины РК", reason="Корзины РК ещё не доступны")
+        else:
+            render_chart_kpi_card(
+                label="Стоимость корзины РК",
+                value=ad_cart_cost,
+                digits=1,
+                suffix=" руб.",
+                threshold=CHART_THRESHOLD_CART_COST,
+            )
     with kpi_cols[4]:
         if is_conversion_level:
             render_not_applicable_kpi_card(label="CPO ИТОГО", reason="Метрика не применяется на уровне типа WB")
@@ -2726,18 +2857,20 @@ def render_charts_tab(
                 threshold=CHART_THRESHOLD_CPO,
             )
     with kpi_cols[5]:
-        render_chart_kpi_card(
-            label="CPO РК",
-            value=ad_cpo,
-            digits=1,
-            suffix=" руб.",
-            threshold=CHART_THRESHOLD_CPO,
-        )
+        if period_summary["has_lagged_ad_attribution"] and ad_cpo is None:
+            render_not_applicable_kpi_card(label="CPO РК", reason="Заказы РК ещё не доступны")
+        else:
+            render_chart_kpi_card(
+                label="CPO РК",
+                value=ad_cpo,
+                digits=1,
+                suffix=" руб.",
+                threshold=CHART_THRESHOLD_CPO,
+            )
     st.caption(f"Расход РК за период: {format_chart_kpi_value(ad_spend, digits=2, suffix=' руб.')}")
 
-    latest_report_date = chart_df["report_date"].dropna().max() if "report_date" in chart_df.columns else None
-    if latest_report_date and latest_report_date > (datetime.now().date() - timedelta(days=2)):
-        st.caption("Статус корзин РК: MAY_BE_INCOMPLETE")
+    if period_summary["has_lagged_ad_attribution"]:
+        st.caption("Статус рекламной атрибуции: AD_ATTRIBUTION_LAGGED")
 
     st.markdown("### Динамика корзин")
     st.caption(
@@ -2748,9 +2881,9 @@ def render_charts_tab(
     carts_chart = build_user_friendly_chart(
         chart_df=chart_df,
         series_map=(
-            {"cart_count": "Итоговые корзины", "ad_atbs_total": "Корзины РК"}
+            {"cart_count": "Итоговые корзины", "ad_atbs_total_confirmed": "Корзины РК"}
             if not is_conversion_level
-            else {"ad_atbs_total": "Корзины РК"}
+            else {"ad_atbs_total_confirmed": "Корзины РК"}
         ),
         y_title="Корзины, шт.",
         tooltip_value_title="Значение, шт.",

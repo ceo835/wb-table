@@ -17,6 +17,7 @@ from app_streamlit import (
     build_debug_snapshot,
     build_debug_trace_frame,
     build_chart_metrics_by_date,
+    build_chart_period_summary,
     build_chart_product_options,
     build_chart_scope_rows,
     build_threshold_breaches_table,
@@ -467,6 +468,94 @@ def test_build_chart_metrics_by_date_calculates_user_friendly_metrics() -> None:
     assert pd.isna(second["ad_cart_cost"])
     assert pd.isna(second["total_cpo"])
     assert pd.isna(second["ad_cpo"])
+
+
+def test_build_chart_metrics_by_date_marks_yesterday_ad_attribution_as_lagged() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-06",
+                "cart_count": 10,
+                "ad_atbs_total": 5,
+                "order_count": 4,
+                "ad_orders_total": 2,
+                "ad_campaign_spend_total": 100,
+            },
+            {
+                "report_date": "2026-06-07",
+                "cart_count": 8,
+                "ad_atbs_total": 3,
+                "order_count": 3,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 50,
+            },
+        ]
+    )
+
+    result = build_chart_metrics_by_date(source_df, reference_date=datetime(2026, 6, 8).date())
+
+    mature_row = result.loc[result["report_date"] == pd.to_datetime("2026-06-06").date()].iloc[0]
+    lagged_row = result.loc[result["report_date"] == pd.to_datetime("2026-06-07").date()].iloc[0]
+
+    assert mature_row["ad_attribution_status"] == "OK"
+    assert float(mature_row["ad_atbs_total_confirmed"]) == 5.0
+    assert float(mature_row["ad_orders_total_confirmed"]) == 2.0
+    assert float(mature_row["ad_spend_confirmed"]) == 100.0
+    assert float(mature_row["ad_cart_cost"]) == 20.0
+    assert float(mature_row["ad_cpo"]) == 50.0
+
+    assert lagged_row["ad_attribution_status"] == "AD_ATTRIBUTION_LAGGED"
+    assert pd.isna(lagged_row["ad_atbs_total_confirmed"])
+    assert pd.isna(lagged_row["ad_orders_total_confirmed"])
+    assert pd.isna(lagged_row["ad_spend_confirmed"])
+    assert pd.isna(lagged_row["ad_cart_cost"])
+    assert pd.isna(lagged_row["ad_cpo"])
+    assert float(lagged_row["total_cart_cost"]) == 6.25
+
+
+def test_build_chart_period_summary_uses_separate_cutoffs_for_total_and_ad_metrics() -> None:
+    chart_df = pd.DataFrame(
+        [
+            {
+                "report_date": pd.to_datetime("2026-06-06").date(),
+                "cart_count": 10,
+                "ad_atbs_total": 5,
+                "ad_atbs_total_confirmed": 5,
+                "order_count": 4,
+                "ad_orders_total": 2,
+                "ad_orders_total_confirmed": 2,
+                "ad_campaign_spend_total": 100,
+                "ad_spend_confirmed": 100,
+                "ad_attribution_status": "OK",
+            },
+            {
+                "report_date": pd.to_datetime("2026-06-07").date(),
+                "cart_count": 8,
+                "ad_atbs_total": 3,
+                "ad_atbs_total_confirmed": None,
+                "order_count": 3,
+                "ad_orders_total": 1,
+                "ad_orders_total_confirmed": None,
+                "ad_campaign_spend_total": 50,
+                "ad_spend_confirmed": None,
+                "ad_attribution_status": "AD_ATTRIBUTION_LAGGED",
+            },
+        ]
+    )
+
+    summary = build_chart_period_summary(chart_df, reference_date=datetime(2026, 6, 8).date())
+
+    assert float(summary["total_carts"]) == 18.0
+    assert float(summary["total_orders"]) == 7.0
+    assert float(summary["ad_spend_total"]) == 150.0
+    assert float(summary["ad_carts"]) == 5.0
+    assert float(summary["ad_orders"]) == 2.0
+    assert float(summary["ad_spend_confirmed"]) == 100.0
+    assert round(float(summary["total_cart_cost"]), 4) == round(150.0 / 18.0, 4)
+    assert round(float(summary["total_cpo"]), 4) == round(150.0 / 7.0, 4)
+    assert float(summary["ad_cart_cost"]) == 20.0
+    assert float(summary["ad_cpo"]) == 50.0
+    assert summary["has_lagged_ad_attribution"] is True
 
 
 def test_build_chart_product_options_filters_to_ad_active_products_by_default() -> None:
