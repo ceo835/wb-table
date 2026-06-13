@@ -44,6 +44,7 @@ LATEST_MODE_LABEL = "Последняя дата + динамика"
 BY_DATE_MODE_LABEL = "По датам"
 CHART_THRESHOLD_CART_COST = 35.0
 CHART_THRESHOLD_CPO = 150.0
+STYLER_MAX_CELLS = 250_000
 
 DISPLAY_COLUMNS_BY_DATE = [
     "product_group_label",
@@ -1246,7 +1247,7 @@ def build_product_timeline_dataset(product_rows: pd.DataFrame) -> pd.DataFrame:
     return timeline.sort_values("report_date", ascending=False, na_position="last")
 
 
-def style_table(df: pd.DataFrame, status_column: str) -> pd.io.formats.style.Styler:
+def style_table(df: pd.DataFrame, status_column: str | None = None) -> pd.io.formats.style.Styler:
     def status_color(value: object) -> str:
         if value in ("Нет данных", "NO_DATA"):
             return "background-color: #fde2e4; color: #7f1d1d;"
@@ -1276,6 +1277,20 @@ def style_table(df: pd.DataFrame, status_column: str) -> pd.io.formats.style.Sty
 
         styler = styler.apply(highlight_product_group, axis=1)
     return styler.format(precision=2, na_rep="—")
+
+
+def prepare_dataframe_for_streamlit_display(
+    df: pd.DataFrame,
+    status_column: str | None = None,
+) -> pd.DataFrame | pd.io.formats.style.Styler:
+    cells_count = int(df.shape[0]) * int(df.shape[1])
+    if cells_count > STYLER_MAX_CELLS:
+        st.caption(
+            f"Большая таблица: {df.shape[0]} строк × {df.shape[1]} колонок = {cells_count:,} ячеек. "
+            "Цветовое оформление отключено для стабильной загрузки."
+        )
+        return df
+    return style_table(df, status_column=status_column)
 
 
 def build_export_dataframe(table_df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
@@ -1425,7 +1440,10 @@ def render_overview_tab(
             st.caption("Coverage по display-заменам: сколько значений были NULL, сколько стали 0 по правилам display-слоя, сколько осталось реально > 0.")
             st.dataframe(display_coverage, width="stretch", hide_index=True)
     st.dataframe(
-        style_table(table_display_df, status_column=status_column),
+        prepare_dataframe_for_streamlit_display(
+            table_display_df,
+            status_column=status_column,
+        ),
         width="stretch",
         hide_index=True,
         height=720,
