@@ -1,0 +1,23 @@
+[phases.setup]
+aptPkgs = [
+  "libnss3",
+  "libnspr4",
+  "libatk1.0-0",
+  "libatk-bridge2.0-0",
+  "libatspi2.0-0",
+  "libxcomposite1",
+  "libxdamage1",
+  "libxfixes3",
+  "libxrandr2",
+  "libgbm1",
+  "libxkbcommon0",
+  "libxshmfence1",
+  "libasound2",
+  "libgtk-3-0",
+  "libdrm2",
+  "libdbus-1-3",
+  "libcups2"
+]
+
+[phases.build]
+cmds = ["python -m playwright install chromium"]

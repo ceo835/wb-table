@@ -18,8 +18,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.export_streamlit_v1_dataset import export_streamlit_v1_dataset
+from scripts.load_wb_site_price_snapshot import load_wb_site_price_snapshot
 from scripts.load_missing_core_dates import run_missing_core_dates_load
 from sqlalchemy import select
+from src.config.settings import settings
 from src.db.models import FactStockWarehouseSnapshot
 from src.db.mart_total_report_builder import build_mart_total_report
 from src.db.session import session_scope
@@ -55,6 +57,11 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
         f"- Warehouse unique nm_id: {summary.get('warehouse_unique_nm_id', '')}",
         f"- Warehouse unique chrt_id: {summary.get('warehouse_unique_chrt_id', '')}",
         f"- Warehouse unique warehouses: {summary.get('warehouse_unique_warehouses', '')}",
+        f"- WB site price monitor: {summary.get('wb_site_price_monitor_status', '')}",
+        f"- WB site price requested nm_id: {summary.get('wb_site_price_requested_nm_ids', '')}",
+        f"- WB site price success count: {summary.get('wb_site_price_success_count', '')}",
+        f"- WB site price failed count: {summary.get('wb_site_price_failed_count', '')}",
+        f"- WB site price alerts count: {summary.get('wb_site_price_alerts_count', '')}",
         f"- Missing tracked nm_id: {', '.join(str(item) for item in summary.get('missing_tracked_nm_id', [])) or 'none'}",
         f"- Mart rows: {summary.get('mart_total_report_rows', '')}",
         f"- Streamlit dataset rows: {summary.get('streamlit_dataset_rows', '')}",
@@ -63,6 +70,8 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
     ]
     if summary.get("error_message"):
         lines.extend(["", "## Error", "", summary["error_message"]])
+    if summary.get("wb_site_price_monitor_error"):
+        lines.extend(["", "## WB Site Price Monitor Error", "", summary["wb_site_price_monitor_error"]])
     return "\n".join(lines) + "\n"
 
 
@@ -93,6 +102,7 @@ def run_daily_dashboard_refresh(
     mart_version: str = "v2",
 ) -> dict[str, Any]:
     resolved_run_date = run_date or date.today()
+    current_step = "validation"
     summary: dict[str, Any] = {
         "run_started_at": utc_now_iso(),
         "run_finished_at": "",
@@ -107,6 +117,12 @@ def run_daily_dashboard_refresh(
         "warehouse_unique_nm_id": None,
         "warehouse_unique_chrt_id": None,
         "warehouse_unique_warehouses": None,
+        "wb_site_price_monitor_status": "",
+        "wb_site_price_monitor_error": "",
+        "wb_site_price_requested_nm_ids": None,
+        "wb_site_price_success_count": None,
+        "wb_site_price_failed_count": None,
+        "wb_site_price_alerts_count": None,
         "missing_tracked_nm_id": [],
         "mart_total_report_rows": None,
         "streamlit_dataset_rows": None,
@@ -119,6 +135,38 @@ def run_daily_dashboard_refresh(
         if resolved_run_date < date_from:
             raise ValueError("run_date не может быть раньше date_from.")
 
+        if settings.wb_site_price_monitor_enabled:
+            current_step = "wb_site_price_monitor"
+            try:
+                site_price_summary = load_wb_site_price_snapshot(
+                    snapshot_date=resolved_run_date,
+                    tracked_products=True,
+                    write_db=True,
+                )
+                summary["wb_site_price_summary"] = site_price_summary
+                summary["wb_site_price_requested_nm_ids"] = site_price_summary.get("requested_nm_ids_count")
+                summary["wb_site_price_success_count"] = site_price_summary.get("success_count")
+                summary["wb_site_price_failed_count"] = site_price_summary.get("failed_count")
+                summary["wb_site_price_alerts_count"] = site_price_summary.get("alerts_count")
+                if site_price_summary.get("success"):
+                    summary["wb_site_price_monitor_status"] = "success"
+                    summary["api_statuses"]["wb_site_price_monitor"] = "success"
+                else:
+                    summary["wb_site_price_monitor_status"] = "failed_optional"
+                    summary["wb_site_price_monitor_error"] = (
+                        site_price_summary.get("error") or "wb site price snapshot failed"
+                    )
+                    summary["api_statuses"]["wb_site_price_monitor"] = "failed_optional"
+            except Exception as exc:
+                summary["wb_site_price_monitor_status"] = "failed_optional"
+                summary["wb_site_price_monitor_error"] = str(exc)
+                summary["api_statuses"]["wb_site_price_monitor"] = "failed_optional"
+        else:
+            summary["wb_site_price_monitor_status"] = "skipped_disabled"
+            summary["api_statuses"]["wb_site_price_monitor"] = "skipped_disabled"
+        summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
+
+        current_step = "warehouse_snapshot"
         warehouse_summary = load_stock_warehouse_snapshot(
             snapshot_date=resolved_run_date,
             tracked_products=True,
@@ -144,6 +192,7 @@ def run_daily_dashboard_refresh(
         summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
 
         if include_core_refresh:
+            current_step = "core_refresh"
             core_summary = run_missing_core_dates_load(
                 date_from=date_from,
                 date_to=resolved_run_date,
@@ -158,22 +207,19 @@ def run_daily_dashboard_refresh(
                 summary["failed_steps"].append("core_refresh")
             summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
 
+        current_step = "mart_refresh"
         mart_summary = build_mart_total_report(date_from, resolved_run_date, version=mart_version)
         summary["mart_summary"] = mart_summary
         summary["mart_total_report_rows"] = mart_summary.get("rows_in_db")
         summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
 
+        current_step = "streamlit_export"
         dataset_summary = export_streamlit_v1_dataset(date_from, resolved_run_date)
         summary["streamlit_dataset_summary"] = dataset_summary
         summary["streamlit_dataset_rows"] = dataset_summary.get("total_rows")
         summary["success"] = not summary["failed_steps"]
     except Exception as exc:
         if not summary["failed_steps"]:
-            current_step = "warehouse_snapshot"
-            if summary.get("warehouse_snapshot_rows") is not None and summary.get("mart_total_report_rows") is None:
-                current_step = "mart_refresh"
-            elif summary.get("mart_total_report_rows") is not None and summary.get("streamlit_dataset_rows") is None:
-                current_step = "streamlit_export"
             summary["failed_steps"].append(current_step)
         summary["error_message"] = str(exc)
         summary["traceback"] = traceback.format_exc()

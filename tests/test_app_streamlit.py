@@ -26,6 +26,7 @@ from app_streamlit import (
     build_threshold_breaches_table,
     build_export_dataframe,
     build_data_quality_label,
+    build_wb_site_price_monitor_dataframe,
     filter_products_with_period_data,
     format_wb_conversion_type_label,
     build_grouped_by_date_dataset,
@@ -43,9 +44,11 @@ from app_streamlit import (
     is_password_protection_enabled,
     inspect_tracked_metadata_state,
     prepare_dataframe_for_streamlit_display,
+    prepare_stock_warehouse_table_for_display,
     resolve_data_source,
     prepare_dataframe,
     build_stock_warehouse_product_table,
+    build_stock_warehouse_display_dataframe,
     build_stock_warehouse_summary_metrics,
     resolve_effective_import_date,
     resolve_export_range,
@@ -240,6 +243,222 @@ def test_build_stock_warehouse_product_table_marks_missing_selected_warehouse_as
     assert row["zero_warehouses_count"] == 0
     assert row["no_data_warehouses_count"] == 1
     assert row["stock_status"] == "NO_DATA_ON_WAREHOUSE"
+
+
+def test_build_stock_warehouse_product_table_adds_main_warehouse_aggregates_problem_status_and_sorting() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 10,
+                "chrt_id": 1,
+                "warehouse_id": 1,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 0,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 10,
+                "chrt_id": 1,
+                "warehouse_id": 2,
+                "warehouse_name": "Тула",
+                "stock_qty": 5,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 20,
+                "chrt_id": 1,
+                "warehouse_id": 1,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 7,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 30,
+                "chrt_id": 1,
+                "warehouse_id": 1,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 9,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 30,
+                "chrt_id": 1,
+                "warehouse_id": 2,
+                "warehouse_name": "Тула",
+                "stock_qty": 4,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 10, "tracked_label": "A zero", "is_tracked": True, "lifecycle_status": "active"},
+            {"nm_id": 20, "tracked_label": "B partial", "is_tracked": True, "lifecycle_status": "active"},
+            {"nm_id": 30, "tracked_label": "C ok sellout", "is_tracked": True, "lifecycle_status": "sellout"},
+        ]
+    )
+
+    result = build_stock_warehouse_product_table(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=pd.Timestamp("2026-06-15").date(),
+        selected_warehouses=["Владимир WB", "Тула"],
+        main_warehouses=["Владимир WB", "Тула"],
+        show_only_tracked=True,
+        show_sellout=True,
+    )
+
+    assert result["nm_id"].tolist() == [10, 20, 30]
+    first_row = result.iloc[0]
+    second_row = result.iloc[1]
+    third_row = result.iloc[2]
+
+    assert first_row["problem_status"] == "ZERO_ON_MAIN_WAREHOUSES"
+    assert first_row["total_main_warehouses"] == 5
+    assert first_row["warehouses_with_stock"] == 1
+
+    assert second_row["problem_status"] == "PARTIAL_STOCK"
+    assert second_row["total_main_warehouses"] == 7
+    assert second_row["warehouses_with_stock"] == 1
+
+    assert third_row["problem_status"] == "OK"
+    assert third_row["total_main_warehouses"] == 13
+    assert third_row["warehouses_with_stock"] == 2
+
+
+def test_prepare_stock_warehouse_table_for_display_replaces_no_data_with_dash_and_keeps_zero_highlight() -> None:
+    df = pd.DataFrame(
+        [
+            {"Артикул WB": 1, "Владимир WB": "NO_DATA", "Тула": 0, "problem_status": "NO_DATA_ON_MAIN_WAREHOUSES"},
+        ]
+    )
+
+    styled = prepare_stock_warehouse_table_for_display(df, ["Владимир WB", "Тула"])
+
+    assert isinstance(styled, Styler)
+    assert styled.data.loc[0, "Владимир WB"] == "—"
+    assert styled.data.loc[0, "Тула"] == 0
+
+    html = styled.to_html()
+    assert "#e5e7eb" in html
+    assert "#fde2e4" in html
+
+
+def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_problem_tables() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "nm_id": 197330807,
+                "tracked_label": "BlackWOM5",
+                "lifecycle_status": "active",
+                "Владимир WB": "NO_DATA",
+                "Тула": 0,
+                "zero_warehouses_count": 1,
+                "no_data_warehouses_count": 1,
+                "problem_status": "ZERO_ON_MAIN_WAREHOUSES",
+                "zero_warehouses": "Тула",
+                "no_data_warehouses": "Владимир WB",
+                "problem_warehouses": "Владимир WB, Тула",
+                "total_main_warehouses": 0,
+                "warehouses_with_stock": 0,
+            }
+        ]
+    )
+
+    main_display = build_stock_warehouse_display_dataframe(df, problem_table=False)
+    problem_display = build_stock_warehouse_display_dataframe(df, problem_table=True)
+
+    assert "problem_status" not in main_display.columns
+    assert "Проблема" in main_display.columns
+    assert main_display.loc[0, "Статус товара"] == "Основной"
+    assert main_display.loc[0, "Проблема"] == "Есть нулевые остатки"
+    assert main_display.loc[0, "Владимир WB"] == "—"
+    assert main_display.loc[0, "Тула"] == 0
+    assert main_display.loc[0, "Складов с нулём"] == 1
+    assert main_display.loc[0, "Складов без данных"] == 1
+
+    assert problem_display.columns.tolist() == [
+        "Артикул WB",
+        "Название",
+        "Статус товара",
+        "Нулевые склады",
+        "Склады без данных",
+        "Проблема",
+    ]
+    assert problem_display.loc[0, "Проблема"] == "Есть нулевые остатки"
+
+
+def test_build_wb_site_price_monitor_dataframe_uses_russian_problem_labels() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_at": "2026-06-17T08:00:00+00:00",
+                "snapshot_date": "2026-06-17",
+                "nm_id": 197330807,
+                "item_label": "BlackWOM5",
+                "lifecycle_status": "active",
+                "buyer_visible_price": 1299.0,
+                "fetch_status": "success",
+            },
+            {
+                "snapshot_at": "2026-06-17T08:05:00+00:00",
+                "snapshot_date": "2026-06-17",
+                "nm_id": 37320545,
+                "item_label": "ЧББ",
+                "lifecycle_status": "sellout",
+                "buyer_visible_price": None,
+                "fetch_status": "no_price_data",
+            },
+        ]
+    )
+    alert_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-17",
+                "nm_id": 197330807,
+                "previous_success_price": 1190.0,
+                "price_delta": 109.0,
+                "alert_status": "PRICE_CHANGED_50",
+            },
+            {
+                "snapshot_date": "2026-06-17",
+                "nm_id": 37320545,
+                "previous_success_price": None,
+                "price_delta": None,
+                "alert_status": "NO_PRICE_DATA",
+            },
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 197330807, "tracked_label": "BlackWOM5", "lifecycle_status": "active"},
+            {"nm_id": 37320545, "tracked_label": "ЧББ", "lifecycle_status": "sellout"},
+        ]
+    )
+
+    display_df = build_wb_site_price_monitor_dataframe(
+        snapshot_df,
+        alert_df,
+        tracked_df,
+        snapshot_date=pd.Timestamp("2026-06-17").date(),
+        show_sellout=True,
+        only_problematic=False,
+    )
+
+    assert display_df.loc[0, "Проблема"] == "Цена изменилась на 50 ₽ или больше"
+    assert display_df.loc[0, "Статус товара"] == "Основной"
+    assert display_df.loc[1, "Проблема"] == "Нет данных по цене"
+    assert display_df.loc[1, "Статус товара"] == "Распродажа"
 
 
 def test_build_stock_warehouse_summary_metrics_counts_ok_zero_and_no_data_rows() -> None:

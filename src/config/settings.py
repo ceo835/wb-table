@@ -42,6 +42,8 @@ def get_env_variable(name: str, required: bool = False, default: str = None) -> 
 WB_TOKEN = get_env_variable("WB_TOKEN", required=False)
 WB_ANALYTICS_TOKEN = get_env_variable("WB_ANALYTICS_TOKEN", required=False)
 MPSTATS_API_TOKEN = get_env_variable("MPSTATS_API_TOKEN", required=False)
+WB_SITE_PRICE_PROXY_URL = get_env_variable("WB_SITE_PRICE_PROXY_URL", required=False)
+WB_SITE_PRICE_MONITOR_ENABLED = get_env_variable("WB_SITE_PRICE_MONITOR_ENABLED", required=False, default="false")
 ENV = get_env_variable("ENV", required=False, default="dev")
 DATABASE_URL = get_env_variable("DATABASE_URL", required=False)
 ALLOW_PROD_DB = get_env_variable("ALLOW_PROD_DB", required=False, default="false")
@@ -77,6 +79,8 @@ class Settings:
         self.wb_token = WB_TOKEN
         self.wb_analytics_token = WB_ANALYTICS_TOKEN
         self.mpstats_api_token = MPSTATS_API_TOKEN
+        self.wb_site_price_proxy_url = WB_SITE_PRICE_PROXY_URL
+        self.wb_site_price_monitor_enabled = WB_SITE_PRICE_MONITOR_ENABLED.lower() in {"1", "true", "yes", "on"}
         self.google_application_credentials = GOOGLE_APPLICATION_CREDENTIALS
         self.google_sheet_id = GOOGLE_SHEET_ID
         self.data_raw_dir = DATA_RAW_DIR

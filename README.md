@@ -45,6 +45,13 @@ STREAMLIT_DATA_SOURCE=csv
 APP_PASSWORD=...
 ```
 
+Для WB site price monitor:
+
+```env
+WB_SITE_PRICE_MONITOR_ENABLED=false
+WB_SITE_PRICE_PROXY_URL=http://user:pass@host:port
+```
+
 ### 3. Прогнать проверки
 
 ```bash
@@ -71,6 +78,8 @@ streamlit run app_streamlit.py
 
 - `ENV=dev`
 - `ALLOW_PROD_DB=false`
+- `WB_SITE_PRICE_MONITOR_ENABLED=false`
+- `WB_SITE_PRICE_PROXY_URL=...` только для site monitor, без глобальных `HTTP_PROXY` / `HTTPS_PROXY`
 
 ### Не нужны для просмотра dashboard
 
@@ -111,6 +120,8 @@ streamlit run app_streamlit.py --server.port $PORT --server.address 0.0.0.0
 DATABASE_URL=postgresql://...
 STREAMLIT_DATA_SOURCE=db
 APP_PASSWORD=...
+WB_SITE_PRICE_MONITOR_ENABLED=false
+WB_SITE_PRICE_PROXY_URL=http://user:pass@host:port
 ```
 
 ## Безопасность публикации

@@ -4,6 +4,7 @@ import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import scripts.run_daily_dashboard_refresh as daily_refresh_script
 import scripts.load_stock_warehouse_snapshot as stock_snapshot_script
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
@@ -37,7 +38,18 @@ def test_load_stock_warehouse_default_snapshot_date_uses_today(monkeypatch) -> N
 
 def test_run_daily_dashboard_refresh_writes_summary_files(monkeypatch, tmp_path: Path) -> None:
     run_date = date(2026, 6, 18)
+    monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", True, raising=False)
 
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_wb_site_price_snapshot",
+        lambda **kwargs: {
+            "success": True,
+            "requested_nm_ids_count": 59,
+            "success_count": 52,
+            "failed_count": 7,
+            "alerts_count": 3,
+        },
+    )
     monkeypatch.setattr(
         "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
         lambda **kwargs: {
@@ -93,12 +105,24 @@ def test_run_daily_dashboard_refresh_writes_summary_files(monkeypatch, tmp_path:
 
     saved_summary = json.loads(json_path.read_text(encoding="utf-8"))
     assert saved_summary["success"] is True
-    assert saved_summary["api_statuses"] == {"warehouse_snapshot": "200"}
+    assert saved_summary["api_statuses"] == {"wb_site_price_monitor": "success", "warehouse_snapshot": "200"}
     assert "warehouse_snapshot" in md_path.read_text(encoding="utf-8")
 
 
 def test_run_daily_dashboard_refresh_persists_failure_summary(monkeypatch, tmp_path: Path) -> None:
     run_date = date(2026, 6, 18)
+    monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", True, raising=False)
+
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_wb_site_price_snapshot",
+        lambda **kwargs: {
+            "success": True,
+            "requested_nm_ids_count": 59,
+            "success_count": 52,
+            "failed_count": 7,
+            "alerts_count": 3,
+        },
+    )
 
     def fail_snapshot(**_: object) -> dict[str, object]:
         raise RuntimeError("warehouse snapshot failed")
@@ -124,6 +148,119 @@ def test_run_daily_dashboard_refresh_persists_failure_summary(monkeypatch, tmp_p
     saved_summary = json.loads(json_path.read_text(encoding="utf-8"))
     assert saved_summary["success"] is False
     assert saved_summary["failed_steps"] == ["warehouse_snapshot"]
+
+
+def test_run_daily_dashboard_refresh_skips_price_monitor_when_disabled(monkeypatch, tmp_path: Path) -> None:
+    run_date = date(2026, 6, 18)
+    monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", False, raising=False)
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_wb_site_price_snapshot",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("price monitor should not run when disabled")),
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
+        lambda **kwargs: {
+            "snapshot_date": kwargs["snapshot_date"].isoformat(),
+            "api_status": "200",
+            "rows_in_db_for_snapshot": 2999,
+            "unique_nm_ids": 58,
+            "unique_chrt_ids": 429,
+            "unique_warehouses": 83,
+            "request_attempts": [{"status": "200"}],
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.build_mart_total_report",
+        lambda date_from, date_to, version="v2": {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "rows_built": 2470,
+            "rows_in_db": 2470,
+            "version": version,
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.export_streamlit_v1_dataset",
+        lambda date_from, date_to: {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "total_rows": 2470,
+            "output_path": "data/processed/streamlit_v1_dataset.csv",
+        },
+    )
+
+    summary = run_daily_dashboard_refresh(
+        run_date=run_date,
+        date_from=DEFAULT_DASHBOARD_START_DATE,
+        output_dir=tmp_path,
+        include_core_refresh=False,
+    )
+
+    assert summary["success"] is True
+    assert summary["wb_site_price_monitor_status"] == "skipped_disabled"
+    assert summary["api_statuses"]["wb_site_price_monitor"] == "skipped_disabled"
+
+
+def test_run_daily_dashboard_refresh_continues_when_price_monitor_fails_optionally(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_date = date(2026, 6, 18)
+    monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", True, raising=False)
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_wb_site_price_snapshot",
+        lambda **kwargs: {
+            "success": False,
+            "error": "proxy timeout",
+            "requested_nm_ids_count": 3,
+            "success_count": 0,
+            "failed_count": 3,
+            "alerts_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
+        lambda **kwargs: {
+            "snapshot_date": kwargs["snapshot_date"].isoformat(),
+            "api_status": "200",
+            "rows_in_db_for_snapshot": 2999,
+            "unique_nm_ids": 58,
+            "unique_chrt_ids": 429,
+            "unique_warehouses": 83,
+            "request_attempts": [{"status": "200"}],
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.build_mart_total_report",
+        lambda date_from, date_to, version="v2": {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "rows_built": 2470,
+            "rows_in_db": 2470,
+            "version": version,
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.export_streamlit_v1_dataset",
+        lambda date_from, date_to: {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "total_rows": 2470,
+            "output_path": "data/processed/streamlit_v1_dataset.csv",
+        },
+    )
+
+    summary = run_daily_dashboard_refresh(
+        run_date=run_date,
+        date_from=DEFAULT_DASHBOARD_START_DATE,
+        output_dir=tmp_path,
+        include_core_refresh=False,
+    )
+
+    assert summary["success"] is True
+    assert summary["failed_steps"] == []
+    assert summary["wb_site_price_monitor_status"] == "failed_optional"
+    assert summary["wb_site_price_monitor_error"] == "proxy timeout"
+    assert summary["api_statuses"]["wb_site_price_monitor"] == "failed_optional"
 
 
 def test_app_job_runs_enforces_unique_job_name_and_run_date() -> None:

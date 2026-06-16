@@ -665,6 +665,50 @@ class AppJobRun(Base):
     )
 
 
+class FactWbSitePriceSnapshot(Base):
+    __tablename__ = "fact_wb_site_price_snapshot"
+    __table_args__ = (
+        UniqueConstraint("snapshot_date", "nm_id", name="uq_fact_wb_site_price_snapshot_date_nm_id"),
+        Index("idx_fact_wb_site_price_snapshot_date_nm", "snapshot_date", "nm_id"),
+        Index("idx_fact_wb_site_price_snapshot_fetch_status", "fetch_status", "snapshot_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    item_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lifecycle_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    buyer_visible_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    price_text_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    availability_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fetch_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proxy_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    raw_payload: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FactWbSitePriceAlert(Base):
+    __tablename__ = "fact_wb_site_price_alert"
+    __table_args__ = (
+        UniqueConstraint("snapshot_date", "nm_id", name="uq_fact_wb_site_price_alert_date_nm_id"),
+        Index("idx_fact_wb_site_price_alert_date_nm", "snapshot_date", "nm_id"),
+        Index("idx_fact_wb_site_price_alert_status", "alert_status", "snapshot_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    current_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    previous_success_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    price_delta: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    alert_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class MartTotalReport(Base, StatusMixin):
     __tablename__ = "mart_total_report"
     __table_args__ = (
