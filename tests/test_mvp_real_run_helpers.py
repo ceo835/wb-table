@@ -169,6 +169,72 @@ def test_build_funnel_row_uses_open_count_as_card_clicks_without_restoring_fake_
     assert row["cartToOrderConversion"] == 50
 
 
+def test_build_funnel_row_preserves_zero_metrics_in_legacy_mapper():
+    run = MvpRealRun()
+    row = run._build_funnel_row(
+        {
+            "date": "2026-06-01",
+            "nmId": 197330807,
+            "openCount": 0,
+            "cartCount": 0,
+            "orderCount": 0,
+            "orderSum": 0,
+            "buyoutCount": 0,
+            "buyoutSum": 0,
+            "cancelCount": 0,
+            "cancelSum": 0,
+            "addToCartConversion": 0,
+            "cartToOrderConversion": 0,
+            "buyoutPercent": 0,
+        },
+        {
+            "date": "2026-05-31",
+            "nmId": 197330807,
+            "openCount": 0,
+            "cartCount": 0,
+            "orderCount": 0,
+            "orderSum": 0,
+            "buyoutCount": 0,
+            "buyoutSum": 0,
+            "cancelCount": 0,
+            "cancelSum": 0,
+            "addToCartConversion": 0,
+            "cartToOrderConversion": 0,
+            "buyoutPercent": 0,
+        },
+        100,
+        100,
+        {"nmId": 197330807},
+        {
+            "product": {"stocks": {"wb": 0, "mp": 0, "balanceSum": 0}},
+            "statistic": {
+                "selected": {"wbClub": {"orderCount": 0, "buyoutCount": 0, "cancelCount": 0}, "stocks": {}, "localizationPercent": 0},
+                "past": {"wbClub": {"orderCount": 0, "buyoutCount": 0, "cancelCount": 0}, "stocks": {}, "localizationPercent": 0},
+            },
+        },
+    )
+
+    assert row["card_clicks"] == 0
+    assert row["card_clicks_prev"] == 0
+    assert row["cartCount"] == 0
+    assert row["cartCount_prev"] == 0
+    assert row["orderCount"] == 0
+    assert row["orderCount_prev"] == 0
+    assert row["orderSum"] == 0
+    assert row["orderSum_prev"] == 0
+    assert row["buyoutCount"] == 0
+    assert row["buyoutSum"] == 0
+    assert row["cancelCount"] == 0
+    assert row["cancelSum"] == 0
+    assert row["addToCartConversion"] == 0
+    assert row["cartToOrderConversion"] == 0
+    assert row["buyoutPercent"] == 0
+    assert row["revenue_share_percent"] == 0
+    assert row["wb_stock_qty"] == 0
+    assert row["mp_stock_qty"] == 0
+    assert row["stock_total_sum"] == 0
+
+
 def test_first_number_returns_none_for_non_mapping_payload():
     assert _first_number(None, "wb") is None
     assert _first_number([], "wb") is None
@@ -453,6 +519,92 @@ def test_search_rows_use_reference_fields_from_funnel_and_stock():
     assert row["subject"] == "Трусы"
     assert row["brand"] == "PALEY"
     assert row["search_query"] == "трусы женские"
+
+
+def test_build_stock_row_preserves_zero_stock_values():
+    run = MvpRealRun()
+
+    row = run._build_stock_row(
+        {
+            "nmID": 197330807,
+            "vendorCode": "BlackWOM5",
+            "name": "Трусы комплект",
+            "subjectName": "Трусы",
+            "brandName": "PALEY",
+            "metrics": {
+                "stockCount": 0,
+                "stockSum": 0,
+                "saleRate": 0,
+                "toClientCount": 0,
+                "fromClientCount": 0,
+                "availability": 0,
+            },
+        }
+    )
+
+    assert row["wb_stock_qty"] == 0
+    assert row["stock_total_qty"] == 0
+    assert row["stock_total_sum"] == 0
+    assert row["saleRate"] == 0
+    assert row["toClientCount"] == 0
+    assert row["fromClientCount"] == 0
+    assert row["availability"] == 0
+
+
+def test_build_search_item_preserves_zero_metrics():
+    run = MvpRealRun()
+
+    row = run._build_search_item(
+        {
+            "nmId": 197330807,
+            "text": "трусы женские",
+            "openCard": 0,
+            "addToCart": 0,
+            "orders": 0,
+            "frequency": 0,
+            "visibility": 0,
+            "avgPosition": 0,
+            "medianPosition": 0,
+            "rating": 0,
+            "feedbackRating": 0,
+            "minDiscountPrice": 0,
+            "maxDiscountPrice": 0,
+        },
+        {
+            "nmId": 197330807,
+            "text": "трусы женские",
+            "openCard": 0,
+            "addToCart": 0,
+            "orders": 0,
+            "frequency": 0,
+            "visibility": 0,
+            "avgPosition": 0,
+            "medianPosition": 0,
+        },
+        run.date_to,
+        {},
+    )
+
+    assert row["card_rating"] == 0
+    assert row["reviews_rating"] == 0
+    assert row["query_count"] == 0
+    assert row["query_count_prev"] == 0
+    assert row["visibility"] == 0
+    assert row["visibility_prev"] == 0
+    assert row["avg_position"] == 0
+    assert row["avg_position_prev"] == 0
+    assert row["median_position"] == 0
+    assert row["median_position_prev"] == 0
+    assert row["search_clicks"] == 0
+    assert row["search_clicks_prev"] == 0
+    assert row["search_cart"] == 0
+    assert row["search_cart_prev"] == 0
+    assert row["search_orders"] == 0
+    assert row["search_orders_prev"] == 0
+    assert row["cart_conversion"] == 0
+    assert row["cart_conversion_prev"] == 0
+    assert row["order_conversion"] == 0
+    assert row["order_conversion_prev"] == 0
 
 
 def test_fullstats_rows_flatten_campaign_and_nm_metrics():

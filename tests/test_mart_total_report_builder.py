@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from src.db.mart_total_report_builder import (
     MART_TOTAL_REPORT_CONFLICT_COLUMNS,
+    _build_mart_total_report_v2_row,
     aggregate_ad_cost_stats,
     aggregate_ad_campaign_stats,
     aggregate_entry_point_stats,
@@ -231,6 +232,108 @@ def test_build_mart_total_report_row_sets_has_funnel_false_for_empty_funnel_payl
     )
 
     assert row["has_funnel"] is False
+
+
+def test_build_mart_total_report_v2_row_marks_detail_history_zero_activity_explicitly():
+    row = _build_mart_total_report_v2_row(
+        base_row={"report_date": date(2026, 6, 7), "nm_id": 197330807, "supplier_article": "BlackWOM5", "title": "Трусы", "subject": "Трусы", "brand": "PALEY"},
+        stock_row=None,
+        funnel_row=SimpleNamespace(
+            impressions=None,
+            card_clicks=Decimal("0"),
+            ctr=None,
+            cart_count=Decimal("0"),
+            order_count=Decimal("0"),
+            order_sum=Decimal("0"),
+            buyout_count=Decimal("0"),
+            buyout_sum=Decimal("0"),
+            buyout_percent=None,
+            add_to_cart_conversion=Decimal("0"),
+            cart_to_order_conversion=Decimal("0"),
+            wishlist_count=None,
+            avg_delivery_time=None,
+            local_orders_percent=None,
+            source_status="DETAIL_HISTORY_REPORT",
+            loaded_at=datetime(2026, 6, 12, 15, 21, tzinfo=timezone.utc),
+        ),
+        entry_point_stats=None,
+        ad_cost_stats=None,
+        ad_campaign_stats=None,
+        search_stats=None,
+        localization_stats=None,
+    )
+
+    assert row["has_funnel"] is True
+    assert row["export_context_json"]["funnel_resolution_status"] == "NO_ACTIVITY"
+    assert row["export_context_json"]["funnel_selected_source"] == "DETAIL_HISTORY_REPORT"
+
+
+def test_build_mart_total_report_v2_row_ignores_hollow_legacy_funnel_rows():
+    row = _build_mart_total_report_v2_row(
+        base_row={"report_date": date(2026, 6, 7), "nm_id": 197330807, "supplier_article": "BlackWOM5", "title": "Трусы", "subject": "Трусы", "brand": "PALEY"},
+        stock_row=None,
+        funnel_row=SimpleNamespace(
+            impressions=None,
+            card_clicks=None,
+            ctr=None,
+            cart_count=None,
+            order_count=None,
+            order_sum=None,
+            buyout_count=None,
+            buyout_sum=None,
+            buyout_percent=None,
+            add_to_cart_conversion=None,
+            cart_to_order_conversion=None,
+            wishlist_count=None,
+            avg_delivery_time=None,
+            local_orders_percent=None,
+            source_status="PARTIAL",
+            loaded_at=datetime(2026, 6, 9, 16, 52, tzinfo=timezone.utc),
+        ),
+        entry_point_stats=None,
+        ad_cost_stats=None,
+        ad_campaign_stats=None,
+        search_stats=None,
+        localization_stats=None,
+    )
+
+    assert row["has_funnel"] is False
+    assert row["export_context_json"]["funnel_resolution_status"] == "HOLLOW_LEGACY_IGNORED"
+    assert row["export_context_json"]["funnel_selected_source"] == "PARTIAL"
+
+
+def test_build_mart_total_report_v2_row_marks_meaningful_legacy_as_fallback():
+    row = _build_mart_total_report_v2_row(
+        base_row={"report_date": date(2026, 6, 7), "nm_id": 197330807, "supplier_article": "BlackWOM5", "title": "Трусы", "subject": "Трусы", "brand": "PALEY"},
+        stock_row=None,
+        funnel_row=SimpleNamespace(
+            impressions=None,
+            card_clicks=Decimal("5"),
+            ctr=None,
+            cart_count=Decimal("1"),
+            order_count=Decimal("1"),
+            order_sum=Decimal("100"),
+            buyout_count=None,
+            buyout_sum=None,
+            buyout_percent=None,
+            add_to_cart_conversion=Decimal("20"),
+            cart_to_order_conversion=Decimal("100"),
+            wishlist_count=None,
+            avg_delivery_time=None,
+            local_orders_percent=None,
+            source_status="PARTIAL",
+            loaded_at=datetime(2026, 6, 9, 16, 52, tzinfo=timezone.utc),
+        ),
+        entry_point_stats=None,
+        ad_cost_stats=None,
+        ad_campaign_stats=None,
+        search_stats=None,
+        localization_stats=None,
+    )
+
+    assert row["has_funnel"] is True
+    assert row["export_context_json"]["funnel_resolution_status"] == "LEGACY_FALLBACK"
+    assert row["export_context_json"]["funnel_selected_source"] == "PARTIAL"
 
 
 def test_prepare_mart_total_report_upsert_rows_deduplicates():

@@ -22,7 +22,7 @@ from scripts.export_streamlit_v1_dataset import (
 )
 from src.config.settings import settings
 from src.db.mart_total_report_builder import build_mart_total_report
-from src.db.models import MartTotalReport
+from src.db.models import FactStockWarehouseSnapshot, MartTotalReport
 from src.db.session import session_scope
 from src.importers.entry_points_importer import import_entry_points_xlsx
 from src.importers.orders_geography_importer import import_orders_geography_xlsx
@@ -33,11 +33,24 @@ from src.streamlit_dataset import (
     build_data_quality_label as shared_build_data_quality_label,
     enrich_streamlit_row as shared_enrich_streamlit_row,
 )
+from src.tracked_products import (
+    apply_tracked_products as shared_apply_tracked_products,
+    load_tracked_products,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATASET_PATH = ROOT_DIR / "data" / "processed" / "streamlit_v1_dataset.csv"
+PRODUCT_BANDS_PATH = ROOT_DIR / "data" / "config" / "product_bands.csv"
+MAIN_WB_WAREHOUSES_PATH = ROOT_DIR / "data" / "config" / "main_wb_warehouses.csv"
 DEFAULT_DATA_SOURCE = "csv"
+STOCK_WAREHOUSE_TAB_LABEL = "Остатки по складам"
+WAREHOUSE_SCOPE_MAIN = "Основные склады"
+WAREHOUSE_SCOPE_ALL = "Все склады"
+STOCK_STATUS_OK = "OK"
+STOCK_STATUS_ZERO = "ZERO_ON_WAREHOUSE"
+STOCK_STATUS_NO_DATA = "NO_DATA_ON_WAREHOUSE"
+STOCK_STATUS_NO_PRODUCT_DATA = "NO_STOCK_DATA_FOR_PRODUCT"
 AD_CAMPAIGN_PRODUCT_LABEL = "РК по товару"
 
 LATEST_MODE_LABEL = "Последняя дата + динамика"
@@ -47,15 +60,18 @@ CHART_THRESHOLD_CPO = 150.0
 STYLER_MAX_CELLS = 250_000
 CHART_LEVEL_CABINET = "Кабинет"
 CHART_LEVEL_CATEGORY = "Категория"
+CHART_LEVEL_BAND = "Банда"
 CHART_LEVEL_ARTICLE = "Артикул"
 CHART_LEVEL_CONVERSION = "Тип WB / конверсии"
 CHART_AGGREGATION_LEVELS = [
     CHART_LEVEL_CABINET,
     CHART_LEVEL_CATEGORY,
+    CHART_LEVEL_BAND,
     CHART_LEVEL_ARTICLE,
     CHART_LEVEL_CONVERSION,
 ]
 CHART_ALL_CATEGORIES_LABEL = "Все категории"
+CHART_ALL_BANDS_LABEL = "Все банды"
 CHART_ALL_CONVERSION_TYPES_LABEL = "Все типы WB"
 UNKNOWN_WB_TYPE_LABEL = "Неизвестный тип WB 64"
 UNKNOWN_WB_TYPE_HELP_TEXT = (
@@ -779,6 +795,7 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             prepared[column] = False
     enriched_rows = [shared_enrich_streamlit_row(row) for row in prepared.to_dict(orient="records")]
     enriched = pd.DataFrame(enriched_rows)
+    enriched = shared_apply_tracked_products(enriched)
     if "report_date" in enriched.columns:
         enriched["report_date"] = pd.to_datetime(enriched["report_date"], errors="coerce").dt.date
     if "display_impressions" in enriched.columns:
@@ -858,6 +875,25 @@ def filter_products_with_period_data(df: pd.DataFrame) -> pd.DataFrame:
         .transform("any")
     )
     return df[has_period_data].copy()
+
+
+def apply_tracked_scope_filters(
+    df: pd.DataFrame,
+    *,
+    show_only_tracked: bool,
+    show_sellout: bool,
+) -> pd.DataFrame:
+    filtered = df.copy()
+    if "is_tracked" not in filtered.columns or "lifecycle_status" not in filtered.columns:
+        filtered = shared_apply_tracked_products(filtered)
+
+    if show_only_tracked and "is_tracked" in filtered.columns:
+        filtered = filtered[filtered["is_tracked"].fillna(False)]
+
+    if not show_sellout and "lifecycle_status" in filtered.columns:
+        filtered = filtered[filtered["lifecycle_status"].fillna("not_tracked").ne("sellout")]
+
+    return filtered.copy()
 
 
 def build_debug_snapshot(stage: str, df: pd.DataFrame) -> dict[str, object]:
@@ -968,6 +1004,399 @@ def load_ad_campaign_product_app_dataset(data_source: str) -> tuple[pd.DataFrame
     ), None
 
 
+@st.cache_data(show_spinner=False)
+def load_main_wb_warehouses(path: str, cache_buster: float | None = None) -> list[str]:
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return []
+    warehouses_df = pd.read_csv(csv_path)
+    if "warehouse_name" not in warehouses_df.columns:
+        return []
+    if "is_main" in warehouses_df.columns:
+        is_main = warehouses_df["is_main"].fillna(False).astype(str).str.strip().str.lower().eq("true")
+        warehouses_df = warehouses_df[is_main]
+    return [
+        warehouse_name
+        for warehouse_name in warehouses_df["warehouse_name"].fillna("").astype(str).str.strip().tolist()
+        if warehouse_name
+    ]
+
+
+@st.cache_data(show_spinner=False)
+def load_stock_warehouse_snapshot_from_db() -> pd.DataFrame:
+    with session_scope() as session:
+        rows = session.execute(
+            select(FactStockWarehouseSnapshot).order_by(
+                FactStockWarehouseSnapshot.snapshot_date.asc(),
+                FactStockWarehouseSnapshot.nm_id.asc(),
+                FactStockWarehouseSnapshot.warehouse_name.asc(),
+            )
+        ).scalars().all()
+        materialized_rows = [
+            {
+                "snapshot_date": row.snapshot_date,
+                "nm_id": row.nm_id,
+                "chrt_id": row.chrt_id,
+                "warehouse_id": row.warehouse_id,
+                "warehouse_name": row.warehouse_name,
+                "region_name": row.region_name,
+                "stock_qty": row.stock_qty,
+                "in_way_to_client": row.in_way_to_client,
+                "in_way_from_client": row.in_way_from_client,
+                "source": row.source,
+                "loaded_at": row.loaded_at,
+            }
+            for row in rows
+        ]
+
+    return pd.DataFrame(materialized_rows)
+
+
+def prepare_stock_warehouse_snapshot_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    expected_columns = [
+        "snapshot_date",
+        "nm_id",
+        "warehouse_id",
+        "warehouse_name",
+        "region_name",
+        "stock_qty",
+        "in_way_to_client",
+        "in_way_from_client",
+    ]
+    prepared = df.copy()
+    for column in expected_columns:
+        if column not in prepared.columns:
+            prepared[column] = pd.NA
+
+    if prepared.empty:
+        return prepared[expected_columns].copy()
+
+    prepared["snapshot_date"] = pd.to_datetime(prepared["snapshot_date"], errors="coerce").dt.date
+    prepared["nm_id"] = pd.to_numeric(prepared["nm_id"], errors="coerce")
+    prepared["warehouse_id"] = pd.to_numeric(prepared["warehouse_id"], errors="coerce")
+    for column in ("stock_qty", "in_way_to_client", "in_way_from_client"):
+        prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+    prepared["warehouse_name"] = prepared["warehouse_name"].fillna("").astype(str).str.strip()
+    prepared = prepared.dropna(subset=["snapshot_date", "nm_id"]).copy()
+    prepared["nm_id"] = prepared["nm_id"].astype(int)
+
+    aggregated = (
+        prepared.groupby(
+            ["snapshot_date", "nm_id", "warehouse_id", "warehouse_name", "region_name"],
+            dropna=False,
+            as_index=False,
+        )[["stock_qty", "in_way_to_client", "in_way_from_client"]]
+        .sum(min_count=1)
+    )
+    return aggregated
+
+
+def _normalize_stock_display_value(value: object) -> int | float | str:
+    if pd.isna(value):
+        return "NO_DATA"
+    numeric_value = float(value)
+    if numeric_value.is_integer():
+        return int(numeric_value)
+    return round(numeric_value, 2)
+
+
+def _build_stock_status(*, has_any_snapshot: bool, zero_count: int, no_data_count: int) -> str:
+    if not has_any_snapshot:
+        return STOCK_STATUS_NO_PRODUCT_DATA
+    if no_data_count > 0:
+        return STOCK_STATUS_NO_DATA
+    if zero_count > 0:
+        return STOCK_STATUS_ZERO
+    return STOCK_STATUS_OK
+
+
+def build_stock_warehouse_product_table(
+    snapshot_df: pd.DataFrame,
+    tracked_df: pd.DataFrame,
+    *,
+    snapshot_date: date,
+    selected_warehouses: list[str],
+    show_only_tracked: bool,
+    show_sellout: bool,
+) -> pd.DataFrame:
+    warehouse_names = list(dict.fromkeys(selected_warehouses))
+    snapshot_prepared = prepare_stock_warehouse_snapshot_dataframe(snapshot_df)
+    tracked_prepared = tracked_df.copy()
+    for column in ("nm_id", "tracked_label", "is_tracked", "lifecycle_status"):
+        if column not in tracked_prepared.columns:
+            tracked_prepared[column] = pd.NA
+    if not tracked_prepared.empty:
+        tracked_prepared["nm_id"] = pd.to_numeric(tracked_prepared["nm_id"], errors="coerce")
+        tracked_prepared = tracked_prepared.dropna(subset=["nm_id"]).copy()
+        tracked_prepared["nm_id"] = tracked_prepared["nm_id"].astype(int)
+        tracked_prepared["is_tracked"] = tracked_prepared["is_tracked"].fillna(False).astype(bool)
+        tracked_prepared["lifecycle_status"] = tracked_prepared["lifecycle_status"].fillna("not_tracked")
+        tracked_prepared = tracked_prepared.drop_duplicates(subset=["nm_id"], keep="first")
+
+    current_snapshot = snapshot_prepared[snapshot_prepared["snapshot_date"] == snapshot_date].copy()
+    current_snapshot = current_snapshot[current_snapshot["warehouse_name"].isin(warehouse_names)].copy()
+    snapshot_nm_ids = set(current_snapshot["nm_id"].dropna().astype(int).tolist())
+    any_snapshot_nm_ids_for_date = set(
+        snapshot_prepared.loc[snapshot_prepared["snapshot_date"] == snapshot_date, "nm_id"].dropna().astype(int).tolist()
+    )
+
+    tracked_columns = ["nm_id", "tracked_label", "is_tracked", "lifecycle_status"]
+    if show_only_tracked:
+        base_products = tracked_prepared.loc[tracked_prepared["is_tracked"], tracked_columns].copy()
+    else:
+        snapshot_products = pd.DataFrame({"nm_id": sorted(snapshot_nm_ids | any_snapshot_nm_ids_for_date)})
+        base_products = snapshot_products.merge(
+            tracked_prepared[tracked_columns],
+            on="nm_id",
+            how="left",
+        )
+        base_products["is_tracked"] = base_products["is_tracked"].fillna(False).astype(bool)
+        base_products["lifecycle_status"] = base_products["lifecycle_status"].fillna("not_tracked")
+        missing_tracked = tracked_prepared.loc[~tracked_prepared["nm_id"].isin(base_products["nm_id"]), tracked_columns]
+        if not missing_tracked.empty:
+            base_products = pd.concat([base_products, missing_tracked], ignore_index=True)
+
+    if base_products.empty:
+        return pd.DataFrame(
+            columns=[
+                "nm_id",
+                "tracked_label",
+                "lifecycle_status",
+                *warehouse_names,
+                "zero_warehouses_count",
+                "no_data_warehouses_count",
+                "zero_warehouses",
+                "no_data_warehouses",
+                "problem_warehouses",
+                "stock_status",
+            ]
+        )
+
+    if not show_sellout:
+        base_products = base_products[base_products["lifecycle_status"].fillna("not_tracked").ne("sellout")].copy()
+
+    current_snapshot = current_snapshot.groupby(["nm_id", "warehouse_name"], as_index=False)[
+        ["stock_qty", "in_way_to_client", "in_way_from_client"]
+    ].sum(min_count=1)
+
+    stock_lookup = {
+        (int(row["nm_id"]), str(row["warehouse_name"])): row["stock_qty"]
+        for _, row in current_snapshot.iterrows()
+    }
+
+    rows: list[dict[str, object]] = []
+    for _, product_row in base_products.sort_values(["tracked_label", "nm_id"], na_position="last").iterrows():
+        nm_id = int(product_row["nm_id"])
+        has_any_snapshot = nm_id in any_snapshot_nm_ids_for_date
+        row: dict[str, object] = {
+            "nm_id": nm_id,
+            "tracked_label": product_row.get("tracked_label"),
+            "lifecycle_status": product_row.get("lifecycle_status") or "not_tracked",
+        }
+        zero_warehouses: list[str] = []
+        no_data_warehouses: list[str] = []
+
+        for warehouse_name in warehouse_names:
+            quantity = stock_lookup.get((nm_id, warehouse_name), pd.NA)
+            display_value = _normalize_stock_display_value(quantity)
+            row[warehouse_name] = display_value
+            if display_value == "NO_DATA":
+                no_data_warehouses.append(warehouse_name)
+            elif float(display_value) == 0:
+                zero_warehouses.append(warehouse_name)
+
+        row["zero_warehouses_count"] = len(zero_warehouses)
+        row["no_data_warehouses_count"] = len(no_data_warehouses)
+        row["zero_warehouses"] = ", ".join(zero_warehouses) if zero_warehouses else "—"
+        row["no_data_warehouses"] = ", ".join(no_data_warehouses) if no_data_warehouses else "—"
+        problem_warehouses = list(dict.fromkeys(no_data_warehouses + zero_warehouses))
+        row["problem_warehouses"] = ", ".join(problem_warehouses) if problem_warehouses else "—"
+        row["stock_status"] = _build_stock_status(
+            has_any_snapshot=has_any_snapshot,
+            zero_count=len(zero_warehouses),
+            no_data_count=len(no_data_warehouses),
+        )
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def build_stock_warehouse_summary_metrics(product_table: pd.DataFrame) -> dict[str, int]:
+    if product_table.empty:
+        return {
+            "total_products": 0,
+            "ok_products": 0,
+            "zero_products": 0,
+            "no_data_products": 0,
+            "total_zero_warehouses": 0,
+        }
+
+    return {
+        "total_products": int(len(product_table)),
+        "ok_products": int(product_table["stock_status"].eq(STOCK_STATUS_OK).sum()),
+        "zero_products": int(product_table["stock_status"].eq(STOCK_STATUS_ZERO).sum()),
+        "no_data_products": int(product_table["stock_status"].isin([STOCK_STATUS_NO_DATA, STOCK_STATUS_NO_PRODUCT_DATA]).sum()),
+        "total_zero_warehouses": int(pd.to_numeric(product_table["zero_warehouses_count"], errors="coerce").fillna(0).sum()),
+    }
+
+
+def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataFrame:
+    if product_table.empty:
+        return pd.DataFrame(
+            columns=["nm_id", "tracked_label", "problem_warehouses", "zero_warehouses", "no_data_warehouses", "stock_status"]
+        )
+    return product_table.loc[
+        product_table["stock_status"].ne(STOCK_STATUS_OK),
+        ["nm_id", "tracked_label", "problem_warehouses", "zero_warehouses", "no_data_warehouses", "stock_status"],
+    ].copy()
+
+
+def style_stock_warehouse_table(
+    df: pd.DataFrame,
+    warehouse_columns: list[str],
+) -> pd.io.formats.style.Styler:
+    def warehouse_value_color(value: object) -> str:
+        if value == "NO_DATA":
+            return "background-color: #e5e7eb; color: #4b5563;"
+        if pd.isna(value):
+            return ""
+        try:
+            if float(value) == 0:
+                return "background-color: #fde2e4; color: #7f1d1d;"
+        except (TypeError, ValueError):
+            return ""
+        return ""
+
+    def stock_status_color(value: object) -> str:
+        if value == STOCK_STATUS_OK:
+            return "background-color: #e8f5e9; color: #1b5e20;"
+        if value == STOCK_STATUS_ZERO:
+            return "background-color: #fff3cd; color: #7a4b00;"
+        if value in (STOCK_STATUS_NO_DATA, STOCK_STATUS_NO_PRODUCT_DATA):
+            return "background-color: #e5e7eb; color: #374151;"
+        return ""
+
+    styler = df.style
+    if warehouse_columns:
+        styler = styler.map(warehouse_value_color, subset=warehouse_columns)
+    if "stock_status" in df.columns:
+        styler = styler.map(stock_status_color, subset=["stock_status"])
+    return styler.format(precision=0, na_rep="—")
+
+
+def prepare_stock_warehouse_table_for_display(
+    df: pd.DataFrame,
+    warehouse_columns: list[str],
+) -> pd.DataFrame | pd.io.formats.style.Styler:
+    safe_df = df.copy()
+    safe_df.attrs = {}
+    cells_count = int(df.shape[0]) * int(df.shape[1])
+    if cells_count > STYLER_MAX_CELLS:
+        st.caption(
+            f"Большая таблица складских остатков: {df.shape[0]} строк × {df.shape[1]} колонок = {cells_count:,} ячеек. "
+            "Цветовое оформление отключено для стабильной загрузки."
+        )
+        return safe_df
+    return style_stock_warehouse_table(safe_df, warehouse_columns)
+
+
+def render_stock_warehouse_tab(data_source: str) -> None:
+    st.caption("Источник: `fact_stock_warehouse_snapshot`, агрегация до уровня Артикул WB × склад.")
+    if data_source != "db":
+        st.info("Вкладка складских остатков доступна в режиме PostgreSQL, потому что читает `fact_stock_warehouse_snapshot` напрямую.")
+        return
+
+    snapshot_df = load_stock_warehouse_snapshot_from_db()
+    if snapshot_df.empty:
+        st.warning("В `fact_stock_warehouse_snapshot` пока нет строк.")
+        return
+
+    prepared_snapshot = prepare_stock_warehouse_snapshot_dataframe(snapshot_df)
+    available_dates = sorted(d for d in prepared_snapshot["snapshot_date"].dropna().unique().tolist())
+    if not available_dates:
+        st.warning("В `fact_stock_warehouse_snapshot` нет валидных дат snapshot.")
+        return
+
+    tracked_df = load_tracked_products()
+    main_warehouses = load_main_wb_warehouses(
+        str(MAIN_WB_WAREHOUSES_PATH),
+        MAIN_WB_WAREHOUSES_PATH.stat().st_mtime if MAIN_WB_WAREHOUSES_PATH.exists() else None,
+    )
+    selected_snapshot_date = st.selectbox("Дата snapshot", options=available_dates, index=len(available_dates) - 1)
+
+    filter_cols = st.columns(4)
+    show_only_tracked = filter_cols[0].checkbox("Показывать только отслеживаемые товары", value=True)
+    show_sellout = filter_cols[1].checkbox("Показывать распродажные товары", value=True)
+    only_problematic = filter_cols[2].checkbox("Показывать только проблемные товары", value=False)
+    warehouse_scope = filter_cols[3].radio("Склады", options=[WAREHOUSE_SCOPE_MAIN, WAREHOUSE_SCOPE_ALL], horizontal=False)
+
+    current_snapshot = prepared_snapshot[prepared_snapshot["snapshot_date"] == selected_snapshot_date].copy()
+    all_warehouses = sorted(current_snapshot["warehouse_name"].dropna().astype(str).unique().tolist())
+    selected_warehouses = main_warehouses if warehouse_scope == WAREHOUSE_SCOPE_MAIN else all_warehouses
+    if not selected_warehouses:
+        st.warning("Для выбранной даты не найден список складов.")
+        return
+
+    product_table = build_stock_warehouse_product_table(
+        prepared_snapshot,
+        tracked_df,
+        snapshot_date=selected_snapshot_date,
+        selected_warehouses=selected_warehouses,
+        show_only_tracked=show_only_tracked,
+        show_sellout=show_sellout,
+    )
+    summary_metrics = build_stock_warehouse_summary_metrics(product_table)
+    problem_table = build_stock_warehouse_problem_table(product_table)
+
+    summary_cols = st.columns(6)
+    summary_cols[0].metric("Дата snapshot", selected_snapshot_date.isoformat())
+    summary_cols[1].metric("Всего tracked товаров", f"{summary_metrics['total_products']:,}".replace(",", " "))
+    summary_cols[2].metric("Товаров с OK", f"{summary_metrics['ok_products']:,}".replace(",", " "))
+    summary_cols[3].metric("Товаров с нулём на складах", f"{summary_metrics['zero_products']:,}".replace(",", " "))
+    summary_cols[4].metric("Товаров с NO_DATA", f"{summary_metrics['no_data_products']:,}".replace(",", " "))
+    summary_cols[5].metric("Всего нулевых складов", f"{summary_metrics['total_zero_warehouses']:,}".replace(",", " "))
+
+    st.write("**Проблемные товары**")
+    problem_display = problem_table.rename(
+        columns={
+            "nm_id": "Артикул WB",
+            "tracked_label": "Название",
+            "problem_warehouses": "Проблемные склады",
+            "zero_warehouses": "Нулевые склады",
+            "no_data_warehouses": "Склады без данных",
+            "stock_status": "stock_status",
+        }
+    )
+    st.dataframe(
+        prepare_stock_warehouse_table_for_display(problem_display, []),
+        width="stretch",
+        hide_index=True,
+    )
+
+    if only_problematic:
+        product_table = product_table[product_table["stock_status"].ne(STOCK_STATUS_OK)].copy()
+
+    display_columns = ["nm_id", "tracked_label", "lifecycle_status", *selected_warehouses, "zero_warehouses_count", "no_data_warehouses_count", "stock_status"]
+    table_display = product_table.reindex(columns=display_columns).rename(
+        columns={
+            "nm_id": "Артикул WB",
+            "tracked_label": "Название / tracked_label",
+            "lifecycle_status": "lifecycle_status",
+            "zero_warehouses_count": "zero_warehouses_count",
+            "no_data_warehouses_count": "no_data_warehouses_count",
+            "stock_status": "stock_status",
+        }
+    )
+    warehouse_display_columns = [warehouse_name for warehouse_name in selected_warehouses if warehouse_name in table_display.columns]
+
+    st.write("**Остатки по складам**")
+    st.dataframe(
+        prepare_stock_warehouse_table_for_display(table_display, warehouse_display_columns),
+        width="stretch",
+        hide_index=True,
+    )
+
+
 def save_uploaded_file_to_temp(uploaded_file: Any) -> Path:
     suffix = Path(getattr(uploaded_file, "name", "upload.xlsx")).suffix or ".xlsx"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
@@ -1072,6 +1501,8 @@ def clear_streamlit_data_caches() -> None:
         load_dataset_from_db,
         load_ad_campaign_product_dataset,
         load_ad_campaign_product_dataset_from_db,
+        load_main_wb_warehouses,
+        load_stock_warehouse_snapshot_from_db,
     ):
         try:
             cached_func.clear()
@@ -1106,6 +1537,22 @@ def build_filtered_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[st
         if selected_dates:
             filtered = filtered[filtered["report_date"].isin(selected_dates)]
         debug_trace.append(build_debug_snapshot("rows_after_date_filter", filtered))
+
+        show_only_tracked = st.checkbox("Показывать только отслеживаемые товары", value=True)
+        filtered = apply_tracked_scope_filters(
+            filtered,
+            show_only_tracked=show_only_tracked,
+            show_sellout=True,
+        )
+        debug_trace.append(build_debug_snapshot("rows_after_tracked_filter", filtered))
+
+        show_sellout = st.checkbox("Показывать распродажные товары", value=True)
+        filtered = apply_tracked_scope_filters(
+            filtered,
+            show_only_tracked=False,
+            show_sellout=show_sellout,
+        )
+        debug_trace.append(build_debug_snapshot("rows_after_sellout_filter", filtered))
 
         supplier_search = st.text_input("Поиск по артикулу продавца")
         if supplier_search:
@@ -1983,52 +2430,103 @@ def build_chart_product_options(
     return options, option_map
 
 
-def build_category_summary_table(
+@st.cache_data(show_spinner=False)
+def load_product_bands() -> pd.DataFrame:
+    columns = ["band_name", "band_type", "item_label", "nm_id"]
+    if not PRODUCT_BANDS_PATH.exists():
+        return pd.DataFrame(columns=columns)
+
+    band_df = pd.read_csv(PRODUCT_BANDS_PATH)
+    for column in columns:
+        if column not in band_df.columns:
+            band_df[column] = pd.NA
+    band_df = band_df[columns].copy()
+    band_df["nm_id"] = pd.to_numeric(band_df["nm_id"], errors="coerce")
+    band_df = band_df.dropna(subset=["band_name", "nm_id"]).copy()
+    band_df["nm_id"] = band_df["nm_id"].astype(int)
+    return band_df.drop_duplicates(subset=["nm_id"], keep="first")
+
+
+def apply_product_bands(filtered: pd.DataFrame) -> pd.DataFrame:
+    enriched = filtered.copy()
+    if enriched.empty or "nm_id" not in enriched.columns:
+        if "band_name" not in enriched.columns:
+            enriched["band_name"] = pd.NA
+        return enriched
+
+    band_df = load_product_bands()
+    if "band_name" in enriched.columns:
+        enriched = enriched.drop(columns=["band_name"])
+    enriched["nm_id"] = pd.to_numeric(enriched["nm_id"], errors="coerce")
+    if band_df.empty:
+        enriched["band_name"] = pd.NA
+        return enriched
+    return enriched.merge(band_df[["nm_id", "band_name"]], on="nm_id", how="left")
+
+
+def build_group_summary_table(
     filtered: pd.DataFrame,
     *,
+    group_column: str,
+    group_label: str,
     reference_date: date | None = None,
+    include_products: bool = False,
+    spend_label: str = "Расход",
+    breach_label: str = "Флаг превышения",
 ) -> pd.DataFrame:
-    if filtered.empty or "subject" not in filtered.columns:
+    if filtered.empty or group_column not in filtered.columns:
         return pd.DataFrame()
 
-    metric_columns = [
-        column
-        for column in ("cart_count", "ad_atbs_total", "ad_campaign_spend_total", "ad_orders_total")
-        if column in filtered.columns
-    ]
-    if not metric_columns:
+    source_df = filtered.dropna(subset=[group_column]).copy()
+    if source_df.empty:
         return pd.DataFrame()
 
-    if "report_date" not in filtered.columns:
-        grouped = (
-            filtered.dropna(subset=["subject"])
-            .groupby("subject", as_index=False)[metric_columns]
-            .sum(min_count=1)
-            .rename(columns={"subject": "Категория"})
+    product_counts = pd.DataFrame()
+    if include_products and "nm_id" in source_df.columns:
+        product_counts = (
+            source_df.groupby(group_column, as_index=False)["nm_id"]
+            .nunique()
+            .rename(columns={"nm_id": "Товаров"})
         )
+
+    if "report_date" not in source_df.columns:
+        metric_columns = [
+            column
+            for column in ("cart_count", "ad_atbs_total", "ad_campaign_spend_total", "ad_orders_total")
+            if column in source_df.columns
+        ]
+        if not metric_columns:
+            return pd.DataFrame()
+        grouped = source_df.groupby(group_column, as_index=False)[metric_columns].sum(min_count=1)
     else:
         cutoffs = get_chart_metric_cutoffs(reference_date)
-        base_df = filtered.dropna(subset=["subject"]).copy()
-        base_df["report_date"] = pd.to_datetime(base_df["report_date"], errors="coerce").dt.date
-        total_df = base_df[base_df["report_date"].le(cutoffs["total_metrics_cutoff"])].copy()
-        confirmed_df = base_df[base_df["report_date"].le(cutoffs["ad_attribution_cutoff"])].copy()
+        source_df["report_date"] = pd.to_datetime(source_df["report_date"], errors="coerce").dt.date
+        total_df = source_df[source_df["report_date"].le(cutoffs["total_metrics_cutoff"])].copy()
+        confirmed_df = source_df[source_df["report_date"].le(cutoffs["ad_attribution_cutoff"])].copy()
 
-        total_grouped = (
-            total_df.groupby("subject", as_index=False)[["cart_count", "ad_campaign_spend_total"]]
-            .sum(min_count=1)
-            .rename(columns={"subject": "Категория"})
-        )
-        confirmed_grouped = (
-            confirmed_df.groupby("subject", as_index=False)[["ad_atbs_total", "ad_orders_total", "ad_campaign_spend_total"]]
-            .sum(min_count=1)
-            .rename(
-                columns={
-                    "subject": "Категория",
-                    "ad_campaign_spend_total": "ad_campaign_spend_total_confirmed",
-                }
-            )
-        )
-        grouped = total_grouped.merge(confirmed_grouped, on="Категория", how="outer")
+        total_columns = [
+            column for column in ("cart_count", "ad_campaign_spend_total") if column in total_df.columns
+        ]
+        confirmed_columns = [
+            column for column in ("ad_atbs_total", "ad_orders_total", "ad_campaign_spend_total") if column in confirmed_df.columns
+        ]
+        grouped = pd.DataFrame({group_column: sorted(source_df[group_column].dropna().astype(str).unique().tolist())})
+        if total_columns:
+            total_grouped = total_df.groupby(group_column, as_index=False)[total_columns].sum(min_count=1)
+            grouped = grouped.merge(total_grouped, on=group_column, how="left")
+        if confirmed_columns:
+            confirmed_grouped = confirmed_df.groupby(group_column, as_index=False)[confirmed_columns].sum(min_count=1)
+            if "ad_campaign_spend_total" in confirmed_grouped.columns:
+                confirmed_grouped = confirmed_grouped.rename(
+                    columns={"ad_campaign_spend_total": "ad_campaign_spend_total_confirmed"}
+                )
+            grouped = grouped.merge(confirmed_grouped, on=group_column, how="left")
+
+    if grouped.empty:
+        return pd.DataFrame()
+
+    if not product_counts.empty:
+        grouped = grouped.merge(product_counts, on=group_column, how="left")
 
     spend_for_ad_metrics = (
         "ad_campaign_spend_total_confirmed" if "ad_campaign_spend_total_confirmed" in grouped.columns else "ad_campaign_spend_total"
@@ -2041,7 +2539,7 @@ def build_category_summary_table(
         lambda row: safe_chart_divide(row.get(spend_for_ad_metrics), row.get("ad_orders_total")),
         axis=1,
     )
-    grouped["Флаг превышения"] = grouped.apply(
+    grouped[breach_label] = grouped.apply(
         lambda row: "Да"
         if (
             (not pd.isna(row.get("Стоимость корзины РК")) and float(row.get("Стоимость корзины РК")) > CHART_THRESHOLD_CART_COST)
@@ -2050,24 +2548,64 @@ def build_category_summary_table(
         else "—",
         axis=1,
     )
+
     grouped = grouped.rename(
         columns={
+            group_column: group_label,
             "cart_count": "Итоговые корзины",
             "ad_atbs_total": "Корзины РК",
-            "ad_campaign_spend_total": "Расход",
+            "ad_campaign_spend_total": spend_label,
         }
     )
-    return grouped[
+    result_columns = [group_label]
+    if include_products:
+        result_columns.append("Товаров")
+    result_columns.extend(
         [
-            "Категория",
             "Итоговые корзины",
             "Корзины РК",
-            "Расход",
+            spend_label,
             "Стоимость корзины РК",
             "CPO РК",
-            "Флаг превышения",
+            breach_label,
         ]
-    ].sort_values(["Корзины РК", "Итоговые корзины"], ascending=[False, False], na_position="last")
+    )
+    return grouped[result_columns].sort_values(
+        ["Корзины РК", "Итоговые корзины"],
+        ascending=[False, False],
+        na_position="last",
+    )
+
+
+def build_category_summary_table(
+    filtered: pd.DataFrame,
+    *,
+    reference_date: date | None = None,
+) -> pd.DataFrame:
+    return build_group_summary_table(
+        filtered,
+        group_column="subject",
+        group_label="Категория",
+        reference_date=reference_date,
+        spend_label="Расход",
+        breach_label="Флаг превышения",
+    )
+
+
+def build_band_summary_table(
+    filtered: pd.DataFrame,
+    *,
+    reference_date: date | None = None,
+) -> pd.DataFrame:
+    return build_group_summary_table(
+        filtered,
+        group_column="band_name",
+        group_label="Банда",
+        reference_date=reference_date,
+        include_products=True,
+        spend_label="Расход РК",
+        breach_label="Превышения",
+    )
 
 
 def build_chart_scope_rows(
@@ -2565,6 +3103,7 @@ def build_chart_scope_rows(
     option_map: dict[str, dict[str, object]],
     *,
     selected_subject: str | None = None,
+    selected_band: str | None = None,
     ad_campaign_product_df: pd.DataFrame | None = None,
     selected_conversion_type: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
@@ -2594,6 +3133,19 @@ def build_chart_scope_rows(
             "nm_id": None,
             "title": "Сумма по выбранным товарам",
             "level_value": selected_subject or CHART_ALL_CATEGORIES_LABEL,
+        }
+        return scope_rows, context
+
+    if aggregation_level == CHART_LEVEL_BAND:
+        scope_rows = filtered.dropna(subset=["band_name"]).copy() if "band_name" in filtered.columns else pd.DataFrame()
+        if selected_band and selected_band != CHART_ALL_BANDS_LABEL:
+            scope_rows = scope_rows[scope_rows["band_name"] == selected_band].copy()
+        context = {
+            "scope": aggregation_level,
+            "supplier_article": "Все товары",
+            "nm_id": None,
+            "title": "Сумма по выбранным товарам",
+            "level_value": selected_band or CHART_ALL_BANDS_LABEL,
         }
         return scope_rows, context
 
@@ -2705,7 +3257,9 @@ def render_charts_tab(
     aggregation_level = st.radio("Уровень агрегации", options=CHART_AGGREGATION_LEVELS, horizontal=True)
     selected_product_label = preselected_product_label
     selected_subject: str | None = None
+    selected_band: str | None = None
     selected_conversion_type: str | None = None
+    chart_source_df = filtered
 
     if aggregation_level == CHART_LEVEL_CATEGORY:
         category_summary_df = build_category_summary_table(filtered)
@@ -2725,6 +3279,33 @@ def render_charts_tab(
                     "Итоговые корзины": st.column_config.NumberColumn("Итоговые корзины", format="%.0f"),
                     "Корзины РК": st.column_config.NumberColumn("Корзины РК", format="%.0f"),
                     "Расход": st.column_config.NumberColumn("Расход", format="%.2f"),
+                    "Стоимость корзины РК": st.column_config.NumberColumn("Стоимость корзины РК", format="%.1f"),
+                    "CPO РК": st.column_config.NumberColumn("CPO РК", format="%.1f"),
+                },
+            )
+    elif aggregation_level == CHART_LEVEL_BAND:
+        chart_source_df = apply_product_bands(filtered)
+        band_summary_df = build_band_summary_table(chart_source_df)
+        if chart_source_df.get("band_name") is None or chart_source_df["band_name"].dropna().empty:
+            st.info("За выбранный период нет товаров из справочника банд.")
+            return
+        band_options = [CHART_ALL_BANDS_LABEL]
+        if not band_summary_df.empty:
+            band_options.extend(band_summary_df["Банда"].astype(str).tolist())
+        else:
+            band_options.extend(sorted(chart_source_df["band_name"].dropna().astype(str).unique().tolist()))
+        selected_band = st.selectbox("Банда", options=band_options, index=0)
+        if not band_summary_df.empty:
+            st.caption("Сводка по бандам за выбранный период.")
+            st.dataframe(
+                band_summary_df,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Товаров": st.column_config.NumberColumn("Товаров", format="%.0f"),
+                    "Итоговые корзины": st.column_config.NumberColumn("Итоговые корзины", format="%.0f"),
+                    "Корзины РК": st.column_config.NumberColumn("Корзины РК", format="%.0f"),
+                    "Расход РК": st.column_config.NumberColumn("Расход РК", format="%.2f"),
                     "Стоимость корзины РК": st.column_config.NumberColumn("Стоимость корзины РК", format="%.1f"),
                     "CPO РК": st.column_config.NumberColumn("CPO РК", format="%.1f"),
                 },
@@ -2780,11 +3361,12 @@ def render_charts_tab(
             st.caption(UNKNOWN_WB_TYPE_HELP_TEXT)
 
     scope_rows, context = build_chart_scope_rows(
-        filtered,
+        chart_source_df,
         aggregation_level,
         selected_product_label,
         option_map,
         selected_subject=selected_subject,
+        selected_band=selected_band,
         ad_campaign_product_df=ad_campaign_product_df,
         selected_conversion_type=selected_conversion_type,
     )
@@ -2797,6 +3379,8 @@ def render_charts_tab(
         st.info("Графики построены по сумме всех товаров, попавших в текущие фильтры периода.")
     elif aggregation_level == CHART_LEVEL_CATEGORY:
         st.caption(f"Выбранная категория: {context.get('level_value')}")
+    elif aggregation_level == CHART_LEVEL_BAND:
+        st.caption(f"Выбранная банда: {context.get('level_value')}")
     elif aggregation_level == CHART_LEVEL_CONVERSION:
         st.caption(f"Выбранный тип WB / конверсии: {context.get('level_value')}")
     else:
@@ -3285,8 +3869,16 @@ def main() -> None:
     detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
     default_detail_date = detail_dates[0]
 
-    tab_overview, tab_ad_campaign, tab_product, tab_charts, tab_sources, tab_upload = st.tabs(
-        ["ИТОГО", AD_CAMPAIGN_PRODUCT_LABEL, "Карточка товара", "Графики", "Источники", UPLOAD_TAB_TITLE]
+    tab_overview, tab_ad_campaign, tab_product, tab_charts, tab_sources, tab_stock_warehouse, tab_upload = st.tabs(
+        [
+            "ИТОГО",
+            AD_CAMPAIGN_PRODUCT_LABEL,
+            "Карточка товара",
+            "Графики",
+            "Источники",
+            STOCK_WAREHOUSE_TAB_LABEL,
+            UPLOAD_TAB_TITLE,
+        ]
     )
     with tab_overview:
         render_overview_tab(filtered, filter_debug_trace, display_coverage)
@@ -3298,6 +3890,8 @@ def main() -> None:
         render_charts_tab(filtered, selected_product_label, option_map, ad_campaign_product_df)
     with tab_sources:
         render_sources_tab(latest_row)
+    with tab_stock_warehouse:
+        render_stock_warehouse_tab(data_source)
     with tab_upload:
         render_upload_tab()
 

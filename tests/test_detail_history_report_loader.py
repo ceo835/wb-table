@@ -60,7 +60,7 @@ def test_extract_detail_history_frame_reads_zip_bytes_even_for_text_csv_content_
     assert frame.loc[0, "openCardCount"] == 6125
 
 
-def test_build_detail_history_fact_rows_preserves_existing_non_null_values_when_incoming_is_null() -> None:
+def test_build_detail_history_fact_rows_does_not_mix_legacy_target_metrics_into_detail_history_row() -> None:
     normalized = pd.DataFrame(
         [
             {
@@ -101,10 +101,10 @@ def test_build_detail_history_fact_rows_preserves_existing_non_null_values_when_
     assert len(rows) == 1
     row = rows[0]
     assert row["card_clicks"] == Decimal("6125")
-    assert row["cart_count"] == Decimal("100")
-    assert row["order_count"] == Decimal("50")
-    assert row["order_sum"] == Decimal("9999.99")
-    assert row["add_to_cart_conversion"] == Decimal("2.5")
+    assert row["cart_count"] is None
+    assert row["order_count"] is None
+    assert row["order_sum"] is None
+    assert row["add_to_cart_conversion"] is None
 
 
 def test_build_detail_history_fact_rows_keeps_explicit_zero_values() -> None:

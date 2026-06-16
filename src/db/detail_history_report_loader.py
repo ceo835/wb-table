@@ -17,8 +17,9 @@ from sqlalchemy.orm import Session
 
 from src.config.settings import settings
 from src.db.funnel_loader import build_fact_funnel_day_db_row
-from src.db.models import FactFunnelDay
+from src.db.models import FactFunnelDay, SettingsProducts
 from src.db.session import session_scope, upsert_rows
+from src.tracked_products import get_tracked_nm_ids
 
 
 WB_ANALYTICS_BASE = "https://seller-analytics-api.wildberries.ru"
@@ -424,6 +425,13 @@ def fetch_existing_funnel_rows(session: Session, *, date_from: date, date_to: da
     return result
 
 
+def load_active_nm_ids(session: Session) -> list[int]:
+    rows = session.execute(
+        select(SettingsProducts.nm_id).where(SettingsProducts.active.is_(True)).order_by(SettingsProducts.nm_id)
+    ).all()
+    return [int(row[0]) for row in rows if row and row[0] is not None]
+
+
 def build_detail_history_fact_rows(
     normalized_frame: pd.DataFrame,
     *,
@@ -458,6 +466,9 @@ def build_detail_history_fact_rows(
         merged["nm_id"] = int(nm_id)
         for key, value in incoming.items():
             if key in {"date", "nm_id"}:
+                continue
+            if key in DETAIL_HISTORY_TARGET_FIELDS:
+                merged[key] = value
                 continue
             if value is not None:
                 merged[key] = value
@@ -528,13 +539,15 @@ def save_artifacts(
     normalized_frame: pd.DataFrame,
     matched_frame: pd.DataFrame,
     summary: dict[str, Any],
+    artifact_prefix: str | None = None,
 ) -> dict[str, str]:
     save_raw_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = save_raw_dir / f"{download_id}.zip"
-    csv_path = save_raw_dir / f"{download_id}.csv"
-    normalized_path = save_raw_dir / f"{download_id}_normalized.csv"
-    matched_path = save_raw_dir / f"{download_id}_matched_gaps.csv"
-    summary_path = save_raw_dir / f"{download_id}_summary.json"
+    stem = artifact_prefix or download_id
+    zip_path = save_raw_dir / f"{stem}.zip"
+    csv_path = save_raw_dir / f"{stem}_raw.csv"
+    normalized_path = save_raw_dir / f"{stem}_normalized.csv"
+    matched_path = save_raw_dir / f"{stem}_matched_gaps.csv"
+    summary_path = save_raw_dir / f"{stem}_summary.json"
     if zip_bytes:
         zip_path.write_bytes(zip_bytes)
     raw_frame.to_csv(csv_path, index=False, encoding="utf-8-sig")
@@ -556,17 +569,25 @@ def load_detail_history_report(
     date_to: date,
     nmids_from_file: Path | None = None,
     nm_ids: Sequence[int] | None = None,
+    use_active_products: bool = False,
+    use_tracked_products: bool = False,
     poll_interval_seconds: int = 15,
     max_polls: int = 8,
     dry_run: bool = False,
     save_raw_dir: Path | None = None,
     timeout_seconds: int = 60,
+    artifact_prefix: str | None = None,
 ) -> dict[str, Any]:
     resolved_nm_ids = sorted({int(value) for value in (nm_ids or [])})
     gap_rows = pd.DataFrame()
     if nmids_from_file is not None:
         gap_rows = load_gap_rows(nmids_from_file)
         resolved_nm_ids = sorted(set(resolved_nm_ids) | set(int(value) for value in gap_rows["nm_id"].tolist()))
+    if use_active_products:
+        with session_scope() as session:
+            resolved_nm_ids = sorted(set(resolved_nm_ids) | set(load_active_nm_ids(session)))
+    if use_tracked_products:
+        resolved_nm_ids = sorted(set(resolved_nm_ids) | set(get_tracked_nm_ids()))
     if not resolved_nm_ids:
         raise ValueError("No nm_ids resolved for DETAIL_HISTORY_REPORT load")
 
@@ -593,6 +614,7 @@ def load_detail_history_report(
             "errors": [create_error] if create_error else [],
             "create_attempts": create_attempts,
             "poll_attempts": [],
+            "requested_nm_ids_list": resolved_nm_ids,
         }
         return summary
 
@@ -619,6 +641,7 @@ def load_detail_history_report(
             "create_attempts": create_attempts,
             "poll_attempts": poll_attempts,
             "list_payload_summary": _payload_summary(list_payload),
+            "requested_nm_ids_list": resolved_nm_ids,
         }
         return summary
 
@@ -647,6 +670,9 @@ def load_detail_history_report(
     raw_frame, download_meta = extract_detail_history_frame(zip_bytes, content_type)
     normalized_frame = normalize_detail_history_frame(raw_frame)
     matched_frame = build_gap_match_frame(gap_rows, normalized_frame) if not gap_rows.empty else pd.DataFrame()
+    raw_nm_ids = sorted({int(value) for value in normalized_frame["nm_id"].dropna().astype(int).tolist()}) if not normalized_frame.empty else []
+    normalized_dates = sorted({value.isoformat() for value in normalized_frame["date"].dropna().tolist()}) if not normalized_frame.empty else []
+    missing_requested_nm_ids = sorted(set(resolved_nm_ids) - set(raw_nm_ids))
 
     upserted_rows = 0
     inserted_new_rows = 0
@@ -690,6 +716,11 @@ def load_detail_history_report(
         "create_attempts": create_attempts,
         "poll_attempts": poll_attempts,
         "download_id": download_id,
+        "requested_nm_ids_list": resolved_nm_ids,
+        "normalized_nm_ids_count": len(raw_nm_ids),
+        "normalized_nm_ids_list": raw_nm_ids,
+        "normalized_dates": normalized_dates,
+        "missing_requested_nm_ids": missing_requested_nm_ids,
         "download_meta": {
             **download_meta,
             "download_status": download_status,
@@ -706,5 +737,6 @@ def load_detail_history_report(
             normalized_frame=normalized_frame,
             matched_frame=matched_frame,
             summary=summary,
+            artifact_prefix=artifact_prefix,
         )
     return summary

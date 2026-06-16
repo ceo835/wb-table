@@ -40,6 +40,7 @@ from src.db.models import (
 from src.db.search_query_loader import load_search_queries_to_db
 from src.db.session import session_scope
 from src.db.stock_loader import load_stocks_to_db
+from src.tracked_products import get_tracked_nm_ids
 
 
 DEFAULT_DATE_FROM = date(2026, 5, 1)
@@ -643,6 +644,7 @@ def _build_initial_state(
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
         "active_products_count": len(active_nm_ids),
+        "tracked_products_count": len(tracked_nm_ids),
         "target_products_count": len(target_nm_ids),
         "resume_failed_only": resume_failed_only,
         "before_coverage": before_coverage,
@@ -664,13 +666,21 @@ def run_backfill(
     fullstats_sleep_seconds: int,
     resume_failed_only: bool,
     sources: Sequence[str] | None,
+    product_scope: str,
 ) -> dict[str, Any]:
     selected_sources = _normalize_sources(sources)
     active_nm_ids = _load_active_nm_ids()
+    tracked_nm_ids = get_tracked_nm_ids()
     target_nm_ids = _load_target_nm_ids_from_mart(date_from, date_to)
     if not target_nm_ids:
         raise RuntimeError("Не удалось сформировать target nm_id из mart_total_report.")
-    reference_index = _load_reference_index(target_nm_ids)
+    if product_scope == "active":
+        selected_nm_ids = active_nm_ids
+    elif product_scope == "tracked":
+        selected_nm_ids = tracked_nm_ids
+    else:
+        selected_nm_ids = target_nm_ids
+    reference_index = _load_reference_index(selected_nm_ids)
     before_coverage = _coverage_snapshot(
         start=date_from,
         end=date_to,
@@ -685,6 +695,7 @@ def run_backfill(
         and existing_state.get("date_from") == date_from.isoformat()
         and existing_state.get("date_to") == date_to.isoformat()
         and list(existing_state.get("sources_requested") or []) == list(selected_sources)
+        and existing_state.get("product_scope") == product_scope
     )
     failed_chunks_to_resume = _load_failed_chunks() if resume_failed_only else []
     if resume_completed_chunks:
@@ -693,7 +704,9 @@ def run_backfill(
         state["resume_failed_only"] = resume_failed_only
         state["before_coverage"] = before_coverage
         state["active_products_count"] = len(active_nm_ids)
+        state["tracked_products_count"] = len(tracked_nm_ids)
         state["target_products_count"] = len(target_nm_ids)
+        state["selected_products_count"] = len(selected_nm_ids)
         state["source_logs"] = list(state.get("source_logs", []))
         state["failed_chunks"] = list(state.get("failed_chunks", []))
         state["summary_by_source"] = dict(state.get("summary_by_source", {}))
@@ -711,6 +724,8 @@ def run_backfill(
             before_coverage=before_coverage,
         )
         state["sources_requested"] = list(selected_sources)
+        state["product_scope"] = product_scope
+        state["selected_products_count"] = len(selected_nm_ids)
         if resume_failed_only:
             state["resume_failed_chunks_loaded"] = len(failed_chunks_to_resume)
     _persist_runtime_state(state)
@@ -725,7 +740,7 @@ def run_backfill(
         search_plan = search_failed if resume_failed_only else [
             {"report_date": report_date.isoformat(), "chunk_number": index, "nm_ids": chunk}
             for report_date in _daterange(date_from, date_to)
-            for index, chunk in enumerate(_chunked(target_nm_ids, search_chunk_size), start=1)
+            for index, chunk in enumerate(_chunked(selected_nm_ids, search_chunk_size), start=1)
         ]
         if resume_completed_chunks:
             search_plan = _filter_already_completed_plan(
@@ -763,7 +778,7 @@ def run_backfill(
         stocks_plan = stocks_failed if resume_failed_only else [
             {"report_date": report_date.isoformat(), "chunk_number": index, "nm_ids": chunk}
             for report_date in _daterange(date_from, date_to)
-            for index, chunk in enumerate(_chunked(target_nm_ids, stock_chunk_size), start=1)
+            for index, chunk in enumerate(_chunked(selected_nm_ids, stock_chunk_size), start=1)
         ]
         if resume_completed_chunks:
             stocks_plan = _filter_already_completed_plan(
@@ -801,7 +816,7 @@ def run_backfill(
                 "nm_ids": chunk,
             }
             for window_start, window_end in _split_date_windows(date_from, date_to, funnel_window_days)
-            for index, chunk in enumerate(_chunked(target_nm_ids, funnel_chunk_size), start=1)
+            for index, chunk in enumerate(_chunked(selected_nm_ids, funnel_chunk_size), start=1)
         ]
         if resume_completed_chunks:
             funnel_plan = _filter_already_completed_plan(
@@ -835,7 +850,7 @@ def run_backfill(
 
     if "ad_cost" in selected_sources:
         ad_cost_plan = ad_cost_failed if resume_failed_only else [
-            {"report_date": report_date.isoformat(), "chunk_number": 1, "nm_ids": target_nm_ids}
+            {"report_date": report_date.isoformat(), "chunk_number": 1, "nm_ids": selected_nm_ids}
             for report_date in _daterange(date_from, date_to)
         ]
         if resume_completed_chunks:
@@ -868,7 +883,7 @@ def run_backfill(
         fullstats_plan = fullstats_failed if resume_failed_only else []
         if not resume_failed_only:
             for window_start, window_end in windows:
-                ad_event_groups = _load_ad_event_groups(window_start, window_end, target_nm_ids)
+                ad_event_groups = _load_ad_event_groups(window_start, window_end, selected_nm_ids)
                 for index, (advert_id, rows) in enumerate(ad_event_groups, start=1):
                     fullstats_plan.append(
                         {
@@ -896,11 +911,11 @@ def run_backfill(
                     key = (window_start_text, window_end_text, advert_id)
                     if key in grouped_rows_by_window:
                         continue
-                    for loaded_advert_id, rows in _load_ad_event_groups(date.fromisoformat(window_start_text), date.fromisoformat(window_end_text), target_nm_ids):
+                    for loaded_advert_id, rows in _load_ad_event_groups(date.fromisoformat(window_start_text), date.fromisoformat(window_end_text), selected_nm_ids):
                         grouped_rows_by_window[(window_start_text, window_end_text, loaded_advert_id)] = rows
             else:
                 for window_start, window_end in windows:
-                    for advert_id, rows in _load_ad_event_groups(window_start, window_end, target_nm_ids):
+                    for advert_id, rows in _load_ad_event_groups(window_start, window_end, selected_nm_ids):
                         grouped_rows_by_window[(window_start.isoformat(), window_end.isoformat(), advert_id)] = rows
 
         for item in fullstats_plan:
@@ -955,7 +970,9 @@ def run_backfill(
         }
     )
     state["target_nm_ids"] = target_nm_ids
+    state["selected_nm_ids"] = selected_nm_ids
     state["target_products_processed"] = len(target_nm_ids)
+    state["selected_products_processed"] = len(selected_nm_ids)
     state["safe_fullstats_end"] = safe_fullstats_end.isoformat() if safe_fullstats_end >= date_from else None
     state["after_coverage"] = after_coverage
     state["mart_summary"] = mart_summary
@@ -978,6 +995,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fullstats-sleep-seconds", type=int, default=DEFAULT_FULLSTATS_SLEEP_SECONDS)
     parser.add_argument("--resume-failed-only", action="store_true")
     parser.add_argument("--sources", nargs="+", choices=list(SUPPORTED_SOURCES))
+    parser.add_argument("--product-scope", choices=("target", "active", "tracked"), default="target")
+    parser.add_argument("--tracked-products", action="store_true")
     return parser.parse_args()
 
 
@@ -985,6 +1004,7 @@ def main() -> int:
     args = parse_args()
     if args.date_from > args.date_to:
         raise SystemExit("--date-from must be <= --date-to")
+    product_scope = "tracked" if args.tracked_products else args.product_scope
     summary = run_backfill(
         date_from=args.date_from,
         date_to=args.date_to,
@@ -995,6 +1015,7 @@ def main() -> int:
         fullstats_sleep_seconds=args.fullstats_sleep_seconds,
         resume_failed_only=args.resume_failed_only,
         sources=args.sources,
+        product_scope=product_scope,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 1 if summary.get("failed_chunks") else 0

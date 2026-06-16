@@ -11,6 +11,8 @@ from app_streamlit import (
     CHART_THRESHOLD_CPO,
     DISPLAY_COLUMNS_BY_DATE,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
+    apply_tracked_scope_filters,
+    build_band_summary_table,
     build_category_summary_table,
     build_chart_series_dataframe,
     build_display_coverage_summary,
@@ -18,6 +20,7 @@ from app_streamlit import (
     build_debug_trace_frame,
     build_chart_metrics_by_date,
     build_chart_period_summary,
+    apply_product_bands,
     build_chart_product_options,
     build_chart_scope_rows,
     build_threshold_breaches_table,
@@ -41,6 +44,8 @@ from app_streamlit import (
     prepare_dataframe_for_streamlit_display,
     resolve_data_source,
     prepare_dataframe,
+    build_stock_warehouse_product_table,
+    build_stock_warehouse_summary_metrics,
     resolve_effective_import_date,
     resolve_export_range,
     summarize_available_dates,
@@ -78,6 +83,251 @@ def test_prepare_dataframe_builds_data_quality_status_when_missing() -> None:
     assert prepared.loc[1, "data_quality_status"] == "NO_DATA"
 
 
+def test_prepare_dataframe_applies_tracked_metadata(monkeypatch) -> None:
+    tracked_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 197330807,
+                "item_label": "чёрные 5 шт",
+                "is_tracked": True,
+                "lifecycle_status": "active",
+                "source": "ivan_2026-06-15_v2",
+                "tracked_label": "чёрные 5 шт",
+            }
+        ]
+    )
+    monkeypatch.setattr(app_streamlit, "shared_apply_tracked_products", lambda df: df.merge(
+        tracked_df[["nm_id", "is_tracked", "tracked_label", "lifecycle_status"]],
+        on="nm_id",
+        how="left",
+    ).assign(
+        is_tracked=lambda frame: frame["is_tracked"].where(frame["is_tracked"].notna(), False).astype(bool),
+        lifecycle_status=lambda frame: frame["lifecycle_status"].fillna("not_tracked"),
+    ))
+
+    prepared = prepare_dataframe(
+        pd.DataFrame(
+            [
+                {"report_date": "2026-06-07", "nm_id": 197330807, "has_funnel": True},
+                {"report_date": "2026-06-07", "nm_id": 999999999, "has_funnel": False},
+            ]
+        )
+    )
+
+    assert bool(prepared.loc[0, "is_tracked"]) is True
+    assert prepared.loc[0, "tracked_label"] == "чёрные 5 шт"
+    assert prepared.loc[0, "lifecycle_status"] == "active"
+    assert bool(prepared.loc[1, "is_tracked"]) is False
+    assert prepared.loc[1, "lifecycle_status"] == "not_tracked"
+
+
+def test_build_stock_warehouse_product_table_aggregates_chrt_rows_and_keeps_missing_tracked_products() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 197330807,
+                "chrt_id": 1,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 5,
+                "in_way_to_client": 1,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 197330807,
+                "chrt_id": 2,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 7,
+                "in_way_to_client": 2,
+                "in_way_from_client": 1,
+            },
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 197330807,
+                "chrt_id": 1,
+                "warehouse_id": 11,
+                "warehouse_name": "Тула",
+                "stock_qty": 0,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 197330807,
+                "tracked_label": "BlackWOM5",
+                "is_tracked": True,
+                "lifecycle_status": "active",
+            },
+            {
+                "nm_id": 320893265,
+                "tracked_label": "коты 4 большие",
+                "is_tracked": True,
+                "lifecycle_status": "active",
+            },
+        ]
+    )
+
+    result = build_stock_warehouse_product_table(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=pd.Timestamp("2026-06-15").date(),
+        selected_warehouses=["Владимир WB", "Тула"],
+        show_only_tracked=True,
+        show_sellout=True,
+    )
+
+    product_row = result.loc[result["nm_id"] == 197330807].iloc[0]
+    missing_row = result.loc[result["nm_id"] == 320893265].iloc[0]
+
+    assert product_row["Владимир WB"] == 12
+    assert product_row["Тула"] == 0
+    assert product_row["zero_warehouses_count"] == 1
+    assert product_row["no_data_warehouses_count"] == 0
+    assert product_row["stock_status"] == "ZERO_ON_WAREHOUSE"
+
+    assert missing_row["Владимир WB"] == "NO_DATA"
+    assert missing_row["Тула"] == "NO_DATA"
+    assert missing_row["no_data_warehouses_count"] == 2
+    assert missing_row["stock_status"] == "NO_STOCK_DATA_FOR_PRODUCT"
+
+
+def test_build_stock_warehouse_product_table_marks_missing_selected_warehouse_as_no_data() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 91470767,
+                "chrt_id": 1,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 3,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            }
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 91470767,
+                "tracked_label": "avokadogirl",
+                "is_tracked": True,
+                "lifecycle_status": "active",
+            }
+        ]
+    )
+
+    result = build_stock_warehouse_product_table(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=pd.Timestamp("2026-06-15").date(),
+        selected_warehouses=["Владимир WB", "Тула"],
+        show_only_tracked=True,
+        show_sellout=True,
+    )
+
+    row = result.iloc[0]
+
+    assert row["Владимир WB"] == 3
+    assert row["Тула"] == "NO_DATA"
+    assert row["zero_warehouses_count"] == 0
+    assert row["no_data_warehouses_count"] == 1
+    assert row["stock_status"] == "NO_DATA_ON_WAREHOUSE"
+
+
+def test_build_stock_warehouse_summary_metrics_counts_ok_zero_and_no_data_rows() -> None:
+    product_table = pd.DataFrame(
+        [
+            {"nm_id": 1, "stock_status": "OK", "zero_warehouses_count": 0, "no_data_warehouses_count": 0},
+            {"nm_id": 2, "stock_status": "ZERO_ON_WAREHOUSE", "zero_warehouses_count": 2, "no_data_warehouses_count": 0},
+            {"nm_id": 3, "stock_status": "NO_DATA_ON_WAREHOUSE", "zero_warehouses_count": 0, "no_data_warehouses_count": 1},
+            {"nm_id": 4, "stock_status": "NO_STOCK_DATA_FOR_PRODUCT", "zero_warehouses_count": 0, "no_data_warehouses_count": 3},
+        ]
+    )
+
+    metrics = build_stock_warehouse_summary_metrics(product_table)
+
+    assert metrics == {
+        "total_products": 4,
+        "ok_products": 1,
+        "zero_products": 1,
+        "no_data_products": 2,
+        "total_zero_warehouses": 2,
+    }
+
+
+def test_load_stock_warehouse_snapshot_from_db_materializes_rows_before_session_close(monkeypatch) -> None:
+    state = {"attached": True}
+
+    class FakeRow:
+        def __getattribute__(self, name: str):
+            if name.startswith("_"):
+                return object.__getattribute__(self, name)
+            if not state["attached"]:
+                raise RuntimeError("detached")
+            values = {
+                "snapshot_date": pd.Timestamp("2026-06-15").date(),
+                "nm_id": 197330807,
+                "chrt_id": 1,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "region_name": "ЦФО",
+                "stock_qty": 5,
+                "in_way_to_client": 1,
+                "in_way_from_client": 0,
+                "source": "WB_API",
+                "loaded_at": pd.Timestamp("2026-06-16 10:00:00"),
+            }
+            return values[name]
+
+    class FakeResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [FakeRow()]
+
+    class FakeSession:
+        def execute(self, _stmt):
+            return FakeResult()
+
+    class FakeSessionScope:
+        def __enter__(self):
+            state["attached"] = True
+            return FakeSession()
+
+        def __exit__(self, exc_type, exc, tb):
+            state["attached"] = False
+            return False
+
+    monkeypatch.setattr(app_streamlit, "session_scope", lambda: FakeSessionScope())
+    app_streamlit.load_stock_warehouse_snapshot_from_db.clear()
+
+    result = app_streamlit.load_stock_warehouse_snapshot_from_db()
+
+    assert result.to_dict(orient="records") == [
+        {
+            "snapshot_date": pd.Timestamp("2026-06-15").date(),
+            "nm_id": 197330807,
+            "chrt_id": 1,
+            "warehouse_id": 10,
+            "warehouse_name": "Владимир WB",
+            "region_name": "ЦФО",
+            "stock_qty": 5,
+            "in_way_to_client": 1,
+            "in_way_from_client": 0,
+            "source": "WB_API",
+            "loaded_at": pd.Timestamp("2026-06-16 10:00:00"),
+        }
+    ]
+
+
 def test_build_debug_snapshot_and_trace_frame_report_rows_and_unique_nm() -> None:
     df = pd.DataFrame(
         [
@@ -96,6 +346,36 @@ def test_build_debug_snapshot_and_trace_frame_report_rows_and_unique_nm() -> Non
         "unique_nm": 2,
     }
     assert trace_df.to_dict(orient="records") == [snapshot]
+
+
+def test_apply_tracked_scope_filters_keeps_only_tracked_and_can_hide_sellout() -> None:
+    df = pd.DataFrame(
+        [
+            {"nm_id": 1, "is_tracked": True, "lifecycle_status": "active"},
+            {"nm_id": 2, "is_tracked": True, "lifecycle_status": "sellout"},
+            {"nm_id": 3, "is_tracked": False, "lifecycle_status": "not_tracked"},
+        ]
+    )
+
+    tracked_only = apply_tracked_scope_filters(
+        df,
+        show_only_tracked=True,
+        show_sellout=True,
+    )
+    active_only = apply_tracked_scope_filters(
+        df,
+        show_only_tracked=True,
+        show_sellout=False,
+    )
+    all_without_sellout = apply_tracked_scope_filters(
+        df,
+        show_only_tracked=False,
+        show_sellout=False,
+    )
+
+    assert tracked_only["nm_id"].tolist() == [1, 2]
+    assert active_only["nm_id"].tolist() == [1]
+    assert all_without_sellout["nm_id"].tolist() == [1, 3]
 
 
 def test_build_display_coverage_summary_counts_null_to_zero_and_positive() -> None:
@@ -619,6 +899,30 @@ def test_build_chart_scope_rows_returns_category_slice_and_context() -> None:
     assert context["level_value"] == "Трусы"
 
 
+def test_build_chart_scope_rows_returns_band_slice_and_context() -> None:
+    filtered = pd.DataFrame(
+        [
+            {"report_date": "2026-06-06", "nm_id": 1, "band_name": "Банда Футболки", "cart_count": 5},
+            {"report_date": "2026-06-06", "nm_id": 2, "band_name": "Банда ТРУСЫ Женские", "cart_count": 3},
+        ]
+    )
+
+    scope_rows, context = build_chart_scope_rows(
+        filtered=filtered,
+        aggregation_level="Банда",
+        selected_product_label=None,
+        option_map={},
+        selected_subject=None,
+        selected_band="Банда Футболки",
+        ad_campaign_product_df=pd.DataFrame(),
+        selected_conversion_type=None,
+    )
+
+    assert scope_rows["band_name"].tolist() == ["Банда Футболки"]
+    assert context["scope"] == "Банда"
+    assert context["level_value"] == "Банда Футболки"
+
+
 def test_build_chart_scope_rows_returns_conversion_scope_from_ad_dataset() -> None:
     filtered = pd.DataFrame(
         [
@@ -708,6 +1012,60 @@ def test_build_category_summary_table_aggregates_categories_and_flags_thresholds
     assert float(summary_df.iloc[0]["CPO РК"]) == 100.0
     assert summary_df.iloc[0]["Флаг превышения"] == "Да"
     assert summary_df.iloc[1]["Флаг превышения"] == "—"
+
+
+def test_build_band_summary_table_aggregates_bands_and_flags_thresholds() -> None:
+    filtered = pd.DataFrame(
+        [
+            {
+                "band_name": "Банда Футболки",
+                "nm_id": 1,
+                "cart_count": 10,
+                "ad_atbs_total": 2,
+                "ad_campaign_spend_total": 100,
+                "ad_orders_total": 1,
+            },
+            {
+                "band_name": "Банда Футболки",
+                "nm_id": 2,
+                "cart_count": 5,
+                "ad_atbs_total": 3,
+                "ad_campaign_spend_total": 100,
+                "ad_orders_total": 1,
+            },
+            {
+                "band_name": "Банда ТРУСЫ Женские",
+                "nm_id": 3,
+                "cart_count": 8,
+                "ad_atbs_total": 4,
+                "ad_campaign_spend_total": 80,
+                "ad_orders_total": 2,
+            },
+        ]
+    )
+
+    summary_df = build_band_summary_table(filtered)
+
+    assert summary_df["Банда"].tolist() == ["Банда Футболки", "Банда ТРУСЫ Женские"]
+    assert float(summary_df.iloc[0]["Товаров"]) == 2.0
+    assert float(summary_df.iloc[0]["Корзины РК"]) == 5.0
+    assert float(summary_df.iloc[0]["CPO РК"]) == 100.0
+    assert summary_df.iloc[0]["Превышения"] == "Да"
+    assert summary_df.iloc[1]["Превышения"] == "—"
+
+
+def test_apply_product_bands_adds_band_name_and_excludes_unmapped_as_null() -> None:
+    filtered = pd.DataFrame(
+        [
+            {"nm_id": 577510563, "supplier_article": "futmix3haki"},
+            {"nm_id": 999999999, "supplier_article": "unknown"},
+        ]
+    )
+
+    band_df = apply_product_bands(filtered)
+
+    assert band_df.loc[0, "band_name"] == "Банда Футболки"
+    assert pd.isna(band_df.loc[1, "band_name"])
 
 
 def test_format_wb_conversion_type_label_maps_unknown_code_for_ui() -> None:

@@ -43,6 +43,7 @@ from src.db.models import (
 from src.db.search_query_loader import load_search_queries_to_db
 from src.db.session import session_scope
 from src.db.stock_loader import load_stocks_to_db
+from src.tracked_products import get_tracked_nm_ids
 
 
 DEFAULT_DATE_FROM = date(2026, 6, 2)
@@ -97,6 +98,24 @@ def _load_active_products() -> list[dict[str, Any]]:
                 SettingsProducts.brand,
             )
             .where(SettingsProducts.active.is_(True))
+            .order_by(SettingsProducts.nm_id)
+        ).all()
+    return [row._asdict() for row in rows]
+
+
+def _load_products_by_nm_ids(nm_ids: Sequence[int]) -> list[dict[str, Any]]:
+    if not nm_ids:
+        return []
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                SettingsProducts.nm_id,
+                SettingsProducts.supplier_article,
+                SettingsProducts.title,
+                SettingsProducts.subject,
+                SettingsProducts.brand,
+            )
+            .where(SettingsProducts.nm_id.in_(list(nm_ids)))
             .order_by(SettingsProducts.nm_id)
         ).all()
     return [row._asdict() for row in rows]
@@ -295,9 +314,15 @@ def run_missing_core_dates_load(
     full_range_from: date,
     full_range_to: date,
     fullstats_sleep_seconds: int,
+    use_tracked_products: bool = False,
 ) -> dict[str, Any]:
-    active_products = _load_active_products()
-    active_nm_ids = [int(row["nm_id"]) for row in active_products]
+    scope_mode = "tracked_products" if use_tracked_products else "active_products"
+    if use_tracked_products:
+        active_nm_ids = sorted({int(nm_id) for nm_id in get_tracked_nm_ids()})
+        active_products = _load_products_by_nm_ids(active_nm_ids)
+    else:
+        active_products = _load_active_products()
+        active_nm_ids = [int(row["nm_id"]) for row in active_products]
     reference_index_int, reference_index_str = _build_reference_indexes(active_products)
     dates = _daterange(date_from, date_to)
     source_logs: list[SourceLogRow] = []
@@ -571,6 +596,8 @@ def run_missing_core_dates_load(
     return {
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
+        "scope_mode": scope_mode,
+        "scope_products_count": len(active_nm_ids),
         "active_products_count": len(active_nm_ids),
         "dates_loaded": [day.isoformat() for day in dates],
         "summary_by_source": summary_by_source,
@@ -607,6 +634,7 @@ def main() -> int:
     parser.add_argument("--full-range-from", type=_parse_date, default=DEFAULT_FULL_RANGE_FROM)
     parser.add_argument("--full-range-to", type=_parse_date, default=DEFAULT_FULL_RANGE_TO)
     parser.add_argument("--fullstats-sleep-seconds", type=int, default=FULLSTATS_SLEEP_SECONDS)
+    parser.add_argument("--tracked-products", action="store_true")
     args = parser.parse_args()
 
     if args.date_from > args.date_to:
@@ -622,6 +650,7 @@ def main() -> int:
         full_range_from=args.full_range_from,
         full_range_to=args.full_range_to,
         fullstats_sleep_seconds=args.fullstats_sleep_seconds,
+        use_tracked_products=bool(args.tracked_products),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 1 if summary.get("failed_chunks") else 0

@@ -123,6 +123,38 @@ def _has_meaningful_funnel_metrics(row: Mapping[str, Any]) -> bool:
     return any(_to_decimal_or_none(row.get(field)) is not None for field in meaningful_fields)
 
 
+def _has_positive_funnel_metrics(row: Mapping[str, Any]) -> bool:
+    meaningful_fields = (
+        "card_clicks",
+        "cart_count",
+        "order_count",
+        "order_sum",
+        "add_to_cart_conversion",
+        "cart_to_order_conversion",
+        "add_to_cart_conversion_calc",
+        "cart_to_order_conversion_calc",
+        "buyout_count",
+        "buyout_sum",
+    )
+    return any(
+        (decimal_value := _to_decimal_or_none(row.get(field))) is not None and decimal_value > 0
+        for field in meaningful_fields
+    )
+
+
+def _resolve_funnel_status(funnel_row: FactFunnelDay | None, row: Mapping[str, Any]) -> tuple[str, str | None]:
+    if funnel_row is None:
+        return "SOURCE_MISSING", None
+    source_status = getattr(funnel_row, "source_status", None)
+    has_metrics = _has_meaningful_funnel_metrics(row)
+    has_positive = _has_positive_funnel_metrics(row)
+    if source_status == "DETAIL_HISTORY_REPORT":
+        return ("REAL_API_DETAIL" if has_positive else "NO_ACTIVITY"), source_status
+    if has_metrics:
+        return ("LEGACY_FALLBACK" if has_positive else "NO_ACTIVITY"), source_status
+    return "HOLLOW_LEGACY_IGNORED", source_status
+
+
 def _date_range(start: date, end: date) -> list[date]:
     days: list[date] = []
     current = start
@@ -525,6 +557,13 @@ def _build_mart_total_report_v2_row(
         )
     )
     row["has_funnel"] = _has_meaningful_funnel_metrics(row)
+    funnel_resolution_status, funnel_selected_source = _resolve_funnel_status(funnel_row, row)
+    row["export_context_json"] = {
+        "funnel_resolution_status": funnel_resolution_status,
+        "funnel_selected_source": funnel_selected_source,
+        "funnel_has_non_null_metrics": row["has_funnel"],
+        "funnel_has_positive_metrics": _has_positive_funnel_metrics(row),
+    }
     return row
 
 

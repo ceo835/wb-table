@@ -490,6 +490,34 @@ class FactStockSnapshot(Base, StatusMixin):
     warehouse_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class FactStockWarehouseSnapshot(Base, TimestampMixin):
+    __tablename__ = "fact_stock_warehouse_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_date",
+            "nm_id",
+            "chrt_id",
+            "warehouse_id",
+            name="uq_fact_stock_warehouse_snapshot_natural_key",
+        ),
+        Index("idx_fact_stock_warehouse_snapshot_date_nm", "snapshot_date", "nm_id"),
+        Index("idx_fact_stock_warehouse_snapshot_nm_warehouse", "nm_id", "warehouse_id"),
+        Index("idx_fact_stock_warehouse_snapshot_warehouse", "warehouse_name", "snapshot_date"),
+    )
+
+    fact_stock_warehouse_snapshot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chrt_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    warehouse_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    region_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stock_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    in_way_to_client: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    in_way_from_client: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
 class FactLocalizationRegionDay(Base, StatusMixin):
     __tablename__ = "fact_localization_region_day"
     __table_args__ = (

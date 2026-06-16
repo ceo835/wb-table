@@ -70,6 +70,20 @@ def _safe_cell(value: Any) -> Any:
     return value
 
 
+def _value_or_blank(value: Any) -> Any:
+    return value if value is not None else ""
+
+
+def _ratio_or_blank_preserve_zero(numerator: Any, denominator: Any) -> Any:
+    if numerator is None or denominator is None:
+        return ""
+    numerator_value = _to_float(numerator)
+    denominator_value = _to_float(denominator)
+    if denominator_value in (None, 0):
+        return 0 if numerator_value == 0 else ""
+    return _ratio(numerator, denominator)
+
+
 def _to_float(value: Any) -> float | None:
     if value in (None, "", [], {}):
         return None
@@ -1013,36 +1027,36 @@ class MvpRealRun:
         prev_cancel_count = _first_number(prev_item or {}, "cancelCount") if prev_item else None
         prev_cancel_sum = _first_number(prev_item or {}, "cancelSum") if prev_item else None
         prev_add_to_wishlist = _first_number(prev_item or {}, "addToWishlistCount") if prev_item else None
-        add_to_cart_conversion = (
-            _first_number(item, "addToCartConversion")
-            or _first_number(selected_conversions, "addToCartPercent")
-            or _ratio(cart_count, card_clicks)
-        )
-        add_to_cart_conversion_prev = (
-            (_first_number(prev_item or {}, "addToCartConversion") if prev_item else None)
-            or _first_number(past_conversions, "addToCartPercent")
-            or _ratio(prev_cart_count, prev_card_clicks)
-        )
-        cart_to_order_conversion = (
-            _first_number(item, "cartToOrderConversion")
-            or _first_number(selected_conversions, "cartToOrderPercent")
-            or _ratio(order_count, cart_count)
-        )
-        cart_to_order_conversion_prev = (
-            (_first_number(prev_item or {}, "cartToOrderConversion") if prev_item else None)
-            or _first_number(past_conversions, "cartToOrderPercent")
-            or _ratio(prev_order_count, prev_cart_count)
-        )
-        buyout_percent = (
-            _first_number(item, "buyoutPercent")
-            or _first_number(selected_conversions, "buyoutPercent")
-            or _ratio(buyout_count, order_count)
-        )
-        buyout_percent_prev = (
-            (_first_number(prev_item or {}, "buyoutPercent") if prev_item else None)
-            or _first_number(past_conversions, "buyoutPercent")
-            or _ratio(prev_buyout_count, prev_order_count)
-        )
+        add_to_cart_conversion = _first_number(item, "addToCartConversion")
+        if add_to_cart_conversion is None:
+            add_to_cart_conversion = _first_number(selected_conversions, "addToCartPercent")
+        if add_to_cart_conversion is None:
+            add_to_cart_conversion = _ratio(cart_count, card_clicks)
+        add_to_cart_conversion_prev = _first_number(prev_item or {}, "addToCartConversion") if prev_item else None
+        if add_to_cart_conversion_prev is None:
+            add_to_cart_conversion_prev = _first_number(past_conversions, "addToCartPercent")
+        if add_to_cart_conversion_prev is None:
+            add_to_cart_conversion_prev = _ratio(prev_cart_count, prev_card_clicks)
+        cart_to_order_conversion = _first_number(item, "cartToOrderConversion")
+        if cart_to_order_conversion is None:
+            cart_to_order_conversion = _first_number(selected_conversions, "cartToOrderPercent")
+        if cart_to_order_conversion is None:
+            cart_to_order_conversion = _ratio(order_count, cart_count)
+        cart_to_order_conversion_prev = _first_number(prev_item or {}, "cartToOrderConversion") if prev_item else None
+        if cart_to_order_conversion_prev is None:
+            cart_to_order_conversion_prev = _first_number(past_conversions, "cartToOrderPercent")
+        if cart_to_order_conversion_prev is None:
+            cart_to_order_conversion_prev = _ratio(prev_order_count, prev_cart_count)
+        buyout_percent = _first_number(item, "buyoutPercent")
+        if buyout_percent is None:
+            buyout_percent = _first_number(selected_conversions, "buyoutPercent")
+        if buyout_percent is None:
+            buyout_percent = _ratio(buyout_count, order_count)
+        buyout_percent_prev = _first_number(prev_item or {}, "buyoutPercent") if prev_item else None
+        if buyout_percent_prev is None:
+            buyout_percent_prev = _first_number(past_conversions, "buyoutPercent")
+        if buyout_percent_prev is None:
+            buyout_percent_prev = _ratio(prev_buyout_count, prev_order_count)
         return {
             "date": _to_date_text(_first_text(item, "date", "dt", "start")),
             "nm_id": nm_id or "",
@@ -1052,58 +1066,58 @@ class MvpRealRun:
             "brand": _first_text(product_meta, "brandName", "brand"),
             "impressions": impressions or "",
             "impressions_prev": prev_impressions or "",
-            "card_clicks": card_clicks or "",
-            "card_clicks_prev": prev_card_clicks or "",
+            "card_clicks": _value_or_blank(card_clicks),
+            "card_clicks_prev": _value_or_blank(prev_card_clicks),
             "ctr": _ratio(card_clicks, impressions) or "",
             "ctr_prev": _ratio(prev_card_clicks, prev_impressions) or "",
-            "revenue_share_percent": _ratio(order_sum, day_total) or "",
-            "revenue_share_percent_prev": _ratio(prev_order_sum, prev_day_total) or "",
-            "cartCount": cart_count or "",
-            "cartCount_prev": prev_cart_count or "",
+            "revenue_share_percent": _ratio_or_blank_preserve_zero(order_sum, day_total),
+            "revenue_share_percent_prev": _ratio_or_blank_preserve_zero(prev_order_sum, prev_day_total),
+            "cartCount": _value_or_blank(cart_count),
+            "cartCount_prev": _value_or_blank(prev_cart_count),
             "addToWishlistCount": _first_number(item, "addToWishlistCount") or "",
             "addToWishlistCount_prev": prev_add_to_wishlist or "",
-            "orderCount": order_count or "",
-            "orderCount_prev": prev_order_count or "",
-            "buyoutCount": buyout_count or "",
-            "buyoutCount_prev": prev_buyout_count or "",
-            "cancelCount": _first_number(item, "cancelCount") or "",
-            "cancelCount_prev": prev_cancel_count or "",
-            "addToCartConversion": add_to_cart_conversion or "",
-            "addToCartConversion_prev": add_to_cart_conversion_prev or "",
-            "cartToOrderConversion": cart_to_order_conversion or "",
-            "cartToOrderConversion_prev": cart_to_order_conversion_prev or "",
-            "buyoutPercent": buyout_percent or "",
-            "buyoutPercent_prev": buyout_percent_prev or "",
-            "orderSum": order_sum or "",
-            "orderSum_prev": prev_order_sum or "",
+            "orderCount": _value_or_blank(order_count),
+            "orderCount_prev": _value_or_blank(prev_order_count),
+            "buyoutCount": _value_or_blank(buyout_count),
+            "buyoutCount_prev": _value_or_blank(prev_buyout_count),
+            "cancelCount": _value_or_blank(_first_number(item, "cancelCount")),
+            "cancelCount_prev": _value_or_blank(prev_cancel_count),
+            "addToCartConversion": _value_or_blank(add_to_cart_conversion),
+            "addToCartConversion_prev": _value_or_blank(add_to_cart_conversion_prev),
+            "cartToOrderConversion": _value_or_blank(cart_to_order_conversion),
+            "cartToOrderConversion_prev": _value_or_blank(cart_to_order_conversion_prev),
+            "buyoutPercent": _value_or_blank(buyout_percent),
+            "buyoutPercent_prev": _value_or_blank(buyout_percent_prev),
+            "orderSum": _value_or_blank(order_sum),
+            "orderSum_prev": _value_or_blank(prev_order_sum),
             "orderSumDynamics": (round(order_sum - prev_order_sum, 2) if order_sum is not None and prev_order_sum is not None else ""),
-            "buyoutSum": _first_number(item, "buyoutSum") or "",
-            "buyoutSum_prev": prev_buyout_sum or "",
-            "cancelSum": _first_number(item, "cancelSum") or "",
-            "cancelSum_prev": prev_cancel_sum or "",
+            "buyoutSum": _value_or_blank(_first_number(item, "buyoutSum")),
+            "buyoutSum_prev": _value_or_blank(prev_buyout_sum),
+            "cancelSum": _value_or_blank(_first_number(item, "cancelSum")),
+            "cancelSum_prev": _value_or_blank(prev_cancel_sum),
             "avg_price": _calc_metric_per_unit(order_sum, order_count) or "",
             "avg_price_prev": _calc_metric_per_unit(prev_order_sum, prev_order_count) or "",
-            "avg_orders_per_day": order_count or "",
-            "avg_orders_per_day_prev": prev_order_count or "",
+            "avg_orders_per_day": _value_or_blank(order_count),
+            "avg_orders_per_day_prev": _value_or_blank(prev_order_count),
             "product_rating": _first_number(product_meta, "productRating") or "",
             "feedback_rating": _first_number(product_meta, "feedbackRating") or "",
-            "wb_stock_qty": _first_number(_get_path(product_meta, ("stocks",)), "wb") or "",
-            "mp_stock_qty": _first_number(_get_path(product_meta, ("stocks",)), "mp") or "",
-            "stock_total_sum": _first_number(_get_path(product_meta, ("stocks",)), "balanceSum") or "",
+            "wb_stock_qty": _value_or_blank(_first_number(_get_path(product_meta, ("stocks",)), "wb")),
+            "mp_stock_qty": _value_or_blank(_first_number(_get_path(product_meta, ("stocks",)), "mp")),
+            "stock_total_sum": _value_or_blank(_first_number(_get_path(product_meta, ("stocks",)), "balanceSum")),
             "avg_delivery_time": _duration_text(_get_path(selected_stats, ("timeToReady",))) or "",
             "avg_delivery_time_prev": _duration_text(_get_path(past_stats, ("timeToReady",))) or "",
-            "local_orders_percent": _first_number(selected_stats, "localizationPercent") or "",
-            "local_orders_percent_prev": _first_number(past_stats, "localizationPercent") or "",
-            "wbclub_orderCount": _first_number(_get_path(selected_stats, ("wbClub",)), "orderCount") or "",
-            "wbclub_orderCount_prev": _first_number(_get_path(past_stats, ("wbClub",)), "orderCount") or "",
-            "wbclub_buyoutCount": _first_number(_get_path(selected_stats, ("wbClub",)), "buyoutCount") or "",
-            "wbclub_buyoutCount_prev": _first_number(_get_path(past_stats, ("wbClub",)), "buyoutCount") or "",
-            "wbclub_cancelCount": _first_number(_get_path(selected_stats, ("wbClub",)), "cancelCount") or "",
-            "wbclub_cancelCount_prev": _first_number(_get_path(past_stats, ("wbClub",)), "cancelCount") or "",
-            "wbclub_buyoutPercent": _first_number(_get_path(selected_stats, ("wbClub",)), "buyoutPercent") or "",
-            "wbclub_buyoutPercent_prev": _first_number(_get_path(past_stats, ("wbClub",)), "buyoutPercent") or "",
-            "wbclub_orderSum": _first_number(_get_path(selected_stats, ("wbClub",)), "orderSum") or "",
-            "wbclub_orderSum_prev": _first_number(_get_path(past_stats, ("wbClub",)), "orderSum") or "",
+            "local_orders_percent": _value_or_blank(_first_number(selected_stats, "localizationPercent")),
+            "local_orders_percent_prev": _value_or_blank(_first_number(past_stats, "localizationPercent")),
+            "wbclub_orderCount": _value_or_blank(_first_number(_get_path(selected_stats, ("wbClub",)), "orderCount")),
+            "wbclub_orderCount_prev": _value_or_blank(_first_number(_get_path(past_stats, ("wbClub",)), "orderCount")),
+            "wbclub_buyoutCount": _value_or_blank(_first_number(_get_path(selected_stats, ("wbClub",)), "buyoutCount")),
+            "wbclub_buyoutCount_prev": _value_or_blank(_first_number(_get_path(past_stats, ("wbClub",)), "buyoutCount")),
+            "wbclub_cancelCount": _value_or_blank(_first_number(_get_path(selected_stats, ("wbClub",)), "cancelCount")),
+            "wbclub_cancelCount_prev": _value_or_blank(_first_number(_get_path(past_stats, ("wbClub",)), "cancelCount")),
+            "wbclub_buyoutPercent": _value_or_blank(_first_number(_get_path(selected_stats, ("wbClub",)), "buyoutPercent")),
+            "wbclub_buyoutPercent_prev": _value_or_blank(_first_number(_get_path(past_stats, ("wbClub",)), "buyoutPercent")),
+            "wbclub_orderSum": _value_or_blank(_first_number(_get_path(selected_stats, ("wbClub",)), "orderSum")),
+            "wbclub_orderSum_prev": _value_or_blank(_first_number(_get_path(past_stats, ("wbClub",)), "orderSum")),
             "wbclub_orderSumDynamics": (
                 round(
                     (_to_float(_first_number(_get_path(selected_stats, ("wbClub",)), "orderSum")) or 0)
@@ -1114,12 +1128,12 @@ class MvpRealRun:
                 and _first_number(_get_path(past_stats, ("wbClub",)), "orderSum") is not None
                 else ""
             ),
-            "wbclub_buyoutSum": _first_number(_get_path(selected_stats, ("wbClub",)), "buyoutSum") or "",
-            "wbclub_buyoutSum_prev": _first_number(_get_path(past_stats, ("wbClub",)), "buyoutSum") or "",
-            "wbclub_cancelSum": _first_number(_get_path(selected_stats, ("wbClub",)), "cancelSum") or "",
-            "wbclub_cancelSum_prev": _first_number(_get_path(past_stats, ("wbClub",)), "cancelSum") or "",
-            "wbclub_avg_orders_per_day": _first_number(_get_path(selected_stats, ("wbClub",)), "avgOrderCountPerDay") or "",
-            "wbclub_avg_orders_per_day_prev": _first_number(_get_path(past_stats, ("wbClub",)), "avgOrderCountPerDay") or "",
+            "wbclub_buyoutSum": _value_or_blank(_first_number(_get_path(selected_stats, ("wbClub",)), "buyoutSum")),
+            "wbclub_buyoutSum_prev": _value_or_blank(_first_number(_get_path(past_stats, ("wbClub",)), "buyoutSum")),
+            "wbclub_cancelSum": _value_or_blank(_first_number(_get_path(selected_stats, ("wbClub",)), "cancelSum")),
+            "wbclub_cancelSum_prev": _value_or_blank(_first_number(_get_path(past_stats, ("wbClub",)), "cancelSum")),
+            "wbclub_avg_orders_per_day": _value_or_blank(_first_number(_get_path(selected_stats, ("wbClub",)), "avgOrderCountPerDay")),
+            "wbclub_avg_orders_per_day_prev": _value_or_blank(_first_number(_get_path(past_stats, ("wbClub",)), "avgOrderCountPerDay")),
             "ad_views_percent": "",
             "ad_views": "",
             "cart_overpay_vs_yesterday": "",
@@ -1146,14 +1160,14 @@ class MvpRealRun:
             "title": _first_text(item, "name", "title"),
             "subject": _first_text(item, "subjectName", "subject"),
             "brand": _first_text(item, "brandName", "brand"),
-            "wb_stock_qty": stock_qty or "",
+            "wb_stock_qty": _value_or_blank(stock_qty),
             "mp_stock_qty": "",
-            "stock_total_qty": stock_qty or "",
-            "stock_total_sum": stock_sum or "",
-            "saleRate": _first_number(metrics, "saleRate") or "",
-            "toClientCount": _first_number(metrics, "toClientCount") or "",
-            "fromClientCount": _first_number(metrics, "fromClientCount") or "",
-            "availability": _first_number(metrics, "availability") or "",
+            "stock_total_qty": _value_or_blank(stock_qty),
+            "stock_total_sum": _value_or_blank(stock_sum),
+            "saleRate": _value_or_blank(_first_number(metrics, "saleRate")),
+            "toClientCount": _value_or_blank(_first_number(metrics, "toClientCount")),
+            "fromClientCount": _value_or_blank(_first_number(metrics, "fromClientCount")),
+            "availability": _value_or_blank(_first_number(metrics, "availability")),
             "data_status": "REAL_API",
             "source_status": "PARTIAL",
             "loaded_at": self.loaded_at,
@@ -1338,7 +1352,9 @@ class MvpRealRun:
         current_clicks = _nested_number(item, "openCard")
         current_cart = _nested_number(item, "addToCart")
         current_orders = _nested_number(item, "orders")
-        current_frequency = _nested_number(item, "frequency") or _first_number(item, "weekFrequency")
+        current_frequency = _nested_number(item, "frequency")
+        if current_frequency is None:
+            current_frequency = _first_number(item, "weekFrequency")
         current_visibility = _nested_number(item, "visibility")
         current_avg_position = _nested_number(item, "avgPosition")
         current_median_position = _nested_number(item, "medianPosition")
@@ -1346,6 +1362,8 @@ class MvpRealRun:
         prev_cart = _nested_number(prev_item or {}, "addToCart") if prev_item else None
         prev_orders = _nested_number(prev_item or {}, "orders") if prev_item else None
         prev_frequency = _nested_number(prev_item or {}, "frequency") if prev_item else None
+        if prev_frequency is None and prev_item:
+            prev_frequency = _first_number(prev_item, "weekFrequency")
         prev_visibility = _nested_number(prev_item or {}, "visibility") if prev_item else None
         prev_avg_position = _nested_number(prev_item or {}, "avgPosition") if prev_item else None
         prev_median_position = _nested_number(prev_item or {}, "medianPosition") if prev_item else None
@@ -1371,34 +1389,34 @@ class MvpRealRun:
                 _first_text(reference, "brand", "brandName"),
                 _first_text(item, "brand", "brandName"),
             ),
-            "card_rating": _nested_number(item, "rating") or "",
-            "reviews_rating": _nested_number(item, "feedbackRating") or "",
+            "card_rating": _value_or_blank(_nested_number(item, "rating")),
+            "reviews_rating": _value_or_blank(_nested_number(item, "feedbackRating")),
             "search_query": query,
-            "query_count": current_frequency or "",
-            "query_count_prev": prev_frequency or "",
-            "visibility": current_visibility or "",
-            "visibility_prev": prev_visibility or "",
-            "avg_position": current_avg_position or "",
-            "avg_position_prev": prev_avg_position or "",
-            "median_position": current_median_position or "",
-            "median_position_prev": prev_median_position or "",
-            "search_clicks": current_clicks or "",
-            "search_clicks_prev": prev_clicks or "",
+            "query_count": _value_or_blank(current_frequency),
+            "query_count_prev": _value_or_blank(prev_frequency),
+            "visibility": _value_or_blank(current_visibility),
+            "visibility_prev": _value_or_blank(prev_visibility),
+            "avg_position": _value_or_blank(current_avg_position),
+            "avg_position_prev": _value_or_blank(prev_avg_position),
+            "median_position": _value_or_blank(current_median_position),
+            "median_position_prev": _value_or_blank(prev_median_position),
+            "search_clicks": _value_or_blank(current_clicks),
+            "search_clicks_prev": _value_or_blank(prev_clicks),
             "search_clicks_competitor_percentile": "",
-            "search_cart": current_cart or "",
-            "search_cart_prev": prev_cart or "",
+            "search_cart": _value_or_blank(current_cart),
+            "search_cart_prev": _value_or_blank(prev_cart),
             "search_cart_competitor_percentile": "",
-            "cart_conversion": _ratio(current_cart, current_clicks) or "",
-            "cart_conversion_prev": _ratio(prev_cart, prev_clicks) or "",
+            "cart_conversion": _ratio_or_blank_preserve_zero(current_cart, current_clicks),
+            "cart_conversion_prev": _ratio_or_blank_preserve_zero(prev_cart, prev_clicks),
             "cart_conversion_competitor_percentile": "",
-            "search_orders": current_orders or "",
-            "search_orders_prev": prev_orders or "",
+            "search_orders": _value_or_blank(current_orders),
+            "search_orders_prev": _value_or_blank(prev_orders),
             "search_orders_competitor_percentile": "",
-            "order_conversion": _ratio(current_orders, current_clicks) or "",
-            "order_conversion_prev": _ratio(prev_orders, prev_clicks) or "",
+            "order_conversion": _ratio_or_blank_preserve_zero(current_orders, current_clicks),
+            "order_conversion_prev": _ratio_or_blank_preserve_zero(prev_orders, prev_clicks),
             "order_conversion_competitor_percentile": "",
-            "min_discount_price": "",
-            "max_discount_price": "",
+            "min_discount_price": _value_or_blank(_first_number(item, "minDiscountPrice")),
+            "max_discount_price": _value_or_blank(_first_number(item, "maxDiscountPrice")),
             "data_status": "REAL_API",
             "source_status": "PARTIAL",
             "loaded_at": self.loaded_at,
