@@ -641,6 +641,30 @@ class FactCardComparisonMetric(Base, StatusMixin):
     source_system: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class AppJobRun(Base):
+    __tablename__ = "app_job_runs"
+    __table_args__ = (
+        UniqueConstraint("job_name", "run_date", name="uq_app_job_runs_job_name_run_date"),
+        Index("idx_app_job_runs_job_date", "job_name", "run_date"),
+        Index("idx_app_job_runs_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    run_date: Mapped[date] = mapped_column(Date, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    summary_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class MartTotalReport(Base, StatusMixin):
     __tablename__ = "mart_total_report"
     __table_args__ = (

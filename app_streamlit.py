@@ -27,6 +27,7 @@ from src.db.models import FactStockWarehouseSnapshot, MartTotalReport
 from src.db.session import session_scope
 from src.importers.entry_points_importer import import_entry_points_xlsx
 from src.importers.orders_geography_importer import import_orders_geography_xlsx
+from src.scheduler.daily_refresh_scheduler import start_daily_refresh_scheduler_once
 from src.streamlit_dataset import (
     AD_ZERO_FILL_FIELDS,
     FUNNEL_ZERO_FILL_FIELDS,
@@ -3948,6 +3949,7 @@ def main() -> None:
     st.set_page_config(page_title="WB ИТОГО", layout="wide")
     st.title("WB ИТОГО")
     st.caption("Витрина по товарам на основе mart_total_report v2")
+    initialize_background_services()
     render_password_gate()
     if st.button("Обновить данные из источника", width="content"):
         clear_streamlit_data_caches()
@@ -4007,6 +4009,11 @@ def main() -> None:
         render_stock_warehouse_tab(data_source)
     with tab_upload:
         render_upload_tab()
+
+
+@st.cache_resource(show_spinner=False)
+def initialize_background_services() -> bool:
+    return start_daily_refresh_scheduler_once()
 
 
 if __name__ == "__main__":

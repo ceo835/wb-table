@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import scripts.load_stock_warehouse_snapshot as stock_snapshot_script
+from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
 from scripts.run_daily_dashboard_refresh import (
     DEFAULT_DASHBOARD_START_DATE,
     run_daily_dashboard_refresh,
+)
+from src.db.app_job_runs import run_guarded_job
+from src.db.base import Base
+from src.db.models import AppJobRun
+from src.scheduler.daily_refresh_scheduler import (
+    DAILY_REFRESH_JOB_NAME,
+    build_next_run_at,
+    should_autostart_daily_refresh,
+    should_run_startup_catchup,
 )
 
 
@@ -111,3 +124,106 @@ def test_run_daily_dashboard_refresh_persists_failure_summary(monkeypatch, tmp_p
     saved_summary = json.loads(json_path.read_text(encoding="utf-8"))
     assert saved_summary["success"] is False
     assert saved_summary["failed_steps"] == ["warehouse_snapshot"]
+
+
+def test_app_job_runs_enforces_unique_job_name_and_run_date() -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine, tables=[AppJobRun.__table__])
+
+    with Session(engine) as session:
+        session.add(
+            AppJobRun(
+                id=1,
+                job_name=DAILY_REFRESH_JOB_NAME,
+                run_date=date(2026, 6, 16),
+                status="success",
+            )
+        )
+        session.commit()
+        session.add(
+            AppJobRun(
+                id=2,
+                job_name=DAILY_REFRESH_JOB_NAME,
+                run_date=date(2026, 6, 16),
+                status="failed",
+            )
+        )
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+        else:
+            raise AssertionError("Expected unique constraint violation for duplicate job_name + run_date")
+
+
+def test_run_guarded_job_skips_when_success_exists(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    monkeypatch.setattr("src.db.app_job_runs.try_acquire_job_lock", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("src.db.app_job_runs.release_job_lock", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("src.db.app_job_runs.has_successful_job_run", lambda *_args, **_kwargs: True)
+
+    runner_called = {"value": False}
+
+    result = run_guarded_job(
+        job_name=DAILY_REFRESH_JOB_NAME,
+        run_date=date(2026, 6, 16),
+        runner=lambda: runner_called.__setitem__("value", True),
+        engine=engine,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "already_completed"
+    assert runner_called["value"] is False
+
+
+def test_run_guarded_job_skips_when_advisory_lock_not_acquired(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    monkeypatch.setattr("src.db.app_job_runs.try_acquire_job_lock", lambda *_args, **_kwargs: False)
+
+    runner_called = {"value": False}
+
+    result = run_guarded_job(
+        job_name=DAILY_REFRESH_JOB_NAME,
+        run_date=date(2026, 6, 16),
+        runner=lambda: runner_called.__setitem__("value", True),
+        engine=engine,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "lock_not_acquired"
+    assert runner_called["value"] is False
+
+
+def test_scheduler_local_default_is_disabled() -> None:
+    assert should_autostart_daily_refresh(env={}) is False
+
+
+def test_scheduler_enables_on_railway_environment() -> None:
+    assert should_autostart_daily_refresh(env={"RAILWAY_ENVIRONMENT": "production"}) is True
+
+
+def test_scheduler_env_override_false_disables_railway_autostart() -> None:
+    assert should_autostart_daily_refresh(
+        env={
+            "RAILWAY_ENVIRONMENT": "production",
+            "DASHBOARD_DAILY_REFRESH_AUTOSTART": "false",
+        }
+    ) is False
+
+
+def test_scheduler_runs_startup_catchup_after_0800_utc_without_success_today() -> None:
+    now = datetime(2026, 6, 16, 8, 15, tzinfo=UTC)
+
+    assert should_run_startup_catchup(now=now, has_success_today=False) is True
+
+
+def test_scheduler_does_not_run_startup_catchup_when_success_exists_today() -> None:
+    now = datetime(2026, 6, 16, 8, 15, tzinfo=UTC)
+
+    assert should_run_startup_catchup(now=now, has_success_today=True) is False
+
+
+def test_build_next_run_at_returns_same_day_before_cutoff() -> None:
+    now = datetime(2026, 6, 16, 7, 30, tzinfo=UTC)
+
+    assert build_next_run_at(now) == datetime(2026, 6, 16, 8, 0, tzinfo=UTC)
