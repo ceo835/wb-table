@@ -40,10 +40,13 @@ Thumbs.db
 *.sqlite3
 
 # Local data and uploads
-data/
+data/*
+!data/config/
+!data/config/*.csv
 _api_audit_raw/
 data/raw/
 data/tmp/
+data/processed/
 data/processed/*.csv
 *.xlsx
 *.xlsm

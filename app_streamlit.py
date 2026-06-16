@@ -5,6 +5,7 @@ import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import altair as alt
 import pandas as pd
@@ -882,12 +883,13 @@ def apply_tracked_scope_filters(
     *,
     show_only_tracked: bool,
     show_sellout: bool,
+    tracked_metadata_available: bool = True,
 ) -> pd.DataFrame:
     filtered = df.copy()
     if "is_tracked" not in filtered.columns or "lifecycle_status" not in filtered.columns:
         filtered = shared_apply_tracked_products(filtered)
 
-    if show_only_tracked and "is_tracked" in filtered.columns:
+    if show_only_tracked and tracked_metadata_available and "is_tracked" in filtered.columns:
         filtered = filtered[filtered["is_tracked"].fillna(False)]
 
     if not show_sellout and "lifecycle_status" in filtered.columns:
@@ -906,6 +908,99 @@ def build_debug_snapshot(stage: str, df: pd.DataFrame) -> dict[str, object]:
 
 def build_debug_trace_frame(trace: list[dict[str, object]]) -> pd.DataFrame:
     return pd.DataFrame(trace, columns=["stage", "rows", "unique_nm"])
+
+
+def _serialize_debug_date(value: object) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def inspect_tracked_metadata_state(df: pd.DataFrame) -> dict[str, object]:
+    dataset_nm_ids = pd.Series(dtype="int64")
+    if "nm_id" in df.columns:
+        dataset_nm_ids = pd.to_numeric(df["nm_id"], errors="coerce").dropna().astype(int)
+
+    tracked_df = load_tracked_products()
+    tracked_total = int(len(tracked_df))
+    tracked_active_df = (
+        tracked_df[tracked_df["is_tracked"].fillna(False)]
+        if "is_tracked" in tracked_df.columns
+        else tracked_df.iloc[0:0]
+    )
+    tracked_active_total = int(len(tracked_active_df))
+    tracked_matches_in_dataset = 0
+    if not tracked_active_df.empty and not dataset_nm_ids.empty:
+        tracked_matches_in_dataset = int(tracked_active_df["nm_id"].isin(dataset_nm_ids.unique()).sum())
+
+    if tracked_df.empty:
+        reason = "tracked_products_missing"
+    elif tracked_active_df.empty:
+        reason = "tracked_products_without_active_rows"
+    elif tracked_matches_in_dataset == 0:
+        reason = "no_matching_tracked_nm_ids"
+    else:
+        reason = "ok"
+
+    is_tracked_counts: dict[str, int] = {}
+    if "is_tracked" in df.columns:
+        counts = df["is_tracked"].fillna(False).astype(bool).value_counts(dropna=False)
+        is_tracked_counts = {str(key): int(value) for key, value in counts.items()}
+
+    return {
+        "metadata_available": tracked_matches_in_dataset > 0,
+        "reason": reason,
+        "tracked_total": tracked_total,
+        "tracked_active_total": tracked_active_total,
+        "tracked_matches_in_dataset": tracked_matches_in_dataset,
+        "dataset_unique_nm": int(dataset_nm_ids.nunique()),
+        "is_tracked_counts": is_tracked_counts,
+    }
+
+
+def build_data_debug_payload(
+    df: pd.DataFrame,
+    *,
+    data_source: str,
+    selected_dates: list[date],
+    debug_trace: list[dict[str, object]],
+    tracked_metadata_state: dict[str, object],
+) -> dict[str, object]:
+    stage_rows = {str(entry["stage"]): int(entry["rows"]) for entry in debug_trace}
+    database_url = os.getenv("DATABASE_URL") or settings.database_url or ""
+    db_host = "—"
+    if data_source == "db" and database_url:
+        try:
+            parsed = urlsplit(database_url)
+            db_host = parsed.hostname or parsed.netloc or "—"
+        except Exception:
+            db_host = "invalid"
+
+    return {
+        "source": data_source.upper(),
+        "db_host": db_host,
+        "raw_rows": int(len(df)),
+        "date_min": _serialize_debug_date(df["report_date"].min()) if "report_date" in df.columns and not df.empty else None,
+        "date_max": _serialize_debug_date(df["report_date"].max()) if "report_date" in df.columns and not df.empty else None,
+        "selected_date_min": _serialize_debug_date(min(selected_dates)) if selected_dates else None,
+        "selected_date_max": _serialize_debug_date(max(selected_dates)) if selected_dates else None,
+        "selected_date_count": int(len(selected_dates)),
+        "rows_after_date_filter": stage_rows.get("rows_after_date_filter", 0),
+        "rows_after_tracked_filter": stage_rows.get("rows_after_tracked_filter", 0),
+        "rows_after_sellout_filter": stage_rows.get("rows_after_sellout_filter", 0),
+        "rows_before_export": stage_rows.get("rows_after_all_filters", 0),
+        "unique_nm_id": int(df["nm_id"].nunique()) if "nm_id" in df.columns else 0,
+        "is_tracked_counts": tracked_metadata_state.get("is_tracked_counts", {}),
+        "tracked_metadata_available": bool(tracked_metadata_state.get("metadata_available", False)),
+        "tracked_metadata_reason": tracked_metadata_state.get("reason"),
+        "tracked_matches_in_dataset": int(tracked_metadata_state.get("tracked_matches_in_dataset", 0)),
+    }
 
 
 def build_display_coverage_summary(original_df: pd.DataFrame, enriched_df: pd.DataFrame) -> pd.DataFrame:
@@ -1525,8 +1620,9 @@ def refresh_streamlit_dataset() -> dict[str, Any]:
     return result
 
 
-def build_filtered_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, object]]]:
+def build_filtered_dataset(df: pd.DataFrame, data_source: str) -> tuple[pd.DataFrame, list[dict[str, object]]]:
     filtered = df.copy()
+    tracked_metadata_state = inspect_tracked_metadata_state(df)
     debug_trace = [build_debug_snapshot("rows_after_load_dataset_from_db", filtered)]
 
     with st.sidebar:
@@ -1539,10 +1635,16 @@ def build_filtered_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[st
         debug_trace.append(build_debug_snapshot("rows_after_date_filter", filtered))
 
         show_only_tracked = st.checkbox("Показывать только отслеживаемые товары", value=True)
+        if show_only_tracked and not tracked_metadata_state["metadata_available"]:
+            st.warning(
+                "Tracked metadata недоступна или не подмешалась в dataset. "
+                "Фильтр по отслеживаемым товарам временно не применяется, чтобы не обнулить таблицу."
+            )
         filtered = apply_tracked_scope_filters(
             filtered,
             show_only_tracked=show_only_tracked,
             show_sellout=True,
+            tracked_metadata_available=bool(tracked_metadata_state["metadata_available"]),
         )
         debug_trace.append(build_debug_snapshot("rows_after_tracked_filter", filtered))
 
@@ -1551,6 +1653,7 @@ def build_filtered_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[st
             filtered,
             show_only_tracked=False,
             show_sellout=show_sellout,
+            tracked_metadata_available=bool(tracked_metadata_state["metadata_available"]),
         )
         debug_trace.append(build_debug_snapshot("rows_after_sellout_filter", filtered))
 
@@ -1615,6 +1718,16 @@ def build_filtered_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[st
         na_position="last",
     )
     debug_trace.append(build_debug_snapshot("rows_after_all_filters", filtered))
+    data_debug = build_data_debug_payload(
+        df,
+        data_source=data_source,
+        selected_dates=selected_dates,
+        debug_trace=debug_trace,
+        tracked_metadata_state=tracked_metadata_state,
+    )
+    filtered.attrs["data_debug"] = data_debug
+    with st.sidebar.expander("DATA DEBUG"):
+        st.json(data_debug)
     return filtered, debug_trace
 
 
@@ -3845,7 +3958,7 @@ def main() -> None:
     ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
     st.caption(f"Источник данных: {'PostgreSQL' if data_source == 'db' else 'CSV'}")
     render_available_dates_summary(df)
-    filtered, filter_debug_trace = build_filtered_dataset(df)
+    filtered, filter_debug_trace = build_filtered_dataset(df, data_source)
 
     metric_cols = st.columns(7)
     metric_cols[0].metric("Всего строк", f"{len(filtered):,}".replace(",", " "))

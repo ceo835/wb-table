@@ -41,6 +41,7 @@ from app_streamlit import (
     get_latest_product_context,
     get_previous_product_date,
     is_password_protection_enabled,
+    inspect_tracked_metadata_state,
     prepare_dataframe_for_streamlit_display,
     resolve_data_source,
     prepare_dataframe,
@@ -376,6 +377,46 @@ def test_apply_tracked_scope_filters_keeps_only_tracked_and_can_hide_sellout() -
     assert tracked_only["nm_id"].tolist() == [1, 2]
     assert active_only["nm_id"].tolist() == [1]
     assert all_without_sellout["nm_id"].tolist() == [1, 3]
+
+
+def test_apply_tracked_scope_filters_skips_tracked_filter_when_metadata_unavailable() -> None:
+    df = pd.DataFrame(
+        [
+            {"nm_id": 1, "is_tracked": False, "lifecycle_status": "not_tracked"},
+            {"nm_id": 2, "is_tracked": False, "lifecycle_status": "not_tracked"},
+        ]
+    )
+
+    result = apply_tracked_scope_filters(
+        df,
+        show_only_tracked=True,
+        show_sellout=True,
+        tracked_metadata_available=False,
+    )
+
+    assert result["nm_id"].tolist() == [1, 2]
+
+
+def test_inspect_tracked_metadata_state_reports_missing_tracked_products(monkeypatch) -> None:
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_tracked_products",
+        lambda: pd.DataFrame(columns=["nm_id", "item_label", "is_tracked", "lifecycle_status", "source", "tracked_label"]),
+    )
+    df = pd.DataFrame(
+        [
+            {"nm_id": 197330807, "is_tracked": False},
+            {"nm_id": 37320545, "is_tracked": False},
+        ]
+    )
+
+    result = inspect_tracked_metadata_state(df)
+
+    assert result["metadata_available"] is False
+    assert result["reason"] == "tracked_products_missing"
+    assert result["dataset_unique_nm"] == 2
+    assert result["tracked_matches_in_dataset"] == 0
+    assert result["is_tracked_counts"] == {"False": 2}
 
 
 def test_build_display_coverage_summary_counts_null_to_zero_and_positive() -> None:
