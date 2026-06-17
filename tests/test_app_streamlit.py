@@ -32,6 +32,7 @@ from app_streamlit import (
     build_grouped_by_date_dataset,
     build_import_format_error,
     build_last_upload_result,
+    build_upload_tab_sections,
     build_latest_snapshot_dataset,
     build_pipeline_status_messages,
     build_product_timeline_dataset,
@@ -48,12 +49,21 @@ from app_streamlit import (
     resolve_data_source,
     prepare_dataframe,
     build_stock_warehouse_product_table,
+    build_stock_warehouse_summary_card_html,
     build_stock_warehouse_display_dataframe,
     build_stock_warehouse_summary_metrics,
     resolve_effective_import_date,
     resolve_export_range,
     summarize_available_dates,
 )
+
+
+def test_build_stock_warehouse_summary_card_html_uses_compact_sizes() -> None:
+    html = build_stock_warehouse_summary_card_html("Дата snapshot", "2026-06-16", compact=True)
+
+    assert "1.35rem" in html
+    assert "0.72rem" in html
+    assert "2026-06-16" in html
 
 
 def test_prepare_dataframe_builds_data_quality_status_when_missing() -> None:
@@ -459,6 +469,50 @@ def test_build_wb_site_price_monitor_dataframe_uses_russian_problem_labels() -> 
     assert display_df.loc[0, "Статус товара"] == "Основной"
     assert display_df.loc[1, "Проблема"] == "Нет данных по цене"
     assert display_df.loc[1, "Статус товара"] == "Распродажа"
+
+
+def test_build_wb_site_price_monitor_dataframe_falls_back_to_last_successful_price_for_interstitial() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_at": "2026-06-16T08:00:00+00:00",
+                "snapshot_date": "2026-06-16",
+                "nm_id": 91470767,
+                "item_label": "avokadogirl",
+                "lifecycle_status": "active",
+                "buyer_visible_price": 799.0,
+                "fetch_status": "success",
+            },
+            {
+                "snapshot_at": "2026-06-17T08:00:00+00:00",
+                "snapshot_date": "2026-06-17",
+                "nm_id": 91470767,
+                "item_label": "avokadogirl",
+                "lifecycle_status": "active",
+                "buyer_visible_price": None,
+                "fetch_status": "wb_interstitial",
+            },
+        ]
+    )
+    alert_df = pd.DataFrame(columns=["snapshot_date", "nm_id", "previous_success_price", "price_delta", "alert_status"])
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 91470767, "tracked_label": "avokadogirl", "lifecycle_status": "active"},
+        ]
+    )
+
+    display_df = build_wb_site_price_monitor_dataframe(
+        snapshot_df,
+        alert_df,
+        tracked_df,
+        snapshot_date=pd.Timestamp("2026-06-17").date(),
+        show_sellout=True,
+        only_problematic=False,
+    )
+
+    assert float(display_df.loc[0, "Цена покупателя"]) == 799.0
+    assert pd.isna(display_df.loc[0, "Предыдущая цена"])
+    assert display_df.loc[0, "Проблема"] == "WB временно не отдал карточку"
 
 
 def test_build_stock_warehouse_summary_metrics_counts_ok_zero_and_no_data_rows() -> None:
@@ -1809,6 +1863,18 @@ def test_build_last_upload_result_formats_compact_summary() -> None:
     assert result["Таблица"] == "fact_entry_point_day"
     assert result["source_status"] == "CSV_EXPORT"
     assert result["Время загрузки"] == "2026-06-09 10:15:00"
+
+
+def test_build_upload_tab_sections_includes_vbro_placeholder() -> None:
+    sections = build_upload_tab_sections()
+
+    assert [section["report_name"] for section in sections] == [
+        "Точка входа",
+        "География заказов",
+        "ВБро",
+    ]
+    assert sections[2]["implemented"] is False
+    assert sections[2]["state_key"] == "vbro_import"
 
 
 def test_build_pipeline_status_messages_reports_apply_mart_and_dataset_steps() -> None:

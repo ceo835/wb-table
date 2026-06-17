@@ -14,6 +14,7 @@ from src.db.session import session_scope, upsert_rows
 from src.tracked_products import TRACKED_PRODUCTS_PATH
 from src.wb_site_price_monitor import (
     DEFAULT_TIMEOUT_MS,
+    describe_proxy_configuration,
     fetch_wb_site_price_snapshots_with_playwright,
     load_price_monitor_targets,
     resolve_proxy_url,
@@ -24,6 +25,7 @@ WB_SITE_PRICE_SNAPSHOT_SOURCE = "WB_SITE_PUBLIC_CARD"
 WB_SITE_PRICE_ALERT_THRESHOLD = Decimal("50.00")
 FETCH_STATUS_SUCCESS = "success"
 FETCH_STATUS_NO_PRICE_DATA = "no_price_data"
+FETCH_STATUS_WB_INTERSTITIAL = "wb_interstitial"
 FETCH_STATUS_BLOCKED = "blocked"
 FETCH_STATUS_TIMEOUT = "timeout"
 FETCH_STATUS_FAILED = "failed"
@@ -34,6 +36,7 @@ ALERT_STATUS_NO_PRICE_DATA = "NO_PRICE_DATA"
 ALERT_STATUS_FETCH_FAILED = "FETCH_FAILED"
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "processed" / "wb_site_price_snapshots"
+DEFAULT_DEBUG_OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "processed" / "wb_site_price_debug"
 SNAPSHOT_CONFLICT_COLUMNS = ("snapshot_date", "nm_id")
 ALERT_CONFLICT_COLUMNS = ("snapshot_date", "nm_id")
 
@@ -139,17 +142,14 @@ def build_wb_site_price_alert_rows(
         fetch_status = str(row.get("fetch_status") or FETCH_STATUS_FAILED)
         price_delta = None
 
-        if fetch_status == FETCH_STATUS_SUCCESS and current_price is not None:
-            if previous_price is not None:
-                price_delta = current_price - previous_price
-            if previous_price is not None and abs(price_delta) >= threshold:
-                alert_status = ALERT_STATUS_PRICE_CHANGED_50
-            else:
-                alert_status = ALERT_STATUS_OK
-        elif fetch_status == FETCH_STATUS_NO_PRICE_DATA:
-            alert_status = ALERT_STATUS_NO_PRICE_DATA
-        else:
-            alert_status = ALERT_STATUS_FETCH_FAILED
+        if fetch_status != FETCH_STATUS_SUCCESS or current_price is None or previous_price is None:
+            continue
+
+        price_delta = current_price - previous_price
+        if abs(price_delta) < threshold:
+            continue
+
+        alert_status = ALERT_STATUS_PRICE_CHANGED_50
 
         alert_rows.append(
             {
@@ -193,31 +193,60 @@ def upsert_wb_site_price_snapshot(session: Session, rows: Sequence[Mapping[str, 
     prepared_rows = prepare_fact_wb_site_price_snapshot_upsert_rows(rows)
     if not prepared_rows:
         return 0
-    return upsert_rows(
+    rowcount = upsert_rows(
         session,
         FactWbSitePriceSnapshot,
         prepared_rows,
         conflict_columns=SNAPSHOT_CONFLICT_COLUMNS,
     )
+    return rowcount if rowcount >= 0 else len(prepared_rows)
 
 
 def upsert_wb_site_price_alert(session: Session, rows: Sequence[Mapping[str, Any]]) -> int:
     prepared_rows = prepare_fact_wb_site_price_alert_upsert_rows(rows)
     if not prepared_rows:
         return 0
-    return upsert_rows(
+    rowcount = upsert_rows(
         session,
         FactWbSitePriceAlert,
         prepared_rows,
         conflict_columns=ALERT_CONFLICT_COLUMNS,
     )
+    return rowcount if rowcount >= 0 else len(prepared_rows)
 
 
 def persist_run_summary(output_dir: Path, snapshot_date: date, summary: dict[str, Any]) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"wb_site_price_snapshot_{snapshot_date.isoformat()}.json"
+    summary["summary_path"] = str(path)
     path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return str(path)
+
+
+def build_summary_items(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        items.append(
+            {
+                "nm_id": int(row["nm_id"]),
+                "product_url": row.get("product_url"),
+                "fetch_status": row.get("fetch_status"),
+                "buyer_visible_price": row.get("buyer_visible_price"),
+                "price_text_raw": row.get("price_text_raw"),
+                "price_extract_source": row.get("price_extract_source"),
+                "price_candidates": list(row.get("price_candidates") or []),
+                "error": row.get("error"),
+                "page_url_after_load": row.get("page_url_after_load"),
+                "page_title": row.get("page_title"),
+                "blocked_detected": bool(row.get("blocked_detected")),
+                "captcha_detected": bool(row.get("captcha_detected")),
+                "redirect_detected": bool(row.get("redirect_detected")),
+                "html_contains_price_markers": bool(row.get("html_contains_price_markers")),
+                "debug_html_path": row.get("debug_html_path"),
+                "debug_png_path": row.get("debug_png_path"),
+            }
+        )
+    return items
 
 
 def load_wb_site_price_snapshot(
@@ -231,6 +260,8 @@ def load_wb_site_price_snapshot(
     write_db: bool = True,
     proxy_url: str | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
+    debug_artifacts: bool = False,
+    debug_output_dir: Path = DEFAULT_DEBUG_OUTPUT_DIR,
     fetcher=None,
 ) -> dict[str, Any]:
     resolved_snapshot_date = snapshot_date or date.today()
@@ -251,6 +282,9 @@ def load_wb_site_price_snapshot(
         "failed_count": 0,
         "alerts_count": 0,
         "proxy_enabled": bool(resolved_proxy_url),
+        "proxy_bridge_enabled": False,
+        "proxy_scheme": None,
+        "proxy_auth_set": False,
         "duration_seconds": 0.0,
         "fetch_status_counts": {},
         "rows_upserted": 0,
@@ -258,7 +292,9 @@ def load_wb_site_price_snapshot(
         "error": "",
         "summary_path": "",
         "region_detected": None,
+        "items": [],
     }
+    summary.update(describe_proxy_configuration(resolved_proxy_url))
 
     if not targets:
         summary["summary_path"] = persist_run_summary(output_dir, resolved_snapshot_date, summary)
@@ -271,11 +307,18 @@ def load_wb_site_price_snapshot(
             headless=headless,
             timeout_ms=timeout_ms,
             proxy_url=resolved_proxy_url,
+            debug_artifacts=debug_artifacts,
+            debug_output_dir=debug_output_dir,
         )
         summary["fetch_status_counts"] = dict(fetch_meta.get("fetch_status_counts") or {})
         summary["region_detected"] = fetch_meta.get("region_detected")
+        summary["proxy_enabled"] = bool(fetch_meta.get("proxy_enabled"))
+        summary["proxy_bridge_enabled"] = bool(fetch_meta.get("proxy_bridge_enabled"))
+        summary["proxy_scheme"] = fetch_meta.get("proxy_scheme")
+        summary["proxy_auth_set"] = bool(fetch_meta.get("proxy_auth_set"))
         summary["success_count"] = int(summary["fetch_status_counts"].get(FETCH_STATUS_SUCCESS, 0))
         summary["failed_count"] = len(raw_rows) - summary["success_count"]
+        summary["items"] = build_summary_items(raw_rows)
 
         if write_db:
             with session_scope() as session:

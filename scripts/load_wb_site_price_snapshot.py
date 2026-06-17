@@ -6,6 +6,7 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
+from typing import TextIO
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -32,7 +33,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snapshot-date", default=None, help="Snapshot date in YYYY-MM-DD. Default: today.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Where to store JSON summary.")
     parser.add_argument("--write-db", default="true", help="true/false. Default: true.")
+    parser.add_argument("--debug-artifacts", action="store_true", help="Save HTML/PNG artifacts for failed items.")
     return parser.parse_args()
+
+
+def emit_summary_json(summary: dict[str, object], *, stdout: TextIO | None = None) -> None:
+    stream = stdout or sys.stdout
+    payload = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, TypeError, ValueError):
+            pass
+    try:
+        stream.write(payload)
+        stream.write("\n")
+    except UnicodeEncodeError:
+        buffer = getattr(stream, "buffer", None)
+        if buffer is None:
+            raise
+        buffer.write(payload.encode("utf-8", errors="replace"))
+        buffer.write(b"\n")
 
 
 def main() -> int:
@@ -46,8 +68,9 @@ def main() -> int:
         snapshot_date=date.fromisoformat(args.snapshot_date) if args.snapshot_date else None,
         write_db=_parse_bool(str(args.write_db)),
         output_dir=Path(args.output_dir),
+        debug_artifacts=bool(args.debug_artifacts),
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+    emit_summary_json(summary)
     return 0 if summary.get("success") else 1
 
 

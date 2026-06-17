@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 import os
 import tempfile
 from datetime import date, datetime, timedelta
@@ -352,6 +353,7 @@ SUMMARY_KPI_CONFIG = [
 UPLOAD_TAB_TITLE = "Загрузка данных"
 ENTRY_POINT_UPLOAD_KEY = "entry_point_import"
 ORDERS_GEOGRAPHY_UPLOAD_KEY = "orders_geography_import"
+VBRO_UPLOAD_KEY = "vbro_import"
 
 EXPORT_COLUMN_LABELS = {
     "product_group_label": "Товар",
@@ -1192,6 +1194,7 @@ def build_wb_site_price_monitor_dataframe(
     problem_priority = {
         "Цена изменилась на 50 ₽ или больше": 0,
         "Ошибка проверки": 1,
+        "WB временно не отдал карточку": 1,
         "Нет данных по цене": 2,
         "Цена без резких изменений": 3,
     }
@@ -1216,6 +1219,25 @@ def build_wb_site_price_monitor_dataframe(
 
     snapshots = snapshot_df.copy()
     snapshots["snapshot_date"] = pd.to_datetime(snapshots["snapshot_date"], errors="coerce").dt.date
+    success_history = snapshots[
+        snapshots["fetch_status"].astype(str).eq("success")
+        & snapshots["buyer_visible_price"].notna()
+        & snapshots["snapshot_date"].le(snapshot_date)
+    ].copy()
+    if not success_history.empty:
+        success_history["snapshot_at"] = pd.to_datetime(success_history["snapshot_at"], errors="coerce")
+        latest_success_by_nm = (
+            success_history.sort_values(
+                by=["nm_id", "snapshot_date", "snapshot_at"],
+                ascending=[True, False, False],
+                na_position="last",
+            )
+            .drop_duplicates(subset=["nm_id"], keep="first")[["nm_id", "buyer_visible_price"]]
+            .rename(columns={"buyer_visible_price": "_latest_success_price"})
+        )
+    else:
+        latest_success_by_nm = pd.DataFrame(columns=["nm_id", "_latest_success_price"])
+
     snapshots = snapshots[snapshots["snapshot_date"] == snapshot_date].copy()
     if snapshots.empty:
         return pd.DataFrame(
@@ -1244,6 +1266,8 @@ def build_wb_site_price_monitor_dataframe(
         snapshots["previous_success_price"] = pd.NA
         snapshots["price_delta"] = pd.NA
         snapshots["alert_status"] = pd.NA
+
+    snapshots = snapshots.merge(latest_success_by_nm, on="nm_id", how="left")
 
     if not tracked_df.empty:
         tracked_meta = tracked_df[["nm_id", "tracked_label", "lifecycle_status"]].copy()
@@ -1276,11 +1300,17 @@ def build_wb_site_price_monitor_dataframe(
             return problem_label_map.get(str(alert_status), "Ошибка проверки")
         if fetch_status == "success":
             return problem_label_map[WB_SITE_PRICE_ALERT_OK]
+        if fetch_status == "wb_interstitial":
+            return "WB временно не отдал карточку"
         if fetch_status == "no_price_data":
             return problem_label_map[WB_SITE_PRICE_ALERT_NO_DATA]
         return problem_label_map[WB_SITE_PRICE_ALERT_FAILED]
 
     snapshots["Проблема"] = snapshots.apply(_resolve_problem_label, axis=1)
+    snapshots["buyer_visible_price"] = snapshots["buyer_visible_price"].where(
+        snapshots["buyer_visible_price"].notna(),
+        snapshots["_latest_success_price"],
+    )
     snapshots["Дата/время проверки"] = pd.to_datetime(snapshots["snapshot_at"], errors="coerce")
     snapshots["_problem_priority"] = snapshots["Проблема"].map(lambda value: problem_priority.get(str(value), 99))
     snapshots["_lifecycle_priority"] = snapshots["Статус товара"].map(lambda value: lifecycle_priority.get(str(value), 99))
@@ -1353,7 +1383,7 @@ def render_wb_site_price_tab(data_source: str) -> None:
     summary_cols = st.columns(4)
     success_count = int(current_snapshot["fetch_status"].astype(str).eq("success").sum())
     no_price_count = int(current_snapshot["fetch_status"].astype(str).eq("no_price_data").sum())
-    error_count = int(current_snapshot["fetch_status"].astype(str).isin(["blocked", "timeout", "failed"]).sum())
+    error_count = int(current_snapshot["fetch_status"].astype(str).isin(["wb_interstitial", "blocked", "timeout", "failed"]).sum())
     alerts_count = int(current_alerts["alert_status"].astype(str).eq(WB_SITE_PRICE_ALERT_CHANGED).sum()) if not current_alerts.empty else 0
     summary_cols[0].metric("Товаров проверено", f"{len(current_snapshot):,}".replace(",", " "))
     summary_cols[1].metric("Цен получено", f"{success_count:,}".replace(",", " "))
@@ -1684,6 +1714,19 @@ def build_stock_warehouse_summary_metrics(product_table: pd.DataFrame) -> dict[s
     }
 
 
+def build_stock_warehouse_summary_card_html(label: str, value: object, *, compact: bool = True) -> str:
+    value_font_size = "1.35rem" if compact else "1.8rem"
+    label_font_size = "0.72rem" if compact else "0.82rem"
+    padding = "0.55rem 0.7rem" if compact else "0.8rem 0.9rem"
+    return (
+        f'<div style="border:1px solid #e5e7eb;border-radius:12px;background:#ffffff;'
+        f'padding:{padding};min-height:74px;">'
+        f'<div style="font-size:{label_font_size};line-height:1.2;color:#6b7280;margin-bottom:0.3rem;">{escape(str(label))}</div>'
+        f'<div style="font-size:{value_font_size};line-height:1.1;font-weight:700;color:#111827;">{escape(str(value))}</div>'
+        f"</div>"
+    )
+
+
 def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataFrame:
     if product_table.empty:
         return pd.DataFrame(
@@ -1877,13 +1920,20 @@ def render_stock_warehouse_tab(data_source: str) -> None:
     summary_metrics = build_stock_warehouse_summary_metrics(product_table)
     problem_table = build_stock_warehouse_problem_table(product_table)
 
+    summary_items = [
+        ("Дата snapshot", selected_snapshot_date.isoformat()),
+        ("Всего tracked товаров", f"{summary_metrics['total_products']:,}".replace(",", " ")),
+        ("Товаров в наличии", f"{summary_metrics['ok_products']:,}".replace(",", " ")),
+        ("Товаров с нулём на складах", f"{summary_metrics['zero_products']:,}".replace(",", " ")),
+        ("Товаров без данных", f"{summary_metrics['no_data_products']:,}".replace(",", " ")),
+        ("Всего нулевых складов", f"{summary_metrics['total_zero_warehouses']:,}".replace(",", " ")),
+    ]
     summary_cols = st.columns(6)
-    summary_cols[0].metric("Дата snapshot", selected_snapshot_date.isoformat())
-    summary_cols[1].metric("Всего tracked товаров", f"{summary_metrics['total_products']:,}".replace(",", " "))
-    summary_cols[2].metric("Товаров в наличии", f"{summary_metrics['ok_products']:,}".replace(",", " "))
-    summary_cols[3].metric("Товаров с нулём на складах", f"{summary_metrics['zero_products']:,}".replace(",", " "))
-    summary_cols[4].metric("Товаров без данных", f"{summary_metrics['no_data_products']:,}".replace(",", " "))
-    summary_cols[5].metric("Всего нулевых складов", f"{summary_metrics['total_zero_warehouses']:,}".replace(",", " "))
+    for column, (label, value) in zip(summary_cols, summary_items):
+        column.markdown(
+            build_stock_warehouse_summary_card_html(label, value, compact=True),
+            unsafe_allow_html=True,
+        )
 
     st.write("**Проблемные товары**")
     problem_display = build_stock_warehouse_display_dataframe(problem_table, problem_table=True)
@@ -4252,21 +4302,74 @@ def render_import_block(
             st.json(dataset_summary)
 
 
+def build_upload_tab_sections() -> list[dict[str, object]]:
+    return [
+        {
+            "title": "Загрузить Точка входа",
+            "report_name": "Точка входа",
+            "state_key": ENTRY_POINT_UPLOAD_KEY,
+            "implemented": True,
+            "importer_func": import_entry_points_xlsx,
+        },
+        {
+            "title": "Загрузить География заказов",
+            "report_name": "География заказов",
+            "state_key": ORDERS_GEOGRAPHY_UPLOAD_KEY,
+            "implemented": True,
+            "importer_func": import_orders_geography_xlsx,
+        },
+        {
+            "title": "Загрузить ВБро",
+            "report_name": "ВБро",
+            "state_key": VBRO_UPLOAD_KEY,
+            "implemented": False,
+            "accepted_extensions": ["xlsx", "xlsm"],
+        },
+    ]
+
+
+def render_pending_import_block(
+    *,
+    title: str,
+    report_name: str,
+    state_key: str,
+    accepted_extensions: list[str] | None = None,
+) -> None:
+    st.markdown(f"### {title}")
+    suffixes = accepted_extensions or ["xlsx"]
+    uploaded_file = st.file_uploader(
+        f"{report_name}: {', '.join(ext.upper() for ext in suffixes)}",
+        type=suffixes,
+        key=f"{state_key}_file",
+    )
+    if uploaded_file is None:
+        st.info("Формат файла ВБро пока не подключён. Можно выбрать файл позже, когда будет утверждена схема импорта.")
+        return
+
+    st.success(f"Файл выбран: {getattr(uploaded_file, 'name', 'upload')}")
+    st.warning("Импорт ВБро пока не реализован: файл не записывается в БД и не участвует в пересборке витрин.")
+
+
 def render_upload_tab() -> None:
     st.subheader(UPLOAD_TAB_TITLE)
-    render_import_block(
-        title="Загрузить Точка входа",
-        report_name="Точка входа",
-        importer_func=import_entry_points_xlsx,
-        state_key=ENTRY_POINT_UPLOAD_KEY,
-    )
-    st.divider()
-    render_import_block(
-        title="Загрузить География заказов",
-        report_name="География заказов",
-        importer_func=import_orders_geography_xlsx,
-        state_key=ORDERS_GEOGRAPHY_UPLOAD_KEY,
-    )
+    sections = build_upload_tab_sections()
+    for index, section in enumerate(sections):
+        if index > 0:
+            st.divider()
+        if bool(section.get("implemented")):
+            render_import_block(
+                title=str(section["title"]),
+                report_name=str(section["report_name"]),
+                importer_func=section["importer_func"],
+                state_key=str(section["state_key"]),
+            )
+        else:
+            render_pending_import_block(
+                title=str(section["title"]),
+                report_name=str(section["report_name"]),
+                state_key=str(section["state_key"]),
+                accepted_extensions=[str(ext) for ext in section.get("accepted_extensions", ["xlsx"])],
+            )
 
 
 def render_ad_campaign_product_tab(df: pd.DataFrame, data_source: str, error_text: str | None = None) -> None:
