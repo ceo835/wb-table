@@ -687,11 +687,34 @@ def get_latest_product_context(product_rows: pd.DataFrame) -> dict[str, object]:
     latest_date = latest_row["report_date"]
     previous_row = sorted_rows.iloc[-2] if len(sorted_rows) > 1 else None
     previous_date = previous_row["report_date"] if previous_row is not None else None
+    display_row = latest_row
+    display_date = latest_date
+    display_previous_row = previous_row
+    display_previous_date = previous_date
+
+    if not has_core_coverage(latest_row):
+        candidate_rows = sorted_rows.iloc[:-1]
+        for index in range(len(candidate_rows) - 1, -1, -1):
+            candidate_row = candidate_rows.iloc[index]
+            if not has_core_coverage(candidate_row):
+                continue
+            display_row = candidate_row
+            display_date = candidate_row["report_date"]
+            display_previous_row = candidate_rows.iloc[index - 1] if index > 0 else None
+            display_previous_date = (
+                display_previous_row["report_date"] if display_previous_row is not None else None
+            )
+            break
+
     return {
         "latest_row": latest_row,
         "latest_date": latest_date,
         "previous_row": previous_row,
         "previous_date": previous_date,
+        "display_row": display_row,
+        "display_date": display_date,
+        "display_previous_row": display_previous_row,
+        "display_previous_date": display_previous_date,
         "period_start": sorted_rows["report_date"].min(),
         "period_end": sorted_rows["report_date"].max(),
     }
@@ -1745,9 +1768,9 @@ def build_stock_warehouse_summary_card_html(label: str, value: object, *, compac
 def build_dashboard_summary_card_html(label: str, value: object) -> str:
     return (
         '<div style="border:1px solid #e5e7eb;border-radius:12px;background:#ffffff;'
-        'padding:0.7rem 0.9rem;min-height:96px;">'
-        f'<div style="font-size:1.08rem;line-height:1.15;color:#6b7280;margin-bottom:0.24rem;">{escape(str(label))}</div>'
-        f'<div style="font-size:1.76rem;line-height:1.05;font-weight:700;color:#111827;">{escape(str(value))}</div>'
+        'padding:0.62rem 0.8rem;min-height:86px;display:flex;flex-direction:column;justify-content:space-between;">'
+        f'<div style="font-size:0.9rem;line-height:1.15;color:#6b7280;min-height:2.1rem;">{escape(str(label))}</div>'
+        f'<div style="font-size:1.52rem;line-height:1;font-weight:700;color:#111827;margin-top:0.16rem;">{escape(str(value))}</div>'
         "</div>"
     )
 
@@ -2520,13 +2543,10 @@ def render_overview_tab(
         status_column = "data_quality_label"
         download_label = "Скачать CSV"
     else:
-        st.info("Одна строка = один товар за одну дату. Таблица сгруппирована по артикулам: сначала все даты одного товара, затем следующий товар. Пустые значения не заменяются нулями. Причины пустых данных указаны в колонках с пометкой note.")
         table_df = build_grouped_by_date_dataset(filtered).copy()
         table_df["technical_ad_campaign_spend_total"] = table_df.get("ad_campaign_spend_total")
-        st.caption("В основном виде оставлены только бизнес-колонки. Технические поля скрыты и не попадают в основной CSV, пока чекбокс выключен.")
-        show_technical_fields = st.checkbox("Показать технические поля", value=False)
-        display_columns = DISPLAY_COLUMNS_BY_DATE + (TECHNICAL_EXTRA_COLUMNS_BY_DATE if show_technical_fields else [])
-        export_columns = DISPLAY_COLUMNS_BY_DATE + (TECHNICAL_EXTRA_COLUMNS_BY_DATE if show_technical_fields else [])
+        display_columns = DISPLAY_COLUMNS_BY_DATE
+        export_columns = DISPLAY_COLUMNS_BY_DATE
         status_column = "data_quality_label"
         download_label = "Скачать расширенный ИТОГО CSV"
 
@@ -2910,8 +2930,8 @@ def render_product_timeline_table(product_rows: pd.DataFrame) -> None:
 
 def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object) -> None:
     context = get_latest_product_context(product_rows)
-    latest_row: pd.Series = context["latest_row"]
-    latest_date = context["latest_date"]
+    latest_row: pd.Series = context["display_row"]
+    latest_date = context["display_date"]
     period_start = context["period_start"]
     period_end = context["period_end"]
 
@@ -2927,14 +2947,20 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
     passport_cols_mid = st.columns(3)
     render_info_field(passport_cols_mid[0], "Предмет", latest_row.get("subject"))
     render_info_field(passport_cols_mid[1], "Доступный период", f"{period_start} — {period_end}")
-    render_info_field(passport_cols_mid[2], "Последняя дата", latest_date)
+    render_info_field(passport_cols_mid[2], "Дата данных карточки", latest_date)
 
     render_info_field(st, "Статус данных", latest_row.get("data_quality_label"))
 
     render_summary_kpis(latest_row)
 
     detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
-    detail_date = st.selectbox("Дата для детализации формул", options=detail_dates, format_func=lambda d: str(d))
+    default_detail_index = detail_dates.index(latest_date) if latest_date in detail_dates else 0
+    detail_date = st.selectbox(
+        "Дата для детализации формул",
+        options=detail_dates,
+        index=default_detail_index,
+        format_func=lambda d: str(d),
+    )
     detail_row = get_row_for_date(product_rows, detail_date)
     if detail_row is None:
         st.error("Не удалось найти строку для выбранной даты детализации.")
@@ -3003,7 +3029,7 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
     render_product_timeline_table(product_rows)
 
     st.subheader("Внимание")
-    warnings = build_warnings(latest_row, context["previous_row"])
+    warnings = build_warnings(latest_row, context["display_previous_row"])
     if warnings:
         for warning in warnings:
             st.warning(warning)

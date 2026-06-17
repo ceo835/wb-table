@@ -29,6 +29,7 @@ from app_streamlit import (
     build_wb_site_price_monitor_dataframe,
     filter_products_with_period_data,
     format_wb_conversion_type_label,
+    get_latest_product_context,
     build_grouped_by_date_dataset,
     build_import_format_error,
     build_last_upload_result,
@@ -1584,6 +1585,41 @@ def test_get_latest_product_context_returns_latest_and_previous_rows() -> None:
     assert context["previous_date"] == pd.to_datetime("2026-05-31").date()
     assert context["latest_row"]["order_count"] == 2
     assert context["previous_row"]["order_count"] == 1
+
+
+def test_get_latest_product_context_uses_previous_core_coverage_row_for_card_display() -> None:
+    product_rows = prepare_dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "report_date": "2026-06-15",
+                    "nm_id": 1,
+                    "has_funnel": True,
+                    "cart_count": 10,
+                    "order_count": 4,
+                },
+                {
+                    "report_date": "2026-06-16",
+                    "nm_id": 1,
+                    "has_stock": True,
+                    "current_stock_qty": 100,
+                },
+                {
+                    "report_date": "2026-06-17",
+                    "nm_id": 1,
+                    "has_stock": True,
+                    "current_stock_qty": 90,
+                },
+            ]
+        )
+    )
+
+    context = get_latest_product_context(product_rows)
+
+    assert context["latest_date"] == pd.to_datetime("2026-06-17").date()
+    assert context["display_date"] == pd.to_datetime("2026-06-15").date()
+    assert context["display_row"]["cart_count"] == 10
+    assert context["display_previous_row"] is None
 
 
 def test_format_delta_handles_previous_and_percent() -> None:
