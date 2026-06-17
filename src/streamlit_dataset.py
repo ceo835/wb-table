@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Mapping, Sequence
 
 
 STREAMLIT_V1_COLUMNS = [
@@ -10,6 +12,7 @@ STREAMLIT_V1_COLUMNS = [
     "title",
     "brand",
     "subject",
+    "wb_buyer_price",
     "display_impressions",
     "display_ctr_calc",
     "impressions_source_note",
@@ -32,8 +35,9 @@ STREAMLIT_V1_COLUMNS = [
     "buyout_sum",
     "buyout_percent",
     "current_stock_qty",
-    "current_mp_stock_qty",
+    "current_stock_sum",
     "local_orders_percent",
+    "avg_delivery_time",
     "ad_cost_writeoff_total",
     "ad_campaign_spend_total",
     "ad_views_total",
@@ -136,6 +140,125 @@ AD_ZERO_FILL_FIELDS = [
     "unknown_ad_atbs",
 ]
 
+AD_CAMPAIGN_ZERO_FILL_FIELDS = [
+    "ad_campaign_spend_total",
+    "ad_views_total",
+    "ad_clicks_total",
+    "ad_atbs_total",
+    "ad_orders_total",
+    "direct_ad_atbs",
+    "associated_ad_atbs",
+    "multicard_ad_atbs",
+    "unknown_ad_atbs",
+]
+
+AD_COST_ZERO_FILL_FIELDS = ["ad_cost_writeoff_total"]
+
+
+def _normalize_date(value: Any) -> date | None:
+    if _is_missing(value):
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except Exception:
+        return None
+
+
+def _normalize_datetime(value: Any) -> datetime | None:
+    if _is_missing(value):
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        normalized_text = str(value).replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized_text)
+    except Exception:
+        return None
+
+
+def build_wb_price_snapshot_lookup(
+    snapshot_rows: Sequence[Mapping[str, Any]],
+) -> dict[tuple[date, int], dict[str, Any]]:
+    normalized_rows: list[dict[str, Any]] = []
+    for row in snapshot_rows:
+        snapshot_date = _normalize_date(row.get("snapshot_date"))
+        if snapshot_date is None or _is_missing(row.get("nm_id")):
+            continue
+        try:
+            nm_id = int(row.get("nm_id"))
+        except (TypeError, ValueError):
+            continue
+        normalized_rows.append(
+            {
+                "snapshot_date": snapshot_date,
+                "snapshot_at": _normalize_datetime(row.get("snapshot_at")),
+                "nm_id": nm_id,
+                "buyer_visible_price": _to_decimal_or_none(row.get("buyer_visible_price")),
+                "fetch_status": None if _is_missing(row.get("fetch_status")) else str(row.get("fetch_status")),
+            }
+        )
+
+    normalized_rows.sort(
+        key=lambda item: (
+            item["nm_id"],
+            item["snapshot_date"],
+            item["snapshot_at"] or datetime.min,
+        )
+    )
+
+    lookup: dict[tuple[date, int], dict[str, Any]] = {}
+    previous_success_price_by_nm: dict[int, Decimal] = {}
+
+    for row in normalized_rows:
+        previous_success_price = previous_success_price_by_nm.get(row["nm_id"])
+        current_price = row["buyer_visible_price"]
+        price_delta = None
+        price_alert = False
+        if current_price is not None and previous_success_price is not None:
+            price_delta = current_price - previous_success_price
+            price_alert = abs(price_delta) >= Decimal("50")
+
+        lookup[(row["snapshot_date"], row["nm_id"])] = {
+            "wb_buyer_price": current_price,
+            "previous_wb_buyer_price": previous_success_price,
+            "wb_price_delta": price_delta,
+            "wb_price_alert": price_alert,
+            "wb_price_fetch_status": row["fetch_status"],
+        }
+
+        if row["fetch_status"] == "success" and current_price is not None:
+            previous_success_price_by_nm[row["nm_id"]] = current_price
+
+    return lookup
+
+
+def attach_wb_price_snapshot_fields(
+    rows: Sequence[Mapping[str, Any]],
+    snapshot_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    price_lookup = build_wb_price_snapshot_lookup(snapshot_rows)
+    attached_rows: list[dict[str, Any]] = []
+    for row in rows:
+        attached_row = dict(row)
+        report_date = _normalize_date(row.get("report_date"))
+        lookup_key: tuple[date, int] | None = None
+        if report_date is not None and not _is_missing(row.get("nm_id")):
+            try:
+                lookup_key = (report_date, int(row.get("nm_id")))
+            except (TypeError, ValueError):
+                lookup_key = None
+        price_payload = price_lookup.get(lookup_key, {}) if lookup_key is not None else {}
+        attached_row["wb_buyer_price"] = price_payload.get("wb_buyer_price")
+        attached_row["previous_wb_buyer_price"] = price_payload.get("previous_wb_buyer_price")
+        attached_row["wb_price_delta"] = price_payload.get("wb_price_delta")
+        attached_row["wb_price_alert"] = bool(price_payload.get("wb_price_alert", False))
+        attached_rows.append(attached_row)
+    return attached_rows
+
 
 def _is_missing(value: Any) -> bool:
     return value is None or value == "" or value != value
@@ -147,6 +270,31 @@ def _to_bool(value: Any) -> bool:
     if _is_missing(value):
         return False
     return str(value).strip().lower() == "true"
+
+
+def _to_decimal_or_none(value: Any) -> Decimal | None:
+    if _is_missing(value):
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _safe_divide(numerator: Any, denominator: Any, multiplier: Any | None = None) -> Decimal | None:
+    decimal_numerator = _to_decimal_or_none(numerator)
+    decimal_denominator = _to_decimal_or_none(denominator)
+    if decimal_numerator is None or decimal_denominator is None or decimal_denominator == 0:
+        return None
+    result = decimal_numerator / decimal_denominator
+    if multiplier is not None:
+        decimal_multiplier = _to_decimal_or_none(multiplier)
+        if decimal_multiplier is None:
+            return None
+        result *= decimal_multiplier
+    return result
 
 
 def has_any_source(row: Mapping[str, Any]) -> bool:
@@ -205,7 +353,14 @@ def build_note_columns(row: Mapping[str, Any]) -> dict[str, str]:
     else:
         funnel_data_note = "OK"
 
-    ad_data_note = "OK" if (_to_bool(row.get("has_ad_cost")) or _to_bool(row.get("has_ad_campaign"))) else "Нет рекламы"
+    has_ad_cost = _to_bool(row.get("has_ad_cost"))
+    has_ad_campaign = _to_bool(row.get("has_ad_campaign"))
+    if has_ad_cost and has_ad_campaign:
+        ad_data_note = "OK"
+    elif has_ad_cost or has_ad_campaign:
+        ad_data_note = "Частичные рекламные данные"
+    else:
+        ad_data_note = "Нет рекламы"
 
     search_data_note = "OK" if has_search else "Нет данных поиска за дату или источник не отдал"
     stock_data_note = "OK" if has_stock else "Нет snapshot остатков за дату"
@@ -264,9 +419,75 @@ def enrich_streamlit_row(row: Mapping[str, Any]) -> dict[str, Any]:
             if _is_missing(enriched.get(field)):
                 enriched[field] = 0
 
+    if _to_bool(enriched.get("has_ad_cost")):
+        for field in AD_COST_ZERO_FILL_FIELDS:
+            if _is_missing(enriched.get(field)):
+                enriched[field] = 0
+
+    if _to_bool(enriched.get("has_ad_campaign")):
+        for field in AD_CAMPAIGN_ZERO_FILL_FIELDS:
+            if _is_missing(enriched.get(field)):
+                enriched[field] = 0
+
     if not (_to_bool(enriched.get("has_ad_cost")) or _to_bool(enriched.get("has_ad_campaign"))):
         for field in AD_ZERO_FILL_FIELDS:
             if _is_missing(enriched.get(field)):
                 enriched[field] = 0
+
+    if _is_missing(enriched.get("ad_cpc_calc")):
+        enriched["ad_cpc_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("ad_clicks_total"),
+        )
+    if _is_missing(enriched.get("ad_cpm_calc")):
+        enriched["ad_cpm_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("ad_views_total"),
+            Decimal("1000"),
+        )
+    if _is_missing(enriched.get("ad_cost_per_cart_calc")):
+        enriched["ad_cost_per_cart_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("ad_atbs_total"),
+        )
+    if _is_missing(enriched.get("ad_cpo_calc")):
+        enriched["ad_cpo_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("ad_orders_total"),
+        )
+    if _is_missing(enriched.get("ad_share_of_revenue_calc")):
+        enriched["ad_share_of_revenue_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("order_sum"),
+            Decimal("100"),
+        )
+    if _is_missing(enriched.get("associated_atbs_percent_calc")):
+        enriched["associated_atbs_percent_calc"] = _safe_divide(
+            enriched.get("associated_ad_atbs"),
+            enriched.get("ad_atbs_total"),
+            Decimal("100"),
+        )
+
+    if _is_missing(enriched.get("organic_cart_count")):
+        cart_count = _to_decimal_or_none(enriched.get("cart_count"))
+        ad_atbs_total = _to_decimal_or_none(enriched.get("ad_atbs_total"))
+        if cart_count is not None and ad_atbs_total is not None:
+            enriched["organic_cart_count"] = cart_count - ad_atbs_total
+
+    if _is_missing(enriched.get("organic_cart_share_calc")):
+        enriched["organic_cart_share_calc"] = _safe_divide(
+            enriched.get("organic_cart_count"),
+            enriched.get("ad_atbs_total"),
+            Decimal("100"),
+        )
+
+    if _is_missing(enriched.get("ad_cost_per_all_carts_calc")):
+        cart_count = _to_decimal_or_none(enriched.get("cart_count"))
+        associated_ad_atbs = _to_decimal_or_none(enriched.get("associated_ad_atbs")) or Decimal("0")
+        denominator = None if cart_count is None else cart_count + associated_ad_atbs
+        enriched["ad_cost_per_all_carts_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            denominator,
+        )
 
     return enriched

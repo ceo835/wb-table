@@ -774,6 +774,29 @@ def test_prepare_dataframe_for_streamlit_display_clears_problematic_dataframe_at
     assert captions == []
 
 
+def test_prepare_dataframe_for_streamlit_display_highlights_wb_price_alert(monkeypatch) -> None:
+    captions: list[str] = []
+    monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
+    df = pd.DataFrame(
+        [
+            {
+                "data_quality_label": "Р§Р°СЃС‚РёС‡РЅРѕ",
+                "wb_buyer_price": 1022.0,
+                "wb_price_alert": True,
+            }
+        ]
+    )
+
+    result = prepare_dataframe_for_streamlit_display(df, status_column="data_quality_label")
+
+    assert isinstance(result, Styler)
+    html = result.to_html()
+    assert "1022.00" in html
+    assert "background-color: #fde2e4;" in html
+    assert "color: #7f1d1d;" in html
+    assert captions == []
+
+
 def test_prepare_dataframe_for_streamlit_display_skips_styler_for_large_tables(monkeypatch) -> None:
     captions: list[str] = []
     monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
@@ -937,6 +960,30 @@ def test_build_export_dataframe_does_not_create_duplicate_pokazy_columns() -> No
     assert "Показы.1" not in export_df.columns
     assert list(export_df.columns).count("Показы") == 1
     assert export_df.columns.is_unique
+
+
+def test_build_export_dataframe_includes_wb_price_without_helper_fields() -> None:
+    table_df = pd.DataFrame(
+        [
+            {
+                "supplier_article": "BlackWOM5",
+                "nm_id": 197330807,
+                "wb_buyer_price": 799.0,
+                "previous_wb_buyer_price": 730.0,
+                "wb_price_delta": 69.0,
+                "wb_price_alert": True,
+            }
+        ]
+    )
+
+    export_df = build_export_dataframe(table_df, ["supplier_article", "nm_id", "wb_buyer_price"])
+
+    assert list(export_df.columns) == [
+        app_streamlit.EXPORT_COLUMN_LABELS["supplier_article"],
+        app_streamlit.EXPORT_COLUMN_LABELS["nm_id"],
+        app_streamlit.EXPORT_COLUMN_LABELS["wb_buyer_price"],
+    ]
+    assert float(export_df.loc[0, app_streamlit.EXPORT_COLUMN_LABELS["wb_buyer_price"]]) == 799.0
 
 
 def test_prepare_dataframe_builds_human_readable_source_labels() -> None:
@@ -1107,6 +1154,34 @@ def test_build_chart_metrics_by_date_marks_yesterday_ad_attribution_as_lagged() 
     assert float(lagged_row["total_cart_cost"]) == 6.25
 
 
+def test_build_chart_metrics_by_date_marks_partial_ad_attribution_when_spend_coverage_is_low() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-08",
+                "cart_count": 100,
+                "ad_atbs_total": 20,
+                "order_count": 40,
+                "ad_orders_total": 10,
+                "ad_campaign_spend_total": 1000,
+                "ad_cost_writeoff_total": 10000,
+            }
+        ]
+    )
+
+    result = build_chart_metrics_by_date(source_df, reference_date=datetime(2026, 6, 17).date())
+
+    row = result.iloc[0]
+
+    assert row["ad_attribution_status"] == "AD_DATA_PARTIAL"
+    assert pd.isna(row["ad_atbs_total_confirmed"])
+    assert pd.isna(row["ad_orders_total_confirmed"])
+    assert pd.isna(row["ad_spend_confirmed"])
+    assert pd.isna(row["ad_cart_cost"])
+    assert pd.isna(row["ad_cpo"])
+    assert float(row["total_cart_cost"]) == 10.0
+
+
 def test_build_chart_period_summary_uses_separate_cutoffs_for_total_and_ad_metrics() -> None:
     chart_df = pd.DataFrame(
         [
@@ -1150,6 +1225,7 @@ def test_build_chart_period_summary_uses_separate_cutoffs_for_total_and_ad_metri
     assert float(summary["ad_cart_cost"]) == 20.0
     assert float(summary["ad_cpo"]) == 50.0
     assert summary["has_lagged_ad_attribution"] is True
+    assert summary["has_partial_ad_attribution"] is False
 
 
 def test_build_chart_product_options_filters_to_ad_active_products_by_default() -> None:
@@ -1972,6 +2048,7 @@ def test_display_columns_by_date_keep_only_business_columns() -> None:
         "add_to_cart_conversion_calc",
         "cart_to_order_conversion_calc",
         "order_sum",
+        "avg_delivery_time",
         "ad_campaign_spend_total",
         "ad_views_total",
         "ad_clicks_total",
@@ -1986,7 +2063,7 @@ def test_display_columns_by_date_keep_only_business_columns() -> None:
         "organic_cart_count",
         "organic_cart_share_calc",
         "current_stock_qty",
-        "current_mp_stock_qty",
+        "current_stock_sum",
         "search_queries_count",
         "local_orders_percent",
         "entry_point_source_label",
@@ -2004,6 +2081,7 @@ def test_display_columns_by_date_keep_only_business_columns() -> None:
         "buyout_count",
         "buyout_sum",
         "buyout_percent",
+        "current_mp_stock_qty",
         "direct_ad_atbs",
         "associated_ad_atbs",
         "multicard_ad_atbs",
@@ -2055,7 +2133,8 @@ def test_build_export_dataframe_for_by_date_view_omits_technical_columns() -> No
                 "organic_cart_count": 698,
                 "organic_cart_share_calc": 581.67,
                 "current_stock_qty": 100,
-                "current_mp_stock_qty": 20,
+                "current_stock_sum": 3500.5,
+                "avg_delivery_time": 42.75,
                 "search_queries_count": 15,
                 "local_orders_percent": 55.1,
                 "entry_point_source_label": "Файл загружен",
@@ -2081,15 +2160,42 @@ def test_build_export_dataframe_for_by_date_view_omits_technical_columns() -> No
 
     assert "Показы" in export_df.columns
     assert "CTR" in export_df.columns
+    assert "Среднее время доставки" in export_df.columns
+    assert "Сумма остатков" in export_df.columns
     assert "Источник точки входа" in export_df.columns
     assert "Источник географии" in export_df.columns
     assert "Показы из Точки входа" not in export_df.columns
     assert "Переходы из Точки входа" not in export_df.columns
     assert "CTR из Точки входа" not in export_df.columns
     assert not any(str(column).startswith("Note:") for column in export_df.columns)
+    assert "Остаток МП" not in export_df.columns
     assert "Статус точки входа" not in export_df.columns
     assert "Статус географии" not in export_df.columns
     assert "Технический статус данных" not in export_df.columns
+
+
+def test_build_export_dataframe_replaces_missing_values_with_dash() -> None:
+    table_df = pd.DataFrame(
+        [
+            {
+                "supplier_article": "BlackWOM5",
+                "nm_id": 197330807,
+                "report_date": "2026-06-07",
+                "ad_cpo_calc": None,
+                "avg_delivery_time": None,
+                "current_stock_sum": None,
+            }
+        ]
+    )
+
+    export_df = build_export_dataframe(
+        table_df,
+        ["supplier_article", "nm_id", "report_date", "ad_cpo_calc", "avg_delivery_time", "current_stock_sum"],
+    )
+
+    assert export_df.loc[0, "CPO"] == "—"
+    assert export_df.loc[0, "Среднее время доставки"] == "—"
+    assert export_df.loc[0, "Сумма остатков"] == "—"
 
 
 def test_technical_extra_columns_by_date_include_source_control_fields() -> None:

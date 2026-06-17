@@ -21,9 +21,9 @@ if str(ROOT_DIR) not in sys.path:
 from sqlalchemy import select
 from sqlalchemy import func
 
-from src.db.models import MartTotalReport
+from src.db.models import FactWbSitePriceSnapshot, MartTotalReport
 from src.db.session import session_scope
-from src.streamlit_dataset import STREAMLIT_V1_COLUMNS, enrich_streamlit_row
+from src.streamlit_dataset import STREAMLIT_V1_COLUMNS, attach_wb_price_snapshot_fields, enrich_streamlit_row
 
 
 PROCESSED_DIR = ROOT_DIR / "data" / "processed"
@@ -79,7 +79,24 @@ def export_streamlit_v1_dataset(date_from: date, date_to: date) -> dict[str, Any
             .where(MartTotalReport.report_date >= date_from, MartTotalReport.report_date <= date_to)
             .order_by(MartTotalReport.supplier_article.asc(), MartTotalReport.nm_id.asc(), MartTotalReport.report_date.asc())
         ).scalars().all()
+        wb_price_snapshot_rows = session.execute(
+            select(FactWbSitePriceSnapshot).order_by(
+                FactWbSitePriceSnapshot.snapshot_date.asc(),
+                FactWbSitePriceSnapshot.nm_id.asc(),
+            )
+        ).scalars().all()
         rows = [row_to_dict(row) for row in mart_rows]
+        snapshot_rows = [
+            {
+                "snapshot_date": row.snapshot_date,
+                "snapshot_at": row.snapshot_at,
+                "nm_id": row.nm_id,
+                "buyer_visible_price": row.buyer_visible_price,
+                "fetch_status": row.fetch_status,
+            }
+            for row in wb_price_snapshot_rows
+        ]
+    rows = attach_wb_price_snapshot_fields(rows, snapshot_rows)
     rows = [enrich_streamlit_row(row) for row in rows]
 
     projected_rows = [{column: row.get(column) for column in STREAMLIT_V1_COLUMNS} for row in rows]

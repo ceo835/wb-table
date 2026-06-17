@@ -38,6 +38,7 @@ from src.streamlit_dataset import (
     AD_ZERO_FILL_FIELDS,
     FUNNEL_ZERO_FILL_FIELDS,
     NOTE_COLUMNS,
+    attach_wb_price_snapshot_fields,
     build_data_quality_label as shared_build_data_quality_label,
     enrich_streamlit_row as shared_enrich_streamlit_row,
 )
@@ -74,6 +75,7 @@ LATEST_MODE_LABEL = "Последняя дата + динамика"
 BY_DATE_MODE_LABEL = "По датам"
 CHART_THRESHOLD_CART_COST = 35.0
 CHART_THRESHOLD_CPO = 150.0
+CHART_AD_PARTIAL_SPEND_COVERAGE_THRESHOLD = 0.9
 STYLER_MAX_CELLS = 250_000
 CHART_LEVEL_CABINET = "Кабинет"
 CHART_LEVEL_CATEGORY = "Категория"
@@ -104,6 +106,7 @@ DISPLAY_COLUMNS_BY_DATE = [
     "title",
     "brand",
     "subject",
+    "wb_buyer_price",
     "impressions",
     "card_clicks",
     "cart_count",
@@ -112,6 +115,7 @@ DISPLAY_COLUMNS_BY_DATE = [
     "add_to_cart_conversion_calc",
     "cart_to_order_conversion_calc",
     "order_sum",
+    "avg_delivery_time",
     "ad_campaign_spend_total",
     "ad_views_total",
     "ad_clicks_total",
@@ -126,7 +130,7 @@ DISPLAY_COLUMNS_BY_DATE = [
     "organic_cart_count",
     "organic_cart_share_calc",
     "current_stock_qty",
-    "current_mp_stock_qty",
+    "current_stock_sum",
     "search_queries_count",
     "local_orders_percent",
     "entry_point_source_label",
@@ -179,6 +183,7 @@ DISPLAY_COLUMNS_LATEST = [
     "brand",
     "subject",
     "report_date",
+    "wb_buyer_price",
     "comparison_date",
     "impressions",
     "impressions_delta",
@@ -241,6 +246,7 @@ AD_CAMPAIGN_PRODUCT_EXPORT_LABELS = {
     "title": "Название",
     "brand": "Бренд",
     "subject": "Предмет",
+    "wb_buyer_price": "Цена WB",
     "advert_id": "ID РК",
     "campaign_name": "Название РК",
     "campaign_type": "Тип кампании",
@@ -259,6 +265,9 @@ AD_CAMPAIGN_PRODUCT_EXPORT_LABELS = {
 }
 
 NUMERIC_COLUMNS = [
+    "wb_buyer_price",
+    "previous_wb_buyer_price",
+    "wb_price_delta",
     "display_impressions",
     "display_ctr_calc",
     "impressions",
@@ -299,10 +308,11 @@ NUMERIC_COLUMNS = [
     "search_cart",
     "search_orders",
     "current_stock_qty",
-    "current_mp_stock_qty",
+    "current_stock_sum",
     "buyout_count",
     "buyout_sum",
     "buyout_percent",
+    "avg_delivery_time",
     "local_orders_percent",
     "localization_orders_total_qty",
     "localization_regions_count",
@@ -332,7 +342,7 @@ PERIOD_DATA_METRIC_COLUMNS = [
     "ad_atbs_total",
     "ad_orders_total",
     "current_stock_qty",
-    "current_mp_stock_qty",
+    "current_stock_sum",
     "search_queries_count",
     "local_orders_percent",
 ]
@@ -364,6 +374,7 @@ EXPORT_COLUMN_LABELS = {
     "title": "Название",
     "brand": "Бренд",
     "subject": "Предмет",
+    "wb_buyer_price": "Цена WB",
     "impressions": "Показы",
     "card_clicks": "Переходы в карточку",
     "ctr_calc": "CTR",
@@ -376,7 +387,8 @@ EXPORT_COLUMN_LABELS = {
     "buyout_sum": "Выкупы, сумма",
     "buyout_percent": "Процент выкупа, %",
     "current_stock_qty": "Остаток WB",
-    "current_mp_stock_qty": "Остаток МП",
+    "current_stock_sum": "Сумма остатков",
+    "avg_delivery_time": "Среднее время доставки",
     "local_orders_percent": "Локальные заказы, %",
     "ad_cost_writeoff_total": "Списания рекламы",
     "ad_campaign_spend_total": "Расход РК по статистике",
@@ -750,6 +762,9 @@ def load_dataset_from_db() -> pd.DataFrame:
             select(MartTotalReport).order_by(MartTotalReport.report_date.asc(), MartTotalReport.nm_id.asc())
         ).scalars().all()
         rows = [row_to_dict(row) for row in mart_rows]
+    wb_price_snapshot_df = load_wb_site_price_snapshot_from_db()
+    if not wb_price_snapshot_df.empty:
+        rows = attach_wb_price_snapshot_fields(rows, wb_price_snapshot_df.to_dict(orient="records"))
     return pd.DataFrame(rows)
 
 
@@ -1727,6 +1742,32 @@ def build_stock_warehouse_summary_card_html(label: str, value: object, *, compac
     )
 
 
+def build_dashboard_summary_card_html(label: str, value: object) -> str:
+    return (
+        '<div style="border:1px solid #e5e7eb;border-radius:12px;background:#ffffff;'
+        'padding:0.45rem 0.6rem;min-height:60px;">'
+        f'<div style="font-size:0.54rem;line-height:1.15;color:#6b7280;margin-bottom:0.18rem;">{escape(str(label))}</div>'
+        f'<div style="font-size:0.88rem;line-height:1.05;font-weight:700;color:#111827;">{escape(str(value))}</div>'
+        "</div>"
+    )
+
+
+def render_compact_metric_css() -> None:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stMetric"] label[data-testid="stMetricLabel"] p {
+            font-size: 0.6rem;
+        }
+        div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+            font-size: 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataFrame:
     if product_table.empty:
         return pd.DataFrame(
@@ -2320,11 +2361,21 @@ def style_table(df: pd.DataFrame, status_column: str | None = None) -> pd.io.for
             return "background-color: #ffe5d0; color: #9a3412;"
         return ""
 
+    def highlight_wb_price_change(row: pd.Series) -> list[str]:
+        styles = [""] * len(row)
+        if "wb_buyer_price" not in row.index:
+            return styles
+        if bool(row.get("wb_price_alert")):
+            styles[row.index.get_loc("wb_buyer_price")] = "background-color: #fde2e4; color: #7f1d1d;"
+        return styles
+
     styler = df.style
     if status_column in df.columns:
         styler = styler.map(status_color, subset=[status_column])
     if "ad_cpo_calc" in df.columns:
         styler = styler.map(ad_cpo_color, subset=["ad_cpo_calc"])
+    if "wb_buyer_price" in df.columns and "wb_price_alert" in df.columns:
+        styler = styler.apply(highlight_wb_price_change, axis=1)
     if "product_group_label" in df.columns:
         def highlight_product_group(row: pd.Series) -> list[str]:
             if str(row.get("product_group_label") or "").strip():
@@ -2374,7 +2425,8 @@ def build_export_dataframe(table_df: pd.DataFrame, display_columns: list[str]) -
         column_name: EXPORT_COLUMN_LABELS.get(column_name, column_name)
         for column_name in export_df.columns
     }
-    return export_df.rename(columns=renamed_columns)
+    export_df = export_df.rename(columns=renamed_columns)
+    return export_df.where(pd.notna(export_df), "—")
 
 
 def get_product_options(filtered: pd.DataFrame) -> tuple[list[str], dict[str, dict[str, object]]]:
@@ -2523,6 +2575,7 @@ def render_overview_tab(
             "title": st.column_config.TextColumn("Название", width="large"),
             "brand": st.column_config.TextColumn("Бренд"),
             "subject": st.column_config.TextColumn("Предмет"),
+            "wb_buyer_price": st.column_config.NumberColumn("Цена WB", format="%.2f"),
             "impressions": st.column_config.NumberColumn("Показы", format="%.0f"),
             "card_clicks": st.column_config.NumberColumn("Переходы в карточку", format="%.0f"),
             "ctr_calc": st.column_config.NumberColumn("CTR", format="%.2f"),
@@ -2538,6 +2591,7 @@ def render_overview_tab(
             "buyout_sum": st.column_config.NumberColumn("Выкупы, сумма", format="%.2f"),
             "buyout_percent": st.column_config.NumberColumn("Процент выкупа, %", format="%.2f"),
             "cart_to_order_conversion_calc": st.column_config.NumberColumn("Конверсия в заказ", format="%.2f"),
+            "avg_delivery_time": st.column_config.NumberColumn("Среднее время доставки", format="%.2f"),
             "ad_cost_writeoff_total": st.column_config.NumberColumn("Списания рекламы", format="%.2f"),
             "ad_campaign_spend_total": st.column_config.NumberColumn("Сумма кампания", format="%.2f"),
             "technical_ad_campaign_spend_total": st.column_config.NumberColumn("Расход РК по статистике", format="%.2f"),
@@ -2571,6 +2625,7 @@ def render_overview_tab(
             "search_orders": st.column_config.NumberColumn("Заказы из поиска", format="%.0f"),
             "search_queries_delta": st.column_config.NumberColumn("Δ Поиск", format="%.0f"),
             "current_stock_qty": st.column_config.NumberColumn("Остаток WB", format="%.0f"),
+            "current_stock_sum": st.column_config.NumberColumn("Сумма остатков", format="%.2f"),
             "current_mp_stock_qty": st.column_config.NumberColumn("Остаток МП", format="%.0f"),
             "local_orders_percent": st.column_config.NumberColumn("Локальные заказы, %", format="%.2f"),
             "localization_orders_total_qty": st.column_config.NumberColumn("Локализация: заказы, шт", format="%.0f"),
@@ -3266,6 +3321,7 @@ def build_chart_period_summary(
             "total_cpo": None,
             "ad_cpo": None,
             "has_lagged_ad_attribution": False,
+            "has_partial_ad_attribution": False,
         }
 
     report_dates = pd.to_datetime(chart_df["report_date"], errors="coerce").dt.date
@@ -3293,6 +3349,10 @@ def build_chart_period_summary(
         "total_cpo": safe_chart_divide(ad_spend_total, total_orders),
         "ad_cpo": safe_chart_divide(ad_spend_confirmed, ad_orders),
         "has_lagged_ad_attribution": bool((report_dates > cutoffs["ad_attribution_cutoff"]).any()),
+        "has_partial_ad_attribution": bool(
+            "ad_attribution_status" in chart_df.columns
+            and chart_df["ad_attribution_status"].eq("AD_DATA_PARTIAL").any()
+        ),
     }
 
 
@@ -3310,6 +3370,7 @@ def build_chart_metrics_by_date(
         "order_count",
         "ad_orders_total",
         "ad_campaign_spend_total",
+        "ad_cost_writeoff_total",
     ]
     available_columns = [column for column in aggregation_columns if column in scope_rows.columns]
     if not available_columns:
@@ -3324,13 +3385,28 @@ def build_chart_metrics_by_date(
     grouped["report_date"] = pd.to_datetime(grouped["report_date"], errors="coerce").dt.date
     cutoffs = get_chart_metric_cutoffs(reference_date)
     lagged_mask = grouped["report_date"].gt(cutoffs["ad_attribution_cutoff"])
-    grouped["ad_attribution_status"] = lagged_mask.map({True: "AD_ATTRIBUTION_LAGGED", False: "OK"})
+    partial_mask = pd.Series(False, index=grouped.index)
+    if "ad_campaign_spend_total" in grouped.columns and "ad_cost_writeoff_total" in grouped.columns:
+        ad_campaign_spend_series = pd.to_numeric(grouped["ad_campaign_spend_total"], errors="coerce")
+        ad_cost_writeoff_series = pd.to_numeric(grouped["ad_cost_writeoff_total"], errors="coerce")
+        partial_mask = (
+            ~lagged_mask
+            & ad_cost_writeoff_series.notna()
+            & ad_cost_writeoff_series.gt(0)
+            & ad_campaign_spend_series.notna()
+            & ad_campaign_spend_series.lt(ad_cost_writeoff_series * CHART_AD_PARTIAL_SPEND_COVERAGE_THRESHOLD)
+        )
+
+    grouped["ad_attribution_status"] = "OK"
+    grouped.loc[lagged_mask, "ad_attribution_status"] = "AD_ATTRIBUTION_LAGGED"
+    grouped.loc[partial_mask, "ad_attribution_status"] = "AD_DATA_PARTIAL"
+    confirmed_mask = ~(lagged_mask | partial_mask)
     if "ad_atbs_total" in grouped.columns:
-        grouped["ad_atbs_total_confirmed"] = grouped["ad_atbs_total"].where(~lagged_mask)
+        grouped["ad_atbs_total_confirmed"] = grouped["ad_atbs_total"].where(confirmed_mask)
     if "ad_orders_total" in grouped.columns:
-        grouped["ad_orders_total_confirmed"] = grouped["ad_orders_total"].where(~lagged_mask)
+        grouped["ad_orders_total_confirmed"] = grouped["ad_orders_total"].where(confirmed_mask)
     if "ad_campaign_spend_total" in grouped.columns:
-        grouped["ad_spend_confirmed"] = grouped["ad_campaign_spend_total"].where(~lagged_mask)
+        grouped["ad_spend_confirmed"] = grouped["ad_campaign_spend_total"].where(confirmed_mask)
     grouped["total_cart_cost"] = grouped.apply(
         lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("cart_count")),
         axis=1,
@@ -3574,8 +3650,9 @@ def render_charts_tab(
             threshold=CHART_THRESHOLD_CART_COST,
         )
     with kpi_cols[3]:
-        if period_summary["has_lagged_ad_attribution"] and ad_cart_cost is None:
-            render_not_applicable_kpi_card(label="Стоимость корзины РК", reason="Корзины РК ещё не доступны")
+        if ad_cart_cost is None and (period_summary["has_lagged_ad_attribution"] or period_summary["has_partial_ad_attribution"]):
+            reason = "Корзины РК ещё не доступны" if period_summary["has_lagged_ad_attribution"] else "Рекламные данные частичные"
+            render_not_applicable_kpi_card(label="Стоимость корзины РК", reason=reason)
         else:
             render_chart_kpi_card(
                 label="Стоимость корзины РК",
@@ -3593,8 +3670,9 @@ def render_charts_tab(
             threshold=CHART_THRESHOLD_CPO,
         )
     with kpi_cols[5]:
-        if period_summary["has_lagged_ad_attribution"] and ad_cpo is None:
-            render_not_applicable_kpi_card(label="CPO РК", reason="Заказы РК ещё не доступны")
+        if ad_cpo is None and (period_summary["has_lagged_ad_attribution"] or period_summary["has_partial_ad_attribution"]):
+            reason = "Заказы РК ещё не доступны" if period_summary["has_lagged_ad_attribution"] else "Рекламные данные частичные"
+            render_not_applicable_kpi_card(label="CPO РК", reason=reason)
         else:
             render_chart_kpi_card(
                 label="CPO РК",
@@ -4047,6 +4125,8 @@ def render_charts_tab(
 
     if period_summary["has_lagged_ad_attribution"]:
         st.caption("Статус рекламной атрибуции: AD_ATTRIBUTION_LAGGED")
+    elif period_summary["has_partial_ad_attribution"]:
+        st.caption("Статус рекламной атрибуции: AD_DATA_PARTIAL")
 
     st.markdown("### Динамика корзин")
     st.caption(
@@ -4489,6 +4569,7 @@ def main() -> None:
     df, data_source = load_app_dataset()
     display_coverage = df.attrs.get("display_coverage")
     ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
+    render_compact_metric_css()
     st.caption(f"Источник данных: {'PostgreSQL' if data_source == 'db' else 'CSV'}")
     render_available_dates_summary(df)
     filtered, filter_debug_trace = build_filtered_dataset(df, data_source)
@@ -4510,18 +4591,15 @@ def main() -> None:
     selected_product_label = st.selectbox("Выбрать товар", options=product_options)
     product_rows = get_selected_product_rows(filtered, selected_product_label, option_map)
     product_context = get_latest_product_context(product_rows)
-    latest_row: pd.Series = product_context["latest_row"]
-
     detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
     default_detail_date = detail_dates[0]
 
-    tab_overview, tab_ad_campaign, tab_product, tab_charts, tab_sources, tab_price_monitor, tab_stock_warehouse, tab_upload = st.tabs(
+    tab_overview, tab_ad_campaign, tab_product, tab_charts, tab_price_monitor, tab_stock_warehouse, tab_upload = st.tabs(
         [
             "ИТОГО",
             AD_CAMPAIGN_PRODUCT_LABEL,
             "Карточка товара",
             "Графики",
-            "Источники",
             WB_SITE_PRICE_TAB_LABEL,
             STOCK_WAREHOUSE_TAB_LABEL,
             UPLOAD_TAB_TITLE,
@@ -4535,8 +4613,6 @@ def main() -> None:
         render_product_tab(product_rows, default_detail_date)
     with tab_charts:
         render_charts_tab(filtered, selected_product_label, option_map, ad_campaign_product_df)
-    with tab_sources:
-        render_sources_tab(latest_row)
     with tab_price_monitor:
         render_wb_site_price_tab(data_source)
     with tab_stock_warehouse:

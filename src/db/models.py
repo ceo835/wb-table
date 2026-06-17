@@ -407,6 +407,65 @@ class FactAdCampaignNmDay(Base, StatusMixin):
     currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
+class FactAdvertMetadata(Base, TimestampMixin):
+    __tablename__ = "fact_advert_metadata"
+    __table_args__ = (
+        UniqueConstraint("advert_id", name="uq_fact_advert_metadata_advert_id"),
+        Index("idx_fact_advert_metadata_advert_id", "advert_id"),
+        Index("idx_fact_advert_metadata_status", "status"),
+        Index("idx_fact_advert_metadata_primary_nm_id", "primary_nm_id"),
+    )
+
+    fact_advert_metadata_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    advert_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    campaign_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payment_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    primary_nm_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    linked_nm_ids_json: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
+    placements_json: Mapped[list[str] | dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    raw_payload_json: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(JSONB, nullable=True)
+    source_status: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class AdFullstatsFailedGroup(Base):
+    __tablename__ = "ad_fullstats_failed_group"
+    __table_args__ = (
+        UniqueConstraint(
+            "date_from",
+            "date_to",
+            "advert_id",
+            "group_key",
+            name="uq_ad_fullstats_failed_group_scope",
+        ),
+        Index("idx_ad_fullstats_failed_group_advert_id", "advert_id"),
+        Index("idx_ad_fullstats_failed_group_date_range", "date_from", "date_to"),
+        Index("idx_ad_fullstats_failed_group_status", "status"),
+        Index("idx_ad_fullstats_failed_group_next_retry_at", "next_retry_at"),
+    )
+
+    ad_fullstats_failed_group_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    date_from: Mapped[date] = mapped_column(Date, nullable=False)
+    date_to: Mapped[date] = mapped_column(Date, nullable=False)
+    advert_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    group_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    campaign_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    nm_ids_json: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempts_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class FactSearchQueryMetric(Base, StatusMixin):
     __tablename__ = "fact_search_query_metric"
     __table_args__ = (

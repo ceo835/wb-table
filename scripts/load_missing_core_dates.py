@@ -7,7 +7,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -23,12 +23,21 @@ from sqlalchemy import distinct, func, select
 
 from scripts.export_ad_campaign_product_dataset import export_ad_campaign_product_dataset
 from scripts.export_streamlit_v1_dataset import export_streamlit_v1_dataset
+from src.db.ad_fullstats_retry_queue import (
+    build_failed_group_row,
+    get_failed_group_attempts_count,
+    load_due_failed_group_rows,
+    mark_failed_group_success,
+    upsert_failed_groups,
+)
 from src.db.ad_campaign_loader import load_ad_campaign_stats_to_db
 from src.db.ad_cost_loader import load_ad_costs_to_db
+from src.db.advert_metadata_loader import load_advert_metadata_to_db
 from src.db.funnel_loader import load_funnel_to_db
 from src.db.localization_loader import load_localization_to_db
 from src.db.mart_total_report_builder import build_mart_total_report
 from src.db.models import (
+    AdFullstatsFailedGroup,
     FactAdCampaignDay,
     FactAdCampaignNmDay,
     FactAdCostDay,
@@ -68,6 +77,17 @@ class SourceLogRow:
     status: str
     error: str
     retry_count: int
+
+
+@dataclass(slots=True)
+class FullstatsAdvertGroup:
+    advert_id: int
+    rows: list[dict[str, Any]]
+    dates: set[date]
+
+
+def _build_fullstats_group_key(*, date_from: date, date_to: date, advert_id: int) -> str:
+    return f"{date_from.isoformat()}:{date_to.isoformat()}:{int(advert_id)}"
 
 
 def _parse_date(value: str) -> date:
@@ -189,13 +209,14 @@ def _run_with_retry(
     )
 
 
-def _load_ad_event_groups(date_from: date, date_to: date, active_nm_ids: Sequence[int]) -> list[tuple[int, list[dict[str, Any]]]]:
+def _load_ad_event_groups(date_from: date, date_to: date, active_nm_ids: Sequence[int]) -> list[FullstatsAdvertGroup]:
     with session_scope() as session:
         rows = session.execute(
             select(
                 FactAdCostEvent.advert_id,
                 FactAdCostEvent.campaign_name,
                 FactAdCostEvent.nm_id,
+                FactAdCostEvent.date,
             )
             .where(
                 FactAdCostEvent.date >= date_from,
@@ -207,29 +228,114 @@ def _load_ad_event_groups(date_from: date, date_to: date, active_nm_ids: Sequenc
             .order_by(FactAdCostEvent.advert_id, FactAdCostEvent.nm_id)
         ).all()
 
-    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    grouped_rows: dict[int, dict[str, Any]] = {}
     for row in rows:
         advert_id = int(row.advert_id)
-        grouped[advert_id].append(
+        payload = grouped_rows.setdefault(
+            advert_id,
             {
-                "advertId": advert_id,
                 "campaign_name": row.campaign_name,
-                "nm_id": int(row.nm_id),
-            }
+                "nm_ids": set(),
+                "dates": set(),
+            },
         )
-    return [(advert_id, grouped[advert_id]) for advert_id in sorted(grouped)]
+        payload["nm_ids"].add(int(row.nm_id))
+        if row.date is not None:
+            payload["dates"].add(row.date)
+
+    result: list[FullstatsAdvertGroup] = []
+    for advert_id in sorted(grouped_rows):
+        payload = grouped_rows[advert_id]
+        result.append(
+            FullstatsAdvertGroup(
+                advert_id=advert_id,
+                rows=[
+                    {
+                        "advertId": advert_id,
+                        "campaign_name": payload["campaign_name"],
+                        "nm_id": nm_id,
+                    }
+                    for nm_id in sorted(payload["nm_ids"])
+                ],
+                dates=set(payload["dates"]),
+            )
+        )
+    return result
 
 
-def _load_processed_fullstats_advert_ids(date_from: date, date_to: date) -> set[int]:
+def _load_processed_fullstats_advert_dates(date_from: date, date_to: date) -> set[tuple[int, date]]:
     with session_scope() as session:
         rows = session.execute(
-            select(distinct(FactAdCampaignDay.advert_id)).where(
+            select(distinct(FactAdCampaignDay.advert_id), FactAdCampaignDay.date).where(
                 FactAdCampaignDay.date >= date_from,
                 FactAdCampaignDay.date <= date_to,
                 FactAdCampaignDay.advert_id.is_not(None),
             )
         ).all()
-    return {int(row[0]) for row in rows if row[0] is not None}
+    return {
+        (int(row[0]), row[1])
+        for row in rows
+        if row[0] is not None and row[1] is not None
+    }
+
+
+def _select_fullstats_groups_for_processing(
+    groups: Sequence[FullstatsAdvertGroup],
+    processed_pairs: set[tuple[int, date]],
+    *,
+    force_refresh: bool,
+) -> tuple[list[FullstatsAdvertGroup], int]:
+    selected_groups: list[FullstatsAdvertGroup] = []
+    fully_processed_count = 0
+    for group in groups:
+        required_pairs = {(group.advert_id, group_date) for group_date in group.dates}
+        is_fully_processed = bool(required_pairs) and required_pairs.issubset(processed_pairs)
+        if is_fully_processed:
+            fully_processed_count += 1
+        if force_refresh or not is_fully_processed:
+            selected_groups.append(group)
+    return selected_groups, fully_processed_count
+
+
+def _count_remaining_fullstats_groups(
+    groups: Sequence[FullstatsAdvertGroup],
+    processed_pairs: set[tuple[int, date]],
+) -> int:
+    remaining = 0
+    for group in groups:
+        required_pairs = {(group.advert_id, group_date) for group_date in group.dates}
+        if not required_pairs or not required_pairs.issubset(processed_pairs):
+            remaining += 1
+    return remaining
+
+
+def _select_failed_fullstats_groups_for_retry(
+    groups: Sequence[FullstatsAdvertGroup],
+    failed_advert_ids: set[int],
+) -> list[FullstatsAdvertGroup]:
+    if not failed_advert_ids:
+        return []
+    return [group for group in groups if group.advert_id in failed_advert_ids]
+
+
+def _merge_fullstats_groups(
+    *groups_collections: Sequence[FullstatsAdvertGroup],
+) -> list[FullstatsAdvertGroup]:
+    merged: dict[int, FullstatsAdvertGroup] = {}
+    for groups in groups_collections:
+        for group in groups:
+            merged[group.advert_id] = group
+    return [merged[advert_id] for advert_id in sorted(merged)]
+
+
+def _load_pending_failed_fullstats_advert_ids(date_from: date, date_to: date) -> set[int]:
+    with session_scope() as session:
+        failed_rows = load_due_failed_group_rows(
+            session,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    return {int(row.advert_id) for row in failed_rows}
 
 
 def _count_by_date(model, date_column, start: date, end: date) -> dict[str, int]:
@@ -315,6 +421,9 @@ def run_missing_core_dates_load(
     full_range_to: date,
     fullstats_sleep_seconds: int,
     use_tracked_products: bool = False,
+    force_fullstats_refresh: bool = False,
+    retry_failed_fullstats_only: bool = False,
+    fullstats_only: bool = False,
 ) -> dict[str, Any]:
     scope_mode = "tracked_products" if use_tracked_products else "active_products"
     if use_tracked_products:
@@ -325,12 +434,14 @@ def run_missing_core_dates_load(
         active_nm_ids = [int(row["nm_id"]) for row in active_products]
     reference_index_int, reference_index_str = _build_reference_indexes(active_products)
     dates = _daterange(date_from, date_to)
+    skip_base_loaders = retry_failed_fullstats_only or fullstats_only
+    dates_to_refresh = [] if skip_base_loaders else dates
     source_logs: list[SourceLogRow] = []
     failed_chunks: list[dict[str, Any]] = []
     summary_by_source: dict[str, dict[str, Any]] = defaultdict(lambda: {"rows_fetched": 0, "rows_upserted": 0, "runs": 0})
     http_error_counts = {"429": 0, "500": 0}
 
-    for report_date in dates:
+    for report_date in dates_to_refresh:
         funnel_chunks = _chunked(active_nm_ids, FUNNEL_CHUNK_SIZE)
         for index, chunk in enumerate(funnel_chunks, start=1):
             result, log_row = _run_with_retry(
@@ -494,20 +605,52 @@ def run_missing_core_dates_load(
             )
 
     fullstats_groups = _load_ad_event_groups(date_from, date_to, active_nm_ids)
-    processed_before = _load_processed_fullstats_advert_ids(date_from, date_to)
-    selected_groups = [(advert_id, rows) for advert_id, rows in fullstats_groups if advert_id not in processed_before]
+    try:
+        advert_metadata_summary = load_advert_metadata_to_db(
+            advert_ids=[group.advert_id for group in fullstats_groups],
+        )
+    except Exception as exc:
+        advert_metadata_summary = {
+            "status": "ERROR",
+            "error": str(exc),
+            "rows_fetched": 0,
+            "rows_upserted": 0,
+            "advert_ids_requested": [group.advert_id for group in fullstats_groups],
+            "advert_ids_loaded": [],
+        }
+    processed_before = _load_processed_fullstats_advert_dates(date_from, date_to)
+    coverage_groups, fully_processed_before = _select_fullstats_groups_for_processing(
+        fullstats_groups,
+        processed_before,
+        force_refresh=force_fullstats_refresh,
+    )
+    pending_failed_advert_ids = _load_pending_failed_fullstats_advert_ids(date_from, date_to)
+    retry_groups = _select_failed_fullstats_groups_for_retry(fullstats_groups, pending_failed_advert_ids)
+    if retry_failed_fullstats_only:
+        selected_groups = retry_groups
+    else:
+        selected_groups = _merge_fullstats_groups(coverage_groups, retry_groups)
     fullstats_summary = {
         "total_advert_ids_found": len(fullstats_groups),
-        "already_processed_before_run": len(processed_before),
+        "already_processed_before_run": fully_processed_before,
+        "coverage_selected_before_retry_merge": len(coverage_groups),
+        "retry_queue_pending_before_run": len(pending_failed_advert_ids),
+        "retry_groups_selected": len(retry_groups),
+        "retry_failed_fullstats_only": retry_failed_fullstats_only,
+        "fullstats_only": fullstats_only,
         "advert_ids_attempted": 0,
         "advert_ids_processed_this_run": 0,
         "remaining_after_run": 0,
         "stopped_on_429_advert_id": None,
         "failed_advert_ids": [],
+        "force_fullstats_refresh": force_fullstats_refresh,
     }
 
-    for index, (advert_id, ad_event_rows) in enumerate(selected_groups, start=1):
+    for index, group in enumerate(selected_groups, start=1):
+        advert_id = group.advert_id
+        ad_event_rows = group.rows
         nm_ids = sorted({int(row["nm_id"]) for row in ad_event_rows if row.get("nm_id") is not None})
+        group_key = _build_fullstats_group_key(date_from=date_from, date_to=date_to, advert_id=advert_id)
         try:
             result, log_row = _run_with_retry(
                 source_name="fact_ad_campaign_nm_day",
@@ -519,6 +662,7 @@ def run_missing_core_dates_load(
                     date_to,
                     nm_ids=nm_ids,
                     ad_event_rows=rows,
+                    replace_scope=force_fullstats_refresh,
                 ),
                 rows_fetched_key="nm_rows_fetched",
                 rows_upserted_key="nm_rows_upserted",
@@ -550,6 +694,32 @@ def run_missing_core_dates_load(
         summary_by_source["fact_ad_campaign_nm_day"]["runs"] += 1
 
         if log_row.error:
+            attempted_at = datetime.now().astimezone()
+            with session_scope() as session:
+                attempts_count = get_failed_group_attempts_count(
+                    session,
+                    date_from=date_from,
+                    date_to=date_to,
+                    advert_id=advert_id,
+                    group_key=group_key,
+                ) + 1
+                upsert_failed_groups(
+                    session,
+                    [
+                        build_failed_group_row(
+                            date_from=date_from,
+                            date_to=date_to,
+                            advert_id=advert_id,
+                            group_key=group_key,
+                            campaign_name=group.rows[0].get("campaign_name") if group.rows else None,
+                            nm_ids=nm_ids,
+                            last_error=log_row.error,
+                            attempted_at=attempted_at,
+                            attempts_count=attempts_count,
+                            retry_delay_seconds=fullstats_sleep_seconds,
+                        )
+                    ],
+                )
             code = _infer_http_code(log_row.error)
             if code is not None:
                 http_error_counts[str(code)] += 1
@@ -571,13 +741,44 @@ def run_missing_core_dates_load(
                 fullstats_summary["stopped_on_429_advert_id"] = advert_id
                 break
         else:
+            attempted_at = datetime.now().astimezone()
+            with session_scope() as session:
+                mark_failed_group_success(
+                    session,
+                    date_from=date_from,
+                    date_to=date_to,
+                    advert_id=advert_id,
+                    group_key=group_key,
+                    attempted_at=attempted_at,
+                )
             fullstats_summary["advert_ids_processed_this_run"] += 1
 
         if index < len(selected_groups):
             time.sleep(fullstats_sleep_seconds)
 
-    processed_after = _load_processed_fullstats_advert_ids(date_from, date_to)
-    fullstats_summary["remaining_after_run"] = max(len(fullstats_groups) - len(processed_after), 0)
+    processed_after = _load_processed_fullstats_advert_dates(date_from, date_to)
+    fullstats_summary["remaining_after_run"] = _count_remaining_fullstats_groups(fullstats_groups, processed_after)
+    with session_scope() as session:
+        pending_after = session.execute(
+            select(func.count())
+            .select_from(AdFullstatsFailedGroup)
+            .where(
+                AdFullstatsFailedGroup.date_from == date_from,
+                AdFullstatsFailedGroup.date_to == date_to,
+                AdFullstatsFailedGroup.status == "pending",
+            )
+        ).scalar_one()
+        success_after = session.execute(
+            select(func.count())
+            .select_from(AdFullstatsFailedGroup)
+            .where(
+                AdFullstatsFailedGroup.date_from == date_from,
+                AdFullstatsFailedGroup.date_to == date_to,
+                AdFullstatsFailedGroup.status == "success",
+            )
+        ).scalar_one()
+    fullstats_summary["retry_queue_pending_after_run"] = int(pending_after or 0)
+    fullstats_summary["retry_queue_success_after_run"] = int(success_after or 0)
 
     mart_summary = build_mart_total_report(full_range_from, full_range_to, version="v2")
     streamlit_dataset_summary = export_streamlit_v1_dataset(full_range_from, full_range_to)
@@ -600,6 +801,7 @@ def run_missing_core_dates_load(
         "scope_products_count": len(active_nm_ids),
         "active_products_count": len(active_nm_ids),
         "dates_loaded": [day.isoformat() for day in dates],
+        "skip_base_loaders": skip_base_loaders,
         "summary_by_source": summary_by_source,
         "mart_summary": mart_summary,
         "streamlit_dataset_summary": streamlit_dataset_summary,
@@ -607,6 +809,7 @@ def run_missing_core_dates_load(
         "mart_date_diagnostics": mart_diagnostics,
         "fact_table_date_diagnostics": fact_diagnostics,
         "http_error_counts": http_error_counts,
+        "advert_metadata_summary": advert_metadata_summary,
         "fullstats_summary": fullstats_summary,
         "failed_chunks": failed_chunks,
         "failed_sources": sorted({row.source_name for row in source_logs if row.error}),
@@ -635,6 +838,9 @@ def main() -> int:
     parser.add_argument("--full-range-to", type=_parse_date, default=DEFAULT_FULL_RANGE_TO)
     parser.add_argument("--fullstats-sleep-seconds", type=int, default=FULLSTATS_SLEEP_SECONDS)
     parser.add_argument("--tracked-products", action="store_true")
+    parser.add_argument("--force-fullstats-refresh", action="store_true")
+    parser.add_argument("--retry-failed-fullstats-only", action="store_true")
+    parser.add_argument("--fullstats-only", action="store_true")
     args = parser.parse_args()
 
     if args.date_from > args.date_to:
@@ -651,6 +857,9 @@ def main() -> int:
         full_range_to=args.full_range_to,
         fullstats_sleep_seconds=args.fullstats_sleep_seconds,
         use_tracked_products=bool(args.tracked_products),
+        force_fullstats_refresh=bool(args.force_fullstats_refresh),
+        retry_failed_fullstats_only=bool(args.retry_failed_fullstats_only),
+        fullstats_only=bool(args.fullstats_only),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 1 if summary.get("failed_chunks") else 0
