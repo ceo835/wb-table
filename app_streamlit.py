@@ -1745,9 +1745,9 @@ def build_stock_warehouse_summary_card_html(label: str, value: object, *, compac
 def build_dashboard_summary_card_html(label: str, value: object) -> str:
     return (
         '<div style="border:1px solid #e5e7eb;border-radius:12px;background:#ffffff;'
-        'padding:0.45rem 0.6rem;min-height:60px;">'
-        f'<div style="font-size:0.54rem;line-height:1.15;color:#6b7280;margin-bottom:0.18rem;">{escape(str(label))}</div>'
-        f'<div style="font-size:0.88rem;line-height:1.05;font-weight:700;color:#111827;">{escape(str(value))}</div>'
+        'padding:0.7rem 0.9rem;min-height:96px;">'
+        f'<div style="font-size:1.08rem;line-height:1.15;color:#6b7280;margin-bottom:0.24rem;">{escape(str(label))}</div>'
+        f'<div style="font-size:1.76rem;line-height:1.05;font-weight:700;color:#111827;">{escape(str(value))}</div>'
         "</div>"
     )
 
@@ -2510,11 +2510,7 @@ def render_overview_tab(
     filter_debug_trace: list[dict[str, object]],
     display_coverage: pd.DataFrame | None = None,
 ) -> tuple[int, int]:
-    view_mode = st.radio(
-        "Вид таблицы",
-        options=[LATEST_MODE_LABEL, BY_DATE_MODE_LABEL],
-        horizontal=True,
-    )
+    view_mode = BY_DATE_MODE_LABEL
 
     if view_mode == LATEST_MODE_LABEL:
         st.info("Одна строка = один товар. Показана последняя доступная дата и изменение к предыдущей доступной дате по этому товару.")
@@ -2731,40 +2727,47 @@ def render_grouped_kpi_row(
                 st.caption(f"Превышение: {threshold_label}")
 
 
-def render_summary_kpis(latest_row: pd.Series, previous_row: pd.Series | None, previous_date: object) -> None:
+def render_simple_kpi_row(
+    latest_row: pd.Series,
+    configs: list[tuple[str, str, int, float | None, str | None]],
+) -> None:
+    cols = st.columns(len(configs))
+    for column, config in zip(cols, configs):
+        field_name, label, digits, threshold, threshold_label = config
+        with column:
+            st.metric(label, fmt_num(latest_row.get(field_name), digits))
+            value = latest_row.get(field_name)
+            if threshold is not None and not pd.isna(value) and float(value) > threshold and threshold_label:
+                st.caption(f"Превышение: {threshold_label}")
+
+
+def render_summary_kpis(latest_row: pd.Series) -> None:
     st.subheader("Основные KPI по последней дате")
-    st.caption("Дельта считается к предыдущей доступной дате по товару.")
-    render_grouped_kpi_row(
+    render_simple_kpi_row(
         latest_row,
-        previous_row,
-        previous_date,
         [
-            ("cart_count", "Корзины", 0, False, None, None),
-            ("order_count", "Заказы", 0, False, None, None),
-            ("order_sum", "Сумма заказов", 2, False, None, None),
-            ("ad_cpo_calc", "CPO", 2, True, CHART_THRESHOLD_CPO, "CPO выше 150 руб."),
+            ("cart_count", "Корзины", 0, None, None),
+            ("order_count", "Заказы", 0, None, None),
+            ("order_sum", "Сумма заказов", 2, None, None),
+            ("ad_cpo_calc", "CPO", 2, CHART_THRESHOLD_CPO, "CPO выше 150 руб."),
         ],
     )
-    render_grouped_kpi_row(
+    render_simple_kpi_row(
         latest_row,
-        previous_row,
-        previous_date,
         [
-            ("ad_campaign_spend_total", "Расход РК", 2, False, None, None),
-            ("ad_atbs_total", "Корзины РК", 0, False, None, None),
-            ("ad_orders_total", "Заказы РК", 0, False, None, None),
-            ("ad_cost_per_cart_calc", "Цена рекламной корзины", 2, True, CHART_THRESHOLD_CART_COST, "Цена корзины выше 35 руб."),
+            ("ad_campaign_spend_total", "Расход РК", 2, None, None),
+            ("ad_atbs_total", "Корзины РК", 0, None, None),
+            ("ad_orders_total", "Заказы РК", 0, None, None),
+            ("ad_cost_per_cart_calc", "Цена рекламной корзины", 2, CHART_THRESHOLD_CART_COST, "Цена корзины выше 35 руб."),
         ],
     )
-    render_grouped_kpi_row(
+    render_simple_kpi_row(
         latest_row,
-        previous_row,
-        previous_date,
         [
-            ("impressions", "Показы", 0, False, None, None),
-            ("search_queries_count", "Поисковые запросы", 0, False, None, None),
-            ("current_stock_qty", "Текущий остаток", 0, False, None, None),
-            ("ad_share_of_revenue_calc", "ДРР", 2, True, None, None),
+            ("impressions", "Показы", 0, None, None),
+            ("search_queries_count", "Поисковые запросы", 0, None, None),
+            ("current_stock_qty", "Текущий остаток", 0, None, None),
+            ("ad_share_of_revenue_calc", "ДРР", 2, None, None),
         ],
     )
 
@@ -2909,8 +2912,6 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
     context = get_latest_product_context(product_rows)
     latest_row: pd.Series = context["latest_row"]
     latest_date = context["latest_date"]
-    previous_row: pd.Series | None = context["previous_row"]
-    previous_date = context["previous_date"]
     period_start = context["period_start"]
     period_end = context["period_end"]
 
@@ -2928,15 +2929,9 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
     render_info_field(passport_cols_mid[1], "Доступный период", f"{period_start} — {period_end}")
     render_info_field(passport_cols_mid[2], "Последняя дата", latest_date)
 
-    passport_cols_bottom = st.columns(2)
-    render_info_field(
-        passport_cols_bottom[0],
-        "Дата сравнения",
-        previous_date if previous_date is not None else "Нет предыдущей даты для сравнения",
-    )
-    render_info_field(passport_cols_bottom[1], "Статус данных", latest_row.get("data_quality_label"))
+    render_info_field(st, "Статус данных", latest_row.get("data_quality_label"))
 
-    render_summary_kpis(latest_row, previous_row, previous_date)
+    render_summary_kpis(latest_row)
 
     detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
     detail_date = st.selectbox("Дата для детализации формул", options=detail_dates, format_func=lambda d: str(d))
@@ -3008,7 +3003,7 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
     render_product_timeline_table(product_rows)
 
     st.subheader("Внимание")
-    warnings = build_warnings(latest_row, previous_row)
+    warnings = build_warnings(latest_row, context["previous_row"])
     if warnings:
         for warning in warnings:
             st.warning(warning)
@@ -4575,13 +4570,17 @@ def main() -> None:
     filtered, filter_debug_trace = build_filtered_dataset(df, data_source)
 
     metric_cols = st.columns(7)
-    metric_cols[0].metric("Всего строк", f"{len(filtered):,}".replace(",", " "))
-    metric_cols[1].metric("Товаров", f"{filtered['nm_id'].nunique():,}".replace(",", " "))
-    metric_cols[2].metric("Дат", f"{filtered['report_date'].nunique():,}".replace(",", " "))
-    metric_cols[3].metric("Строк без данных", f"{(filtered['data_quality_status'] == 'NO_DATA').sum():,}".replace(",", " "))
-    metric_cols[4].metric("Строк с рекламой", f"{filtered['has_ad_campaign'].sum():,}".replace(",", " "))
-    metric_cols[5].metric("Строк с поиском", f"{filtered['has_search'].sum():,}".replace(",", " "))
-    metric_cols[6].metric("Строк с остатками", f"{filtered['has_stock'].sum():,}".replace(",", " "))
+    summary_cards = [
+        ("Всего строк", f"{len(filtered):,}".replace(",", " ")),
+        ("Товаров", f"{filtered['nm_id'].nunique():,}".replace(",", " ")),
+        ("Дат", f"{filtered['report_date'].nunique():,}".replace(",", " ")),
+        ("Строк без данных", f"{(filtered['data_quality_status'] == 'NO_DATA').sum():,}".replace(",", " ")),
+        ("Строк с рекламой", f"{filtered['has_ad_campaign'].sum():,}".replace(",", " ")),
+        ("Строк с поиском", f"{filtered['has_search'].sum():,}".replace(",", " ")),
+        ("Строк с остатками", f"{filtered['has_stock'].sum():,}".replace(",", " ")),
+    ]
+    for column, (label, value) in zip(metric_cols, summary_cards):
+        column.markdown(build_dashboard_summary_card_html(label, value), unsafe_allow_html=True)
 
     if filtered.empty:
         st.warning("После фильтров данных не осталось.")
