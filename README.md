@@ -137,3 +137,97 @@ WB_SITE_PRICE_PROXY_URL=http://user:pass@host:port
 - дампы БД и логи
 
 Перед `git add .` обязательно проверьте `git status`.
+
+## MVP MCP / HTTP read-only service
+
+В проект добавлен отдельный read-only HTTP service для внешнего assistant/tool доступа к PostgreSQL без CSV и без write-операций.
+
+### Выбранный transport
+
+На первом этапе используется HTTP JSON API на FastAPI с отдельными tool endpoints:
+
+- `GET /health`
+- `POST /tools/get_dashboard_summary`
+- `POST /tools/get_product_metrics`
+- `POST /tools/get_price_monitor`
+
+Это не полноценный MCP transport, а совместимый промежуточный HTTP слой для Railway URL-подключения.
+
+### Переменные окружения
+
+Нужны отдельные env:
+
+```env
+DATABASE_URL=postgresql://...
+MCP_AUTH_TOKEN=...
+MCP_MAX_ROWS=500
+MCP_QUERY_TIMEOUT_SECONDS=20
+```
+
+### Локальный запуск
+
+```bash
+pip install -r requirements.txt
+uvicorn mcp_server:app --host 127.0.0.1 --port 8001
+```
+
+### Railway запуск
+
+Для отдельного web-service:
+
+```bash
+uvicorn mcp_server:app --host 0.0.0.0 --port $PORT
+```
+
+### Авторизация
+
+Все tool endpoints, кроме `/health`, защищены Bearer token:
+
+```http
+Authorization: Bearer <MCP_AUTH_TOKEN>
+```
+
+### Примеры запросов
+
+#### Health
+
+```bash
+curl http://localhost:8001/health
+```
+
+#### Dashboard summary
+
+```bash
+curl -X POST http://localhost:8001/tools/get_dashboard_summary \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"date_from\":\"2026-06-07\",\"date_to\":\"2026-06-18\",\"only_tracked\":true}"
+```
+
+#### Product metrics
+
+```bash
+curl -X POST http://localhost:8001/tools/get_product_metrics \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"nm_id\":91470767,\"date_from\":\"2026-06-07\",\"date_to\":\"2026-06-18\"}"
+```
+
+#### Price monitor
+
+```bash
+curl -X POST http://localhost:8001/tools/get_price_monitor \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"snapshot_date\":\"2026-06-18\",\"alerts_only\":false}"
+```
+
+### Ограничения первого этапа
+
+- только PostgreSQL;
+- только заранее описанные read-only tools;
+- без произвольного SQL от пользователя;
+- диапазон дат ограничен 60 днями;
+- количество строк ограничено `MCP_MAX_ROWS`;
+- suppressed price alerts не считаются активными;
+- traceback пишется в server logs, но secrets не логируются.
