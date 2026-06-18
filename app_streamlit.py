@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from html import escape
 import os
 import tempfile
@@ -90,6 +91,26 @@ CHART_AGGREGATION_LEVELS = [
     CHART_LEVEL_ARTICLE,
     CHART_LEVEL_CONVERSION,
 ]
+
+DISPLAY_DELTA_COLUMNS_HIGHER_IS_BETTER = {
+    "impressions_delta",
+    "cart_count_delta",
+    "order_count_delta",
+    "order_sum_delta",
+    "ad_atbs_delta",
+    "ad_orders_delta",
+    "search_queries_delta",
+    "stock_delta",
+}
+DISPLAY_DELTA_COLUMNS_LOWER_IS_BETTER = {
+    "ad_cpo_delta",
+}
+DISPLAY_NUMERIC_PLACEHOLDERS = {
+    "",
+    "—",
+    "NO_DATA",
+    STOCK_WAREHOUSE_NO_DATA_DISPLAY,
+}
 CHART_ALL_CATEGORIES_LABEL = "Все категории"
 CHART_ALL_BANDS_LABEL = "Все банды"
 CHART_ALL_CONVERSION_TYPES_LABEL = "Все типы WB"
@@ -781,16 +802,42 @@ def load_dataset(path: str, cache_buster: float | None = None) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_dataset_from_db() -> pd.DataFrame:
+def load_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
     with session_scope() as session:
         mart_rows = session.execute(
             select(MartTotalReport).order_by(MartTotalReport.report_date.asc(), MartTotalReport.nm_id.asc())
         ).scalars().all()
         rows = [row_to_dict(row) for row in mart_rows]
-    wb_price_snapshot_df = load_wb_site_price_snapshot_from_db()
+    wb_price_snapshot_df = load_wb_site_price_snapshot_from_db(cache_buster)
     if not wb_price_snapshot_df.empty:
         rows = attach_wb_price_snapshot_fields(rows, wb_price_snapshot_df.to_dict(orient="records"))
     return pd.DataFrame(rows)
+
+
+def get_db_dataset_cache_buster() -> str:
+    with session_scope() as session:
+        mart_state = session.execute(
+            select(
+                func.max(MartTotalReport.report_date),
+                func.max(MartTotalReport.loaded_at),
+                func.count(),
+            )
+        ).one()
+        price_state = session.execute(
+            select(
+                func.max(FactWbSitePriceSnapshot.snapshot_date),
+                func.max(FactWbSitePriceSnapshot.created_at),
+                func.count(),
+            )
+        ).one()
+        alert_state = session.execute(
+            select(
+                func.max(FactWbSitePriceAlert.snapshot_date),
+                func.max(FactWbSitePriceAlert.created_at),
+                func.count(),
+            )
+        ).one()
+    return "|".join("" if value is None else str(value) for value in (*mart_state, *price_state, *alert_state))
 
 
 def resolve_data_source() -> str:
@@ -900,6 +947,9 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for column in NOTE_COLUMNS:
         if column not in enriched.columns:
             enriched[column] = "—"
+    for column in NUMERIC_COLUMNS:
+        if column in enriched.columns:
+            enriched[column] = pd.to_numeric(enriched[column], errors="coerce")
     enriched.attrs["display_coverage"] = build_display_coverage_summary(prepared, enriched)
     return enriched
 
@@ -1106,7 +1156,7 @@ def load_app_dataset() -> tuple[pd.DataFrame, str]:
             st.error("DB mode включён, но DATABASE_URL не задан. Переключите STREAMLIT_DATA_SOURCE=csv.")
             st.stop()
         try:
-            df = prepare_dataframe(load_dataset_from_db())
+            df = prepare_dataframe(load_dataset_from_db(get_db_dataset_cache_buster()))
         except Exception as exc:
             st.error(
                 "Не удалось загрузить данные из PostgreSQL. "
@@ -1178,7 +1228,7 @@ def load_ad_campaign_product_app_dataset(data_source: str) -> tuple[pd.DataFrame
 
 
 @st.cache_data(show_spinner=False)
-def load_wb_site_price_snapshot_from_db() -> pd.DataFrame:
+def load_wb_site_price_snapshot_from_db(cache_buster: str | None = None) -> pd.DataFrame:
     with session_scope() as session:
         rows = session.execute(
             select(FactWbSitePriceSnapshot).order_by(
@@ -1210,7 +1260,7 @@ def load_wb_site_price_snapshot_from_db() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_wb_site_price_alert_from_db() -> pd.DataFrame:
+def load_wb_site_price_alert_from_db(cache_buster: str | None = None) -> pd.DataFrame:
     with session_scope() as session:
         rows = session.execute(
             select(FactWbSitePriceAlert).order_by(
@@ -1416,8 +1466,9 @@ def render_wb_site_price_tab(data_source: str) -> None:
         st.info("Мониторинг цен WB доступен только в режиме PostgreSQL.")
         return
 
-    snapshot_df = load_wb_site_price_snapshot_from_db()
-    alert_df = load_wb_site_price_alert_from_db()
+    cache_buster = get_db_dataset_cache_buster()
+    snapshot_df = load_wb_site_price_snapshot_from_db(cache_buster)
+    alert_df = load_wb_site_price_alert_from_db(cache_buster)
     if snapshot_df.empty:
         st.warning("В `fact_wb_site_price_snapshot` пока нет строк.")
         return
@@ -1559,9 +1610,9 @@ def prepare_stock_warehouse_snapshot_dataframe(df: pd.DataFrame) -> pd.DataFrame
     return aggregated
 
 
-def _normalize_stock_display_value(value: object) -> int | float | str:
+def _normalize_stock_display_value(value: object) -> int | float | object:
     if pd.isna(value):
-        return "NO_DATA"
+        return pd.NA
     numeric_value = float(value)
     if numeric_value.is_integer():
         return int(numeric_value)
@@ -1708,7 +1759,7 @@ def build_stock_warehouse_product_table(
             row[warehouse_name] = display_value
             if warehouse_name not in main_warehouse_names:
                 continue
-            if display_value == "NO_DATA":
+            if pd.isna(display_value):
                 no_data_warehouses.append(warehouse_name)
                 continue
             numeric_value = float(display_value)
@@ -1902,10 +1953,8 @@ def style_stock_warehouse_table(
     warehouse_columns: list[str],
 ) -> pd.io.formats.style.Styler:
     def warehouse_value_color(value: object) -> str:
-        if value in ("NO_DATA", STOCK_WAREHOUSE_NO_DATA_DISPLAY):
-            return "background-color: #e5e7eb; color: #4b5563;"
         if pd.isna(value):
-            return ""
+            return "background-color: #e5e7eb; color: #4b5563;"
         try:
             if float(value) == 0:
                 return "background-color: #fde2e4; color: #7f1d1d;"
@@ -1945,16 +1994,14 @@ def prepare_stock_warehouse_table_for_display(
     df: pd.DataFrame,
     warehouse_columns: list[str],
 ) -> pd.DataFrame | pd.io.formats.style.Styler:
-    safe_df = df.copy()
-    safe_df.attrs = {}
-    safe_df = safe_df.replace("NO_DATA", STOCK_WAREHOUSE_NO_DATA_DISPLAY)
-    cells_count = int(df.shape[0]) * int(df.shape[1])
-    if cells_count > STYLER_MAX_CELLS:
-        st.caption(
-            f"Большая таблица складских остатков: {df.shape[0]} строк × {df.shape[1]} колонок = {cells_count:,} ячеек. "
-            "Цветовое оформление отключено для стабильной загрузки."
-        )
-        return safe_df
+    numeric_columns = set(warehouse_columns) | {
+        "Артикул WB",
+        "Итого по осн. складам",
+        "Складов в наличии",
+        "Складов с нулём",
+        "Складов без данных",
+    }
+    safe_df = sanitize_dataframe_for_streamlit_display(df, numeric_columns=numeric_columns)
     return style_stock_warehouse_table(safe_df, warehouse_columns)
 
 
@@ -2385,6 +2432,38 @@ def build_grouped_by_date_dataset(filtered: pd.DataFrame) -> pd.DataFrame:
     return grouped_df
 
 
+def _convert_decimal_cell(value: object) -> object:
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
+
+
+def _sanitize_numeric_series(series: pd.Series) -> pd.Series:
+    replaced = series.replace(list(DISPLAY_NUMERIC_PLACEHOLDERS), pd.NA)
+    return pd.to_numeric(replaced, errors="coerce")
+
+
+def sanitize_dataframe_for_streamlit_display(
+    df: pd.DataFrame,
+    *,
+    numeric_columns: set[str] | None = None,
+) -> pd.DataFrame:
+    safe_df = df.copy()
+    safe_df.attrs = {}
+    numeric_columns = numeric_columns or set()
+
+    for column_name in safe_df.columns:
+        series = safe_df[column_name]
+        if series.dtype == object and series.map(lambda value: isinstance(value, Decimal)).any():
+            safe_df[column_name] = series.map(_convert_decimal_cell)
+
+    for column_name in numeric_columns:
+        if column_name in safe_df.columns:
+            safe_df[column_name] = _sanitize_numeric_series(safe_df[column_name])
+
+    return safe_df
+
+
 def build_product_timeline_dataset(product_rows: pd.DataFrame) -> pd.DataFrame:
     timeline = product_rows.reindex(columns=PRODUCT_TIMELINE_COLUMNS).copy()
     return timeline.sort_values("report_date", ascending=False, na_position="last")
@@ -2400,35 +2479,61 @@ def style_table(df: pd.DataFrame, status_column: str | None = None) -> pd.io.for
             return "background-color: #fff3cd; color: #7a4b00;"
         return ""
 
-    def ad_cpo_color(value: object) -> str:
+    def threshold_warning_color(value: object, threshold: float) -> str:
         if pd.isna(value):
             return ""
-        if float(value) > 100:
+        if float(value) > threshold:
             return "background-color: #ffe5d0; color: #9a3412;"
         return ""
 
-    def highlight_wb_price_change(row: pd.Series) -> list[str]:
-        styles = [""] * len(row)
-        if "wb_buyer_price" not in row.index:
-            return styles
-        if bool(row.get("wb_price_alert")):
-            styles[row.index.get_loc("wb_buyer_price")] = "background-color: #fde2e4; color: #7f1d1d;"
-        return styles
+    def delta_color(value: object, *, lower_is_better: bool = False) -> str:
+        if pd.isna(value):
+            return ""
+        numeric_value = float(value)
+        if numeric_value == 0:
+            return ""
+        is_positive_outcome = numeric_value < 0 if lower_is_better else numeric_value > 0
+        if is_positive_outcome:
+            return "color: #166534; font-weight: 600;"
+        return "color: #b91c1c; font-weight: 600;"
+
+    def product_group_color(value: object) -> str:
+        if str(value or "").strip():
+            return "background-color: #f8fafc; border-top: 2px solid #d1d5db; font-weight: 600;"
+        return ""
+
+    def wb_price_alert_color(column: pd.Series) -> list[str]:
+        alerts = (
+            df.loc[column.index, "wb_price_alert"]
+            .fillna(False)
+            .astype(bool)
+            .tolist()
+        )
+        return [
+            "background-color: #fde2e4; color: #7f1d1d;" if is_alert else ""
+            for is_alert in alerts
+        ]
 
     styler = df.style
     if status_column in df.columns:
         styler = styler.map(status_color, subset=[status_column])
     if "ad_cpo_calc" in df.columns:
-        styler = styler.map(ad_cpo_color, subset=["ad_cpo_calc"])
+        styler = styler.map(lambda value: threshold_warning_color(value, CHART_THRESHOLD_CPO), subset=["ad_cpo_calc"])
+    if "ad_cost_per_cart_calc" in df.columns:
+        styler = styler.map(
+            lambda value: threshold_warning_color(value, CHART_THRESHOLD_CART_COST),
+            subset=["ad_cost_per_cart_calc"],
+        )
     if "wb_buyer_price" in df.columns and "wb_price_alert" in df.columns:
-        styler = styler.apply(highlight_wb_price_change, axis=1)
+        styler = styler.apply(wb_price_alert_color, subset=["wb_buyer_price"])
     if "product_group_label" in df.columns:
-        def highlight_product_group(row: pd.Series) -> list[str]:
-            if str(row.get("product_group_label") or "").strip():
-                return ["background-color: #f8fafc; border-top: 2px solid #d1d5db;"] * len(row)
-            return [""] * len(row)
-
-        styler = styler.apply(highlight_product_group, axis=1)
+        styler = styler.map(product_group_color, subset=["product_group_label"])
+    higher_is_better_columns = [column for column in DISPLAY_DELTA_COLUMNS_HIGHER_IS_BETTER if column in df.columns]
+    if higher_is_better_columns:
+        styler = styler.map(lambda value: delta_color(value, lower_is_better=False), subset=higher_is_better_columns)
+    lower_is_better_columns = [column for column in DISPLAY_DELTA_COLUMNS_LOWER_IS_BETTER if column in df.columns]
+    if lower_is_better_columns:
+        styler = styler.map(lambda value: delta_color(value, lower_is_better=True), subset=lower_is_better_columns)
     return styler.format(precision=2, na_rep="—")
 
 
@@ -2436,15 +2541,10 @@ def prepare_dataframe_for_streamlit_display(
     df: pd.DataFrame,
     status_column: str | None = None,
 ) -> pd.DataFrame | pd.io.formats.style.Styler:
-    safe_df = df.copy()
-    safe_df.attrs = {}
-    cells_count = int(df.shape[0]) * int(df.shape[1])
-    if cells_count > STYLER_MAX_CELLS:
-        st.caption(
-            f"Большая таблица: {df.shape[0]} строк × {df.shape[1]} колонок = {cells_count:,} ячеек. "
-            "Цветовое оформление отключено для стабильной загрузки."
-        )
-        return safe_df
+    numeric_columns = set(NUMERIC_COLUMNS) | DISPLAY_DELTA_COLUMNS_HIGHER_IS_BETTER | DISPLAY_DELTA_COLUMNS_LOWER_IS_BETTER | {
+        "technical_ad_campaign_spend_total",
+    }
+    safe_df = sanitize_dataframe_for_streamlit_display(df, numeric_columns=numeric_columns)
     return style_table(safe_df, status_column=status_column)
 
 

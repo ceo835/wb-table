@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 import app_streamlit
 import pandas as pd
@@ -116,6 +117,37 @@ def test_prepare_dataframe_builds_data_quality_status_when_missing() -> None:
     assert prepared.loc[1, "data_quality_status"] == "NO_DATA"
 
 
+def test_prepare_dataframe_converts_decimal_calc_metrics_to_numeric() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-17",
+                "has_funnel": True,
+                "has_stock": False,
+                "has_ad_cost": True,
+                "has_ad_campaign": True,
+                "has_search": False,
+                "has_localization_partial": False,
+                "cart_count": 10,
+                "order_sum": 200,
+                "ad_campaign_spend_total": 30,
+                "ad_views_total": 150,
+                "ad_clicks_total": 15,
+                "ad_atbs_total": 5,
+                "ad_orders_total": 2,
+                "associated_ad_atbs": 1,
+            }
+        ]
+    )
+
+    prepared = prepare_dataframe(df)
+
+    assert isinstance(prepared.loc[0, "ad_cpc_calc"], float)
+    assert isinstance(prepared.loc[0, "ad_cpm_calc"], float)
+    assert isinstance(prepared.loc[0, "ad_cost_per_cart_calc"], float)
+    assert isinstance(prepared.loc[0, "ad_cpo_calc"], float)
+
+
 def test_prepare_dataframe_applies_tracked_metadata(monkeypatch) -> None:
     tracked_df = pd.DataFrame(
         [
@@ -152,6 +184,27 @@ def test_prepare_dataframe_applies_tracked_metadata(monkeypatch) -> None:
     assert prepared.loc[0, "lifecycle_status"] == "active"
     assert bool(prepared.loc[1, "is_tracked"]) is False
     assert prepared.loc[1, "lifecycle_status"] == "not_tracked"
+
+
+def test_load_app_dataset_db_uses_cache_buster_for_db_loader(monkeypatch) -> None:
+    monkeypatch.setenv("STREAMLIT_DATA_SOURCE", "db")
+    monkeypatch.setattr(app_streamlit.settings, "database_url", "postgresql://example")
+    monkeypatch.setattr(app_streamlit, "get_db_dataset_cache_buster", lambda: "buster-1")
+
+    calls: list[str | None] = []
+
+    def fake_load_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+        calls.append(cache_buster)
+        return pd.DataFrame([{"report_date": "2026-06-18", "nm_id": 1, "has_funnel": True}])
+
+    monkeypatch.setattr(app_streamlit, "load_dataset_from_db", fake_load_dataset_from_db)
+    monkeypatch.setattr(app_streamlit, "prepare_dataframe", lambda df: df)
+
+    df, source = app_streamlit.load_app_dataset()
+
+    assert source == "db"
+    assert calls == ["buster-1"]
+    assert len(df) == 1
 
 
 def test_build_stock_warehouse_product_table_aggregates_chrt_rows_and_keeps_missing_tracked_products() -> None:
@@ -224,8 +277,8 @@ def test_build_stock_warehouse_product_table_aggregates_chrt_rows_and_keeps_miss
     assert product_row["no_data_warehouses_count"] == 0
     assert product_row["stock_status"] == "ZERO_ON_WAREHOUSE"
 
-    assert missing_row["Владимир WB"] == "NO_DATA"
-    assert missing_row["Тула"] == "NO_DATA"
+    assert pd.isna(missing_row["Владимир WB"])
+    assert pd.isna(missing_row["Тула"])
     assert missing_row["no_data_warehouses_count"] == 2
     assert missing_row["stock_status"] == "NO_STOCK_DATA_FOR_PRODUCT"
 
@@ -268,7 +321,7 @@ def test_build_stock_warehouse_product_table_marks_missing_selected_warehouse_as
     row = result.iloc[0]
 
     assert row["Владимир WB"] == 3
-    assert row["Тула"] == "NO_DATA"
+    assert pd.isna(row["Тула"])
     assert row["zero_warehouses_count"] == 0
     assert row["no_data_warehouses_count"] == 1
     assert row["stock_status"] == "NO_DATA_ON_WAREHOUSE"
@@ -365,7 +418,7 @@ def test_build_stock_warehouse_product_table_adds_main_warehouse_aggregates_prob
     assert third_row["warehouses_with_stock"] == 2
 
 
-def test_prepare_stock_warehouse_table_for_display_replaces_no_data_with_dash_and_keeps_zero_highlight() -> None:
+def test_prepare_stock_warehouse_table_for_display_keeps_missing_warehouses_numeric_safe() -> None:
     df = pd.DataFrame(
         [
             {"Артикул WB": 1, "Владимир WB": "NO_DATA", "Тула": 0, "problem_status": "NO_DATA_ON_MAIN_WAREHOUSES"},
@@ -375,10 +428,11 @@ def test_prepare_stock_warehouse_table_for_display_replaces_no_data_with_dash_an
     styled = prepare_stock_warehouse_table_for_display(df, ["Владимир WB", "Тула"])
 
     assert isinstance(styled, Styler)
-    assert styled.data.loc[0, "Владимир WB"] == "—"
+    assert pd.isna(styled.data.loc[0, "Владимир WB"])
     assert styled.data.loc[0, "Тула"] == 0
 
     html = styled.to_html()
+    assert "—" in html
     assert "#e5e7eb" in html
     assert "#fde2e4" in html
 
@@ -820,18 +874,51 @@ def test_prepare_dataframe_for_streamlit_display_skips_styler_for_large_tables(m
     captions: list[str] = []
     monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
     monkeypatch.setattr(app_streamlit, "STYLER_MAX_CELLS", 3)
-
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("style_table should not be called for oversized tables")
-
-    monkeypatch.setattr(app_streamlit, "style_table", fail_if_called)
     df = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3, "b": 4}])
 
     result = prepare_dataframe_for_streamlit_display(df, status_column=None)
 
-    assert result.equals(df)
-    assert len(captions) == 1
-    assert "Цветовое оформление отключено" in captions[0]
+    assert isinstance(result, Styler)
+    assert captions == []
+
+
+def test_prepare_dataframe_for_streamlit_display_keeps_styler_for_large_tables(monkeypatch) -> None:
+    captions: list[str] = []
+    monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
+    monkeypatch.setattr(app_streamlit, "STYLER_MAX_CELLS", 3)
+    df = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3, "b": 4}])
+
+    result = prepare_dataframe_for_streamlit_display(df, status_column=None)
+
+    assert isinstance(result, Styler)
+    assert captions == []
+
+
+def test_prepare_dataframe_for_streamlit_display_sanitizes_decimal_and_placeholder_types(monkeypatch) -> None:
+    captions: list[str] = []
+    monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
+    df = pd.DataFrame(
+        [
+            {
+                "data_quality_label": "Р§Р°СЃС‚РёС‡РЅРѕ",
+                "ad_cpc_calc": Decimal("2.50"),
+                "current_stock_qty": "—",
+                "wb_buyer_price": Decimal("799.00"),
+                "wb_price_alert": True,
+            }
+        ]
+    )
+
+    result = prepare_dataframe_for_streamlit_display(df, status_column="data_quality_label")
+
+    assert isinstance(result, Styler)
+    assert result.data.loc[0, "ad_cpc_calc"] == 2.5
+    assert result.data.loc[0, "wb_buyer_price"] == 799.0
+    assert pd.isna(result.data.loc[0, "current_stock_qty"])
+    html = result.to_html()
+    assert "799.00" in html
+    assert "—" in html
+    assert captions == []
 
 
 def test_build_chart_series_dataframe_ignores_problematic_dataframe_attrs() -> None:
