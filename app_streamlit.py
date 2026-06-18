@@ -70,6 +70,7 @@ WB_SITE_PRICE_ALERT_CHANGED = "PRICE_CHANGED_50"
 WB_SITE_PRICE_ALERT_NO_DATA = "NO_PRICE_DATA"
 WB_SITE_PRICE_ALERT_FAILED = "FETCH_FAILED"
 AD_CAMPAIGN_PRODUCT_LABEL = "РК по товару"
+DEFAULT_STREAMLIT_DISPLAY_MIN_DATE = date(2026, 6, 7)
 
 LATEST_MODE_LABEL = "Последняя дата + динамика"
 BY_DATE_MODE_LABEL = "По датам"
@@ -210,6 +211,7 @@ DISPLAY_COLUMNS_LATEST = [
 
 PRODUCT_TIMELINE_COLUMNS = [
     "report_date",
+    "wb_buyer_price",
     "impressions",
     "cart_count",
     "order_count",
@@ -1121,6 +1123,27 @@ def load_app_dataset() -> tuple[pd.DataFrame, str]:
         st.error("Сначала соберите dataset командой scripts/export_streamlit_v1_dataset.py")
         st.stop()
     return load_dataset(str(DATASET_PATH), DATASET_PATH.stat().st_mtime), "csv"
+
+
+def resolve_streamlit_display_min_date() -> date | None:
+    raw_value = (os.getenv("STREAMLIT_DISPLAY_MIN_DATE") or "").strip()
+    if not raw_value:
+        return DEFAULT_STREAMLIT_DISPLAY_MIN_DATE
+    try:
+        return date.fromisoformat(raw_value)
+    except ValueError:
+        return DEFAULT_STREAMLIT_DISPLAY_MIN_DATE
+
+
+def apply_display_min_date_filter(df: pd.DataFrame, *, date_column: str = "report_date") -> pd.DataFrame:
+    display_min_date = resolve_streamlit_display_min_date()
+    if display_min_date is None or df.empty or date_column not in df.columns:
+        return df
+
+    report_dates = pd.to_datetime(df[date_column], errors="coerce").dt.date
+    filtered = df.loc[report_dates.notna() & report_dates.ge(display_min_date)].copy()
+    filtered.attrs = getattr(df, "attrs", {}).copy()
+    return filtered
 
 
 @st.cache_data(show_spinner=False)
@@ -2363,7 +2386,7 @@ def build_grouped_by_date_dataset(filtered: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_product_timeline_dataset(product_rows: pd.DataFrame) -> pd.DataFrame:
-    timeline = product_rows[PRODUCT_TIMELINE_COLUMNS].copy()
+    timeline = product_rows.reindex(columns=PRODUCT_TIMELINE_COLUMNS).copy()
     return timeline.sort_values("report_date", ascending=False, na_position="last")
 
 
@@ -2912,11 +2935,12 @@ def render_product_timeline_table(product_rows: pd.DataFrame) -> None:
             width="stretch",
             hide_index=True,
             column_config={
-                "report_date": st.column_config.DateColumn("Дата"),
-                "impressions": st.column_config.NumberColumn("Показы", format="%.0f"),
-                "cart_count": st.column_config.NumberColumn("Корзины", format="%.0f"),
-                "order_count": st.column_config.NumberColumn("Заказы", format="%.0f"),
-                "order_sum": st.column_config.NumberColumn("Сумма заказов", format="%.2f"),
+            "report_date": st.column_config.DateColumn("Дата"),
+            "wb_buyer_price": st.column_config.NumberColumn("Цена WB", format="%.2f"),
+            "impressions": st.column_config.NumberColumn("Показы", format="%.0f"),
+            "cart_count": st.column_config.NumberColumn("Корзины", format="%.0f"),
+            "order_count": st.column_config.NumberColumn("Заказы", format="%.0f"),
+            "order_sum": st.column_config.NumberColumn("Сумма заказов", format="%.2f"),
                 "ad_campaign_spend_total": st.column_config.NumberColumn("Расход РК по статистике", format="%.2f"),
                 "ad_atbs_total": st.column_config.NumberColumn("Корзины РК", format="%.0f"),
                 "ad_orders_total": st.column_config.NumberColumn("Заказы РК", format="%.0f"),
@@ -3017,6 +3041,7 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
     render_compact_metric_table(
         "Поиск и остатки за дату",
         [
+            ("Цена WB", detail_row.get("wb_buyer_price"), 2),
             ("Количество поисковых запросов", detail_row.get("search_queries_count"), 0),
             ("Текущий остаток", detail_row.get("current_stock_qty"), 0),
         ],
@@ -4588,8 +4613,10 @@ def main() -> None:
         st.rerun()
 
     df, data_source = load_app_dataset()
+    df = apply_display_min_date_filter(df)
     display_coverage = df.attrs.get("display_coverage")
     ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
+    ad_campaign_product_df = apply_display_min_date_filter(ad_campaign_product_df)
     render_compact_metric_css()
     st.caption(f"Источник данных: {'PostgreSQL' if data_source == 'db' else 'CSV'}")
     render_available_dates_summary(df)

@@ -11,6 +11,7 @@ from app_streamlit import (
     CHART_THRESHOLD_CPO,
     DISPLAY_COLUMNS_BY_DATE,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
+    apply_display_min_date_filter,
     apply_tracked_scope_filters,
     build_band_summary_table,
     build_category_summary_table,
@@ -65,6 +66,23 @@ def test_build_stock_warehouse_summary_card_html_uses_compact_sizes() -> None:
     assert "1.35rem" in html
     assert "0.72rem" in html
     assert "2026-06-16" in html
+
+
+def test_apply_display_min_date_filter_hides_dates_before_cutoff_and_preserves_attrs(monkeypatch) -> None:
+    monkeypatch.setenv("STREAMLIT_DISPLAY_MIN_DATE", "2026-06-07")
+    df = pd.DataFrame(
+        [
+            {"report_date": "2026-06-06", "nm_id": 1},
+            {"report_date": "2026-06-07", "nm_id": 1},
+            {"report_date": "2026-06-08", "nm_id": 2},
+        ]
+    )
+    df.attrs["display_coverage"] = pd.DataFrame([{"field": "x"}])
+
+    result = apply_display_min_date_filter(df)
+
+    assert result["report_date"].tolist() == ["2026-06-07", "2026-06-08"]
+    assert "display_coverage" in result.attrs
 
 
 def test_prepare_dataframe_builds_data_quality_status_when_missing() -> None:
@@ -985,6 +1003,37 @@ def test_build_export_dataframe_includes_wb_price_without_helper_fields() -> Non
         app_streamlit.EXPORT_COLUMN_LABELS["wb_buyer_price"],
     ]
     assert float(export_df.loc[0, app_streamlit.EXPORT_COLUMN_LABELS["wb_buyer_price"]]) == 799.0
+
+
+def test_display_columns_by_date_include_wb_price() -> None:
+    assert "wb_buyer_price" in DISPLAY_COLUMNS_BY_DATE
+
+
+def test_build_product_timeline_dataset_keeps_wb_price() -> None:
+    product_rows = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-17",
+                "wb_buyer_price": 799.0,
+                "impressions": 10,
+                "cart_count": 2,
+                "order_count": 1,
+                "order_sum": 1000.0,
+                "ad_campaign_spend_total": 50.0,
+                "ad_atbs_total": 1,
+                "ad_orders_total": 1,
+                "ad_cpo_calc": 50.0,
+                "search_queries_count": 3,
+                "current_stock_qty": 10,
+                "data_quality_status": "OK_PARTIAL_SOURCES",
+            }
+        ]
+    )
+
+    timeline = build_product_timeline_dataset(product_rows)
+
+    assert "wb_buyer_price" in timeline.columns
+    assert float(timeline.loc[0, "wb_buyer_price"]) == 799.0
 
 
 def test_prepare_dataframe_builds_human_readable_source_labels() -> None:
