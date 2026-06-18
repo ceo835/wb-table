@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from sqlalchemy.dialects import postgresql
+
 from src.db.ad_campaign_loader import (
     FACT_AD_CAMPAIGN_DAY_CONFLICT_COLUMNS,
     FACT_AD_CAMPAIGN_NM_DAY_CONFLICT_COLUMNS,
@@ -10,6 +12,7 @@ from src.db.ad_campaign_loader import (
     build_fact_ad_campaign_nm_day_db_row,
     prepare_fact_ad_campaign_day_upsert_rows,
     prepare_fact_ad_campaign_nm_day_upsert_rows,
+    replace_fact_ad_campaign_rows,
 )
 
 
@@ -185,3 +188,47 @@ def test_prepare_fact_ad_campaign_nm_day_upsert_rows_keeps_null_metrics_null():
     assert len(rows) == 1
     assert rows[0]["ad_clicks"] is None
     assert rows[0]["ad_ctr"] is None
+
+
+def test_replace_fact_ad_campaign_rows_deletes_only_requested_scope_before_upsert(monkeypatch):
+    executed_sql: list[str] = []
+    upsert_calls: list[tuple[str, list[dict[str, object]]]] = []
+
+    class FakeSession:
+        def execute(self, stmt):
+            compiled = stmt.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+            executed_sql.append(str(compiled))
+            return None
+
+    def fake_upsert_day(session, rows):
+        upsert_calls.append(("day", list(rows)))
+        return len(rows)
+
+    def fake_upsert_nm(session, rows):
+        upsert_calls.append(("nm", list(rows)))
+        return len(rows)
+
+    monkeypatch.setattr("src.db.ad_campaign_loader.upsert_fact_ad_campaign_day", fake_upsert_day)
+    monkeypatch.setattr("src.db.ad_campaign_loader.upsert_fact_ad_campaign_nm_day", fake_upsert_nm)
+
+    result = replace_fact_ad_campaign_rows(
+        FakeSession(),
+        start=date(2026, 6, 8),
+        end=date(2026, 6, 16),
+        advert_ids=[33285505, 28910104],
+        campaign_rows=[{"date": "2026-06-08", "advertId": 33285505, "row_type": "Итог кампании"}],
+        nm_rows=[{"date": "2026-06-08", "advertId": 33285505, "row_type": "Товар", "nm_id": 577510563}],
+    )
+
+    assert result == {"campaign_rows_upserted": 1, "nm_rows_upserted": 1}
+    assert len(executed_sql) == 2
+    assert "delete from fact_ad_campaign_day" in executed_sql[0].lower()
+    assert "delete from fact_ad_campaign_nm_day" in executed_sql[1].lower()
+    assert "2026-06-08" in executed_sql[0]
+    assert "2026-06-16" in executed_sql[0]
+    assert "33285505" in executed_sql[0]
+    assert "28910104" in executed_sql[0]
+    assert [name for name, _rows in upsert_calls] == ["day", "nm"]

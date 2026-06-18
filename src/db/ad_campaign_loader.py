@@ -5,7 +5,7 @@ from decimal import Decimal
 import time
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from src.db.ad_cost_loader import collect_ad_cost_rows
@@ -128,6 +128,38 @@ def prepare_fact_ad_campaign_nm_day_upsert_rows(rows: Sequence[Mapping[str, Any]
             continue
         prepared[key] = mapped
     return list(prepared.values())
+
+
+def replace_fact_ad_campaign_rows(
+    session: Session,
+    *,
+    start: date,
+    end: date,
+    advert_ids: Sequence[int],
+    campaign_rows: Sequence[Mapping[str, Any]],
+    nm_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    resolved_advert_ids = sorted({int(advert_id) for advert_id in advert_ids if advert_id is not None})
+    if resolved_advert_ids:
+        session.execute(
+            delete(FactAdCampaignDay).where(
+                FactAdCampaignDay.date >= start,
+                FactAdCampaignDay.date <= end,
+                FactAdCampaignDay.advert_id.in_(resolved_advert_ids),
+            )
+        )
+        session.execute(
+            delete(FactAdCampaignNmDay).where(
+                FactAdCampaignNmDay.date >= start,
+                FactAdCampaignNmDay.date <= end,
+                FactAdCampaignNmDay.advert_id.in_(resolved_advert_ids),
+            )
+        )
+
+    return {
+        "campaign_rows_upserted": upsert_fact_ad_campaign_day(session, campaign_rows),
+        "nm_rows_upserted": upsert_fact_ad_campaign_nm_day(session, nm_rows),
+    }
 
 
 def collect_ad_campaign_rows(
@@ -325,6 +357,7 @@ def load_ad_campaign_stats_to_db(
     end: date,
     nm_ids: Sequence[int] | None = None,
     ad_event_rows: Sequence[Mapping[str, Any]] | None = None,
+    replace_scope: bool = False,
 ) -> dict[str, Any]:
     resolved_nm_ids = _resolve_nm_ids(nm_ids)
     runner = MvpRealRun()
@@ -348,8 +381,20 @@ def load_ad_campaign_stats_to_db(
     }
 
     with session_scope() as session:
-        day_rows_upserted = upsert_fact_ad_campaign_day(session, campaign_rows)
-        nm_rows_upserted = upsert_fact_ad_campaign_nm_day(session, nm_rows)
+        if replace_scope:
+            replace_result = replace_fact_ad_campaign_rows(
+                session,
+                start=start,
+                end=end,
+                advert_ids=metadata["campaign_ids"],
+                campaign_rows=campaign_rows,
+                nm_rows=nm_rows,
+            )
+            day_rows_upserted = replace_result["campaign_rows_upserted"]
+            nm_rows_upserted = replace_result["nm_rows_upserted"]
+        else:
+            day_rows_upserted = upsert_fact_ad_campaign_day(session, campaign_rows)
+            nm_rows_upserted = upsert_fact_ad_campaign_nm_day(session, nm_rows)
         day_rows_in_db = count_fact_ad_campaign_day_rows(session, start, end)
         nm_rows_in_db = count_fact_ad_campaign_nm_day_rows(session, start, end)
         day_duplicates = count_fact_ad_campaign_day_duplicates(session, start, end)
@@ -390,4 +435,5 @@ def load_ad_campaign_stats_to_db(
         "ad_cost_status": metadata["ad_cost_status"],
         "fullstats_status": metadata["status"],
         "fullstats_requests": metadata.get("fullstats_requests", 0),
+        "replace_scope": replace_scope,
     }
