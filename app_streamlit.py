@@ -1448,8 +1448,7 @@ def build_wb_site_price_monitor_dataframe(
     )
     snapshots["price_delta_abs"] = snapshots["price_delta"].abs()
     snapshots["is_alert"] = snapshots["alert_status"].astype(str).eq(WB_SITE_PRICE_ALERT_CHANGED)
-    snapshots["is_alert"] = snapshots["is_alert"] | snapshots["price_delta_abs"].ge(50).fillna(False)
-    snapshots["alert_reason"] = snapshots["alert_status"].where(snapshots["alert_status"].notna(), pd.NA)
+    snapshots["alert_reason"] = snapshots["alert_status"].where(snapshots["is_alert"], pd.NA)
 
     def _resolve_problem_label(row: pd.Series) -> str:
         alert_status = row.get("alert_status")
@@ -1521,6 +1520,33 @@ def build_wb_site_price_monitor_dataframe(
     return display_df
 
 
+def style_wb_site_price_monitor_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    safe_df = sanitize_dataframe_for_streamlit_display(
+        df,
+        numeric_columns={"Текущая цена", "Предыдущая цена", "Изменение, ₽"},
+    )
+
+    def row_style(row: pd.Series) -> list[str]:
+        if bool(row.get("Alert")):
+            return ["background-color: #fff7ed;" for _ in row.index]
+        return ["" for _ in row.index]
+
+    def delta_style(value: object) -> str:
+        if pd.isna(value):
+            return ""
+        numeric_value = float(value)
+        if numeric_value > 0:
+            return "color: #b91c1c; font-weight: 600;"
+        if numeric_value < 0:
+            return "color: #166534; font-weight: 600;"
+        return ""
+
+    styler = safe_df.style.apply(row_style, axis=1)
+    if "Изменение, ₽" in safe_df.columns:
+        styler = styler.map(delta_style, subset=["Изменение, ₽"])
+    return styler
+
+
 def render_wb_site_price_tab(data_source: str) -> None:
     st.caption("Источник: `fact_wb_site_price_snapshot` + `fact_wb_site_price_alert`, чтение напрямую из PostgreSQL.")
     if data_source != "db":
@@ -1570,35 +1596,88 @@ def render_wb_site_price_tab(data_source: str) -> None:
         show_sellout=show_sellout,
         only_problematic=False,
     )
+    compact_columns = [
+        "Артикул WB",
+        "Название",
+        "Статус товара",
+        "Цена покупателя",
+        "Предыдущая цена",
+        "Изменение, ₽",
+        "Alert",
+        "Ссылка WB",
+    ]
+    alert_columns = [
+        "Артикул WB",
+        "Название",
+        "Цена покупателя",
+        "Предыдущая цена",
+        "Изменение, ₽",
+        "Проблема",
+        "Ссылка WB",
+    ]
+    technical_columns = [
+        "Артикул WB",
+        "Название",
+        "Статус товара",
+        "Дата snapshot",
+        "Цена покупателя",
+        "Текст цены",
+        "Источник цены",
+        "Статус загрузки",
+        "Предыдущая цена",
+        "Изменение, ₽",
+        "Абс. изменение, ₽",
+        "Alert",
+        "Причина alert",
+        "Проблема",
+        "Дата/время проверки",
+        "Ссылка WB",
+    ]
+
+    compact_df = display_df[[column for column in compact_columns if column in display_df.columns]].copy()
+    compact_df = compact_df.rename(columns={"Цена покупателя": "Текущая цена"})
+    alert_display_df = display_df[display_df["Alert"]].copy()
+    alert_display_df = alert_display_df[[column for column in alert_columns if column in alert_display_df.columns]].copy()
+    alert_display_df = alert_display_df.rename(columns={"Цена покупателя": "Текущая цена"})
+    technical_df = display_df[[column for column in technical_columns if column in display_df.columns]].copy()
+    technical_df = technical_df.rename(columns={"Цена покупателя": "Текущая цена"})
 
     st.markdown("**Все проверенные цены за дату**")
     st.dataframe(
-        display_df,
+        style_wb_site_price_monitor_table(compact_df),
         width="stretch",
         hide_index=True,
         column_config={
-            "Дата snapshot": st.column_config.DateColumn("Дата snapshot", format="DD.MM.YYYY"),
-            "Цена покупателя": st.column_config.NumberColumn("Цена покупателя", format="%.2f"),
+            "Текущая цена": st.column_config.NumberColumn("Текущая цена", format="%.2f"),
             "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
             "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
-            "Абс. изменение, ₽": st.column_config.NumberColumn("Абс. изменение, ₽", format="%.2f"),
             "Alert": st.column_config.CheckboxColumn("Alert"),
             "Ссылка WB": st.column_config.LinkColumn("Ссылка WB", display_text="Карточка WB"),
-            "Дата/время проверки": st.column_config.DatetimeColumn("Дата/время проверки", format="DD.MM.YYYY HH:mm"),
         },
     )
-    alert_display_df = display_df[display_df["Alert"]].reset_index(drop=True)
     st.markdown("**Только скачки цены / alerts**")
     if alert_display_df.empty:
         st.info("За выбранную дату скачков цены от 50 ₽ не найдено.")
     else:
         st.dataframe(
-            alert_display_df,
+            style_wb_site_price_monitor_table(alert_display_df),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Текущая цена": st.column_config.NumberColumn("Текущая цена", format="%.2f"),
+                "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
+                "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
+                "Ссылка WB": st.column_config.LinkColumn("Ссылка WB", display_text="Карточка WB"),
+            },
+        )
+    with st.expander("Показать технические детали"):
+        st.dataframe(
+            technical_df,
             width="stretch",
             hide_index=True,
             column_config={
                 "Дата snapshot": st.column_config.DateColumn("Дата snapshot", format="DD.MM.YYYY"),
-                "Цена покупателя": st.column_config.NumberColumn("Цена покупателя", format="%.2f"),
+                "Текущая цена": st.column_config.NumberColumn("Текущая цена", format="%.2f"),
                 "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
                 "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
                 "Абс. изменение, ₽": st.column_config.NumberColumn("Абс. изменение, ₽", format="%.2f"),

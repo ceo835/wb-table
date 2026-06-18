@@ -709,6 +709,50 @@ def test_build_wb_site_price_monitor_dataframe_keeps_full_snapshot_and_marks_ale
     assert float(alert_rows.iloc[0]["Абс. изменение, ₽"]) == 223.0
 
 
+def test_build_wb_site_price_monitor_dataframe_does_not_recreate_alert_without_alert_row() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_at": "2026-06-17T08:00:00+00:00",
+                "snapshot_date": "2026-06-17",
+                "nm_id": 26033523,
+                "item_label": "sample",
+                "lifecycle_status": "active",
+                "buyer_visible_price": 630.0,
+                "price_text_raw": "630 ₽",
+                "fetch_status": "success",
+                "product_url": "https://www.wildberries.ru/catalog/26033523/detail.aspx",
+            },
+            {
+                "snapshot_at": "2026-06-18T08:00:00+00:00",
+                "snapshot_date": "2026-06-18",
+                "nm_id": 26033523,
+                "item_label": "sample",
+                "lifecycle_status": "active",
+                "buyer_visible_price": 1180.0,
+                "price_text_raw": "1 180 ₽",
+                "fetch_status": "success",
+                "product_url": "https://www.wildberries.ru/catalog/26033523/detail.aspx",
+            },
+        ]
+    )
+    alert_df = pd.DataFrame(columns=["snapshot_date", "nm_id", "previous_success_price", "price_delta", "alert_status"])
+    tracked_df = pd.DataFrame([{"nm_id": 26033523, "tracked_label": "sample", "lifecycle_status": "active"}])
+
+    display_df = build_wb_site_price_monitor_dataframe(
+        snapshot_df,
+        alert_df,
+        tracked_df,
+        snapshot_date=pd.Timestamp("2026-06-18").date(),
+        show_sellout=True,
+        only_problematic=False,
+    )
+
+    assert len(display_df) == 1
+    assert bool(display_df.loc[0, "Alert"]) is False
+    assert float(display_df.loc[0, "Изменение, ₽"]) == 550.0
+
+
 def test_build_stock_warehouse_summary_metrics_counts_ok_zero_and_no_data_rows() -> None:
     product_table = pd.DataFrame(
         [
