@@ -1260,6 +1260,7 @@ def load_wb_site_price_snapshot_from_db(cache_buster: str | None = None) -> pd.D
                 "buyer_visible_price": row.buyer_visible_price,
                 "currency": row.currency,
                 "price_text_raw": row.price_text_raw,
+                "price_extract_source": row.raw_payload.get("price_extract_source") if isinstance(row.raw_payload, dict) else None,
                 "availability_status": row.availability_status,
                 "fetch_status": row.fetch_status,
                 "error": row.error,
@@ -1333,9 +1334,17 @@ def build_wb_site_price_monitor_dataframe(
                 "Артикул WB",
                 "Название",
                 "Статус товара",
+                "Дата snapshot",
                 "Цена покупателя",
+                "Текст цены",
+                "Источник цены",
+                "Статус загрузки",
                 "Предыдущая цена",
                 "Изменение, ₽",
+                "Абс. изменение, ₽",
+                "Alert",
+                "Причина alert",
+                "Ссылка WB",
                 "Проблема",
                 "Дата/время проверки",
             ]
@@ -1343,24 +1352,27 @@ def build_wb_site_price_monitor_dataframe(
 
     snapshots = snapshot_df.copy()
     snapshots["snapshot_date"] = pd.to_datetime(snapshots["snapshot_date"], errors="coerce").dt.date
-    success_history = snapshots[
+    for optional_column in ("price_text_raw", "price_extract_source", "product_url"):
+        if optional_column not in snapshots.columns:
+            snapshots[optional_column] = pd.NA
+    previous_success_history = snapshots[
         snapshots["fetch_status"].astype(str).eq("success")
         & snapshots["buyer_visible_price"].notna()
-        & snapshots["snapshot_date"].le(snapshot_date)
+        & snapshots["snapshot_date"].lt(snapshot_date)
     ].copy()
-    if not success_history.empty:
-        success_history["snapshot_at"] = pd.to_datetime(success_history["snapshot_at"], errors="coerce")
+    if not previous_success_history.empty:
+        previous_success_history["snapshot_at"] = pd.to_datetime(previous_success_history["snapshot_at"], errors="coerce")
         latest_success_by_nm = (
-            success_history.sort_values(
+            previous_success_history.sort_values(
                 by=["nm_id", "snapshot_date", "snapshot_at"],
                 ascending=[True, False, False],
                 na_position="last",
             )
             .drop_duplicates(subset=["nm_id"], keep="first")[["nm_id", "buyer_visible_price"]]
-            .rename(columns={"buyer_visible_price": "_latest_success_price"})
+            .rename(columns={"buyer_visible_price": "_previous_success_price"})
         )
     else:
-        latest_success_by_nm = pd.DataFrame(columns=["nm_id", "_latest_success_price"])
+        latest_success_by_nm = pd.DataFrame(columns=["nm_id", "_previous_success_price"])
 
     snapshots = snapshots[snapshots["snapshot_date"] == snapshot_date].copy()
     if snapshots.empty:
@@ -1369,9 +1381,17 @@ def build_wb_site_price_monitor_dataframe(
                 "Артикул WB",
                 "Название",
                 "Статус товара",
+                "Дата snapshot",
                 "Цена покупателя",
+                "Текст цены",
+                "Источник цены",
+                "Статус загрузки",
                 "Предыдущая цена",
                 "Изменение, ₽",
+                "Абс. изменение, ₽",
+                "Alert",
+                "Причина alert",
+                "Ссылка WB",
                 "Проблема",
                 "Дата/время проверки",
             ]
@@ -1417,11 +1437,27 @@ def build_wb_site_price_monitor_dataframe(
     )
     snapshots["Статус товара"] = lifecycle_raw.map(lambda value: lifecycle_label_map.get(value, "Основной"))
 
+    snapshots["previous_success_price"] = snapshots["previous_success_price"].where(
+        snapshots["previous_success_price"].notna(),
+        snapshots["_previous_success_price"],
+    )
+    calculated_delta = snapshots["buyer_visible_price"] - snapshots["previous_success_price"]
+    snapshots["price_delta"] = snapshots["price_delta"].where(
+        snapshots["price_delta"].notna(),
+        calculated_delta,
+    )
+    snapshots["price_delta_abs"] = snapshots["price_delta"].abs()
+    snapshots["is_alert"] = snapshots["alert_status"].astype(str).eq(WB_SITE_PRICE_ALERT_CHANGED)
+    snapshots["is_alert"] = snapshots["is_alert"] | snapshots["price_delta_abs"].ge(50).fillna(False)
+    snapshots["alert_reason"] = snapshots["alert_status"].where(snapshots["alert_status"].notna(), pd.NA)
+
     def _resolve_problem_label(row: pd.Series) -> str:
         alert_status = row.get("alert_status")
         fetch_status = str(row.get("fetch_status") or "")
-        if pd.notna(alert_status):
+        if pd.notna(alert_status) and str(alert_status) == WB_SITE_PRICE_ALERT_CHANGED:
             return problem_label_map.get(str(alert_status), "Ошибка проверки")
+        if bool(row.get("is_alert")):
+            return problem_label_map[WB_SITE_PRICE_ALERT_CHANGED]
         if fetch_status == "success":
             return problem_label_map[WB_SITE_PRICE_ALERT_OK]
         if fetch_status == "wb_interstitial":
@@ -1431,10 +1467,6 @@ def build_wb_site_price_monitor_dataframe(
         return problem_label_map[WB_SITE_PRICE_ALERT_FAILED]
 
     snapshots["Проблема"] = snapshots.apply(_resolve_problem_label, axis=1)
-    snapshots["buyer_visible_price"] = snapshots["buyer_visible_price"].where(
-        snapshots["buyer_visible_price"].notna(),
-        snapshots["_latest_success_price"],
-    )
     snapshots["Дата/время проверки"] = pd.to_datetime(snapshots["snapshot_at"], errors="coerce")
     snapshots["_problem_priority"] = snapshots["Проблема"].map(lambda value: problem_priority.get(str(value), 99))
     snapshots["_lifecycle_priority"] = snapshots["Статус товара"].map(lambda value: lifecycle_priority.get(str(value), 99))
@@ -1442,7 +1474,7 @@ def build_wb_site_price_monitor_dataframe(
     if not show_sellout:
         snapshots = snapshots[snapshots["Статус товара"].ne("Распродажа")].copy()
     if only_problematic:
-        snapshots = snapshots[snapshots["Проблема"].ne(problem_label_map[WB_SITE_PRICE_ALERT_OK])].copy()
+        snapshots = snapshots[snapshots["is_alert"] | snapshots["Проблема"].ne(problem_label_map[WB_SITE_PRICE_ALERT_OK])].copy()
 
     snapshots = snapshots.sort_values(
         by=["_lifecycle_priority", "_problem_priority", "Название", "nm_id"],
@@ -1453,18 +1485,34 @@ def build_wb_site_price_monitor_dataframe(
     display_df = snapshots.rename(
         columns={
             "nm_id": "Артикул WB",
+            "snapshot_date": "Дата snapshot",
             "buyer_visible_price": "Цена покупателя",
+            "price_text_raw": "Текст цены",
+            "price_extract_source": "Источник цены",
+            "fetch_status": "Статус загрузки",
             "previous_success_price": "Предыдущая цена",
             "price_delta": "Изменение, ₽",
+            "price_delta_abs": "Абс. изменение, ₽",
+            "is_alert": "Alert",
+            "alert_reason": "Причина alert",
+            "product_url": "Ссылка WB",
         }
     )[
         [
             "Артикул WB",
             "Название",
             "Статус товара",
+            "Дата snapshot",
             "Цена покупателя",
+            "Текст цены",
+            "Источник цены",
+            "Статус загрузки",
             "Предыдущая цена",
             "Изменение, ₽",
+            "Абс. изменение, ₽",
+            "Alert",
+            "Причина alert",
+            "Ссылка WB",
             "Проблема",
             "Дата/время проверки",
         ]
@@ -1493,9 +1541,8 @@ def render_wb_site_price_tab(data_source: str) -> None:
 
     tracked_df = load_tracked_products()
     selected_snapshot_date = st.selectbox("Дата проверки цен", options=snapshot_dates, index=len(snapshot_dates) - 1)
-    filter_cols = st.columns(2)
+    filter_cols = st.columns(1)
     show_sellout = filter_cols[0].checkbox("Показывать распродажные товары", value=True, key="wb_site_price_show_sellout")
-    only_problematic = filter_cols[1].checkbox("Показывать только проблемные товары", value=False, key="wb_site_price_only_problematic")
 
     current_snapshot = snapshot_df.copy()
     current_snapshot["snapshot_date"] = pd.to_datetime(current_snapshot["snapshot_date"], errors="coerce").dt.date
@@ -1521,19 +1568,45 @@ def render_wb_site_price_tab(data_source: str) -> None:
         tracked_df,
         snapshot_date=selected_snapshot_date,
         show_sellout=show_sellout,
-        only_problematic=only_problematic,
+        only_problematic=False,
     )
+
+    st.markdown("**Все проверенные цены за дату**")
     st.dataframe(
         display_df,
         width="stretch",
         hide_index=True,
         column_config={
+            "Дата snapshot": st.column_config.DateColumn("Дата snapshot", format="DD.MM.YYYY"),
             "Цена покупателя": st.column_config.NumberColumn("Цена покупателя", format="%.2f"),
             "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
             "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
+            "Абс. изменение, ₽": st.column_config.NumberColumn("Абс. изменение, ₽", format="%.2f"),
+            "Alert": st.column_config.CheckboxColumn("Alert"),
+            "Ссылка WB": st.column_config.LinkColumn("Ссылка WB", display_text="Карточка WB"),
             "Дата/время проверки": st.column_config.DatetimeColumn("Дата/время проверки", format="DD.MM.YYYY HH:mm"),
         },
     )
+    alert_display_df = display_df[display_df["Alert"]].reset_index(drop=True)
+    st.markdown("**Только скачки цены / alerts**")
+    if alert_display_df.empty:
+        st.info("За выбранную дату скачков цены от 50 ₽ не найдено.")
+    else:
+        st.dataframe(
+            alert_display_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Дата snapshot": st.column_config.DateColumn("Дата snapshot", format="DD.MM.YYYY"),
+                "Цена покупателя": st.column_config.NumberColumn("Цена покупателя", format="%.2f"),
+                "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
+                "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
+                "Абс. изменение, ₽": st.column_config.NumberColumn("Абс. изменение, ₽", format="%.2f"),
+                "Alert": st.column_config.CheckboxColumn("Alert"),
+                "Ссылка WB": st.column_config.LinkColumn("Ссылка WB", display_text="Карточка WB"),
+                "Дата/время проверки": st.column_config.DatetimeColumn("Дата/время проверки", format="DD.MM.YYYY HH:mm"),
+            },
+        )
 
 
 @st.cache_data(show_spinner=False)

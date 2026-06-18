@@ -578,7 +578,7 @@ def test_build_wb_site_price_monitor_dataframe_uses_russian_problem_labels() -> 
     assert display_df.loc[1, "Статус товара"] == "Распродажа"
 
 
-def test_build_wb_site_price_monitor_dataframe_falls_back_to_last_successful_price_for_interstitial() -> None:
+def test_build_wb_site_price_monitor_dataframe_keeps_current_price_empty_for_interstitial() -> None:
     snapshot_df = pd.DataFrame(
         [
             {
@@ -617,9 +617,96 @@ def test_build_wb_site_price_monitor_dataframe_falls_back_to_last_successful_pri
         only_problematic=False,
     )
 
-    assert float(display_df.loc[0, "Цена покупателя"]) == 799.0
-    assert pd.isna(display_df.loc[0, "Предыдущая цена"])
+    assert pd.isna(display_df.loc[0, "Цена покупателя"])
+    assert float(display_df.loc[0, "Предыдущая цена"]) == 799.0
     assert display_df.loc[0, "Проблема"] == "WB временно не отдал карточку"
+
+
+def test_build_wb_site_price_monitor_dataframe_keeps_full_snapshot_and_marks_alert_subset() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_at": "2026-06-18T08:00:00+00:00",
+                "snapshot_date": "2026-06-18",
+                "nm_id": 91470767,
+                "item_label": "avokadogirl",
+                "lifecycle_status": "active",
+                "buyer_visible_price": 1022.0,
+                "price_text_raw": "1 022 ₽",
+                "fetch_status": "success",
+                "product_url": "https://www.wildberries.ru/catalog/91470767/detail.aspx",
+            },
+            {
+                "snapshot_at": "2026-06-18T08:01:00+00:00",
+                "snapshot_date": "2026-06-18",
+                "nm_id": 91744473,
+                "item_label": "Мишки дети",
+                "lifecycle_status": "active",
+                "buyer_visible_price": 880.0,
+                "price_text_raw": "880 ₽",
+                "fetch_status": "success",
+                "product_url": "https://www.wildberries.ru/catalog/91744473/detail.aspx",
+            },
+            {
+                "snapshot_at": "2026-06-17T08:00:00+00:00",
+                "snapshot_date": "2026-06-17",
+                "nm_id": 91470767,
+                "item_label": "avokadogirl",
+                "lifecycle_status": "active",
+                "buyer_visible_price": 799.0,
+                "price_text_raw": "799 ₽",
+                "fetch_status": "success",
+                "product_url": "https://www.wildberries.ru/catalog/91470767/detail.aspx",
+            },
+            {
+                "snapshot_at": "2026-06-17T08:01:00+00:00",
+                "snapshot_date": "2026-06-17",
+                "nm_id": 91744473,
+                "item_label": "Мишки дети",
+                "lifecycle_status": "active",
+                "buyer_visible_price": 880.0,
+                "price_text_raw": "880 ₽",
+                "fetch_status": "success",
+                "product_url": "https://www.wildberries.ru/catalog/91744473/detail.aspx",
+            },
+        ]
+    )
+    alert_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-18",
+                "nm_id": 91470767,
+                "previous_success_price": 799.0,
+                "price_delta": 223.0,
+                "alert_status": "PRICE_CHANGED_50",
+            }
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 91470767, "tracked_label": "avokadogirl", "lifecycle_status": "active"},
+            {"nm_id": 91744473, "tracked_label": "Мишки дети", "lifecycle_status": "active"},
+        ]
+    )
+
+    display_df = build_wb_site_price_monitor_dataframe(
+        snapshot_df,
+        alert_df,
+        tracked_df,
+        snapshot_date=pd.Timestamp("2026-06-18").date(),
+        show_sellout=True,
+        only_problematic=False,
+    )
+
+    assert len(display_df) == 2
+    assert set(display_df["Артикул WB"]) == {91470767, 91744473}
+    assert int(display_df["Alert"].sum()) == 1
+    alert_rows = display_df[display_df["Alert"]]
+    assert len(alert_rows) == 1
+    assert int(alert_rows.iloc[0]["Артикул WB"]) == 91470767
+    assert float(alert_rows.iloc[0]["Цена покупателя"]) == 1022.0
+    assert float(alert_rows.iloc[0]["Предыдущая цена"]) == 799.0
+    assert float(alert_rows.iloc[0]["Абс. изменение, ₽"]) == 223.0
 
 
 def test_build_stock_warehouse_summary_metrics_counts_ok_zero_and_no_data_rows() -> None:
