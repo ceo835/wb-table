@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from html import escape
+import logging
 import os
 import tempfile
 from datetime import date, datetime, timedelta
@@ -12,7 +13,7 @@ from urllib.parse import urlsplit
 import altair as alt
 import pandas as pd
 import streamlit as st
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.ad_campaign_product_dataset import (
     AD_CAMPAIGN_PRODUCT_COLUMNS,
@@ -47,6 +48,8 @@ from src.tracked_products import (
     apply_tracked_products as shared_apply_tracked_products,
     load_tracked_products,
 )
+
+logger = logging.getLogger(__name__)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -840,6 +843,14 @@ def get_db_dataset_cache_buster() -> str:
     return "|".join("" if value is None else str(value) for value in (*mart_state, *price_state, *alert_state))
 
 
+def resolve_db_dataset_cache_buster() -> str | None:
+    try:
+        return get_db_dataset_cache_buster()
+    except Exception:
+        logger.exception("Failed to build DB dataset cache-buster")
+        return None
+
+
 def resolve_data_source() -> str:
     explicit_source = os.getenv("STREAMLIT_DATA_SOURCE")
     if explicit_source:
@@ -1156,11 +1167,13 @@ def load_app_dataset() -> tuple[pd.DataFrame, str]:
             st.error("DB mode включён, но DATABASE_URL не задан. Переключите STREAMLIT_DATA_SOURCE=csv.")
             st.stop()
         try:
-            df = prepare_dataframe(load_dataset_from_db(get_db_dataset_cache_buster()))
+            cache_buster = resolve_db_dataset_cache_buster()
+            df = prepare_dataframe(load_dataset_from_db(cache_buster))
         except Exception as exc:
+            logger.exception("Failed to load Streamlit dataset from PostgreSQL")
             st.error(
                 "Не удалось загрузить данные из PostgreSQL. "
-                "Проверьте DATABASE_URL или переключите STREAMLIT_DATA_SOURCE=csv."
+                "Подробный traceback записан в server logs."
             )
             st.caption(f"DB error: {exc.__class__.__name__}")
             st.stop()
@@ -1466,7 +1479,7 @@ def render_wb_site_price_tab(data_source: str) -> None:
         st.info("Мониторинг цен WB доступен только в режиме PostgreSQL.")
         return
 
-    cache_buster = get_db_dataset_cache_buster()
+    cache_buster = resolve_db_dataset_cache_buster()
     snapshot_df = load_wb_site_price_snapshot_from_db(cache_buster)
     alert_df = load_wb_site_price_alert_from_db(cache_buster)
     if snapshot_df.empty:

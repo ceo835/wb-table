@@ -207,6 +207,40 @@ def test_load_app_dataset_db_uses_cache_buster_for_db_loader(monkeypatch) -> Non
     assert len(df) == 1
 
 
+def test_resolve_db_dataset_cache_buster_returns_none_on_failure(monkeypatch) -> None:
+    logged: list[str] = []
+
+    def raise_error() -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app_streamlit, "get_db_dataset_cache_buster", raise_error)
+    monkeypatch.setattr(app_streamlit.logger, "exception", lambda message: logged.append(message))
+
+    assert app_streamlit.resolve_db_dataset_cache_buster() is None
+    assert logged == ["Failed to build DB dataset cache-buster"]
+
+
+def test_load_app_dataset_db_falls_back_when_cache_buster_raises(monkeypatch) -> None:
+    monkeypatch.setenv("STREAMLIT_DATA_SOURCE", "db")
+    monkeypatch.setattr(app_streamlit.settings, "database_url", "postgresql://example")
+    monkeypatch.setattr(app_streamlit, "resolve_db_dataset_cache_buster", lambda: None)
+
+    calls: list[str | None] = []
+
+    def fake_load_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+        calls.append(cache_buster)
+        return pd.DataFrame([{"report_date": "2026-06-18", "nm_id": 1, "has_funnel": True}])
+
+    monkeypatch.setattr(app_streamlit, "load_dataset_from_db", fake_load_dataset_from_db)
+    monkeypatch.setattr(app_streamlit, "prepare_dataframe", lambda df: df)
+
+    df, source = app_streamlit.load_app_dataset()
+
+    assert source == "db"
+    assert calls == [None]
+    assert len(df) == 1
+
+
 def test_build_stock_warehouse_product_table_aggregates_chrt_rows_and_keeps_missing_tracked_products() -> None:
     snapshot_df = pd.DataFrame(
         [
