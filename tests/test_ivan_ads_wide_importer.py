@@ -9,6 +9,7 @@ import pytest
 from src.importers.ivan_ads_wide_importer import (
     IVAN_ADS_WIDE_DATA_STATUS,
     IVAN_ADS_WIDE_IMPORT_SOURCE,
+    apply_ivan_ads_wide_import,
     build_ivan_ads_wide_audit_summary,
     build_ivan_ads_wide_import_dry_run_summary,
     build_ivan_ads_wide_duplicate_report,
@@ -345,3 +346,46 @@ def test_write_ivan_ads_wide_skipped_conflicts_report_writes_only_conflicting_ro
     assert len(rows) == 3
     assert "222222" in rows[1]
     assert "222222" in rows[2]
+
+
+def test_apply_ivan_ads_wide_import_uses_key_readback_instead_of_negative_rowcount(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_path = _write_cp1251_csv(
+        tmp_path / "ivan_ads_wide_apply_summary.csv",
+        [
+            HEADER,
+            '2026-06-18,111111,100,5,"5,00%","20,00",1000,100,,,,,,,,',
+            '2026-06-18,222222,200,6,"6,00%","30,00",2000,120,,,,,,,,',
+        ],
+    )
+    parsed = parse_ivan_ads_wide_csv(file_path)
+
+    class _DummySession:
+        pass
+
+    @contextmanager
+    def _dummy_session_scope():
+        yield _DummySession()
+
+    requested_keys = {(row["date"], int(row["nm_id"]), str(row["campaign_ref"])) for row in parsed.rows_long}
+    existing_before = {next(iter(requested_keys))}
+    state = {"call_index": 0}
+
+    def _fake_load_existing(_session, _rows):
+        state["call_index"] += 1
+        if state["call_index"] in (1, 2):
+            return existing_before
+        return requested_keys
+
+    monkeypatch.setattr("src.importers.ivan_ads_wide_importer.session_scope", _dummy_session_scope)
+    monkeypatch.setattr("src.importers.ivan_ads_wide_importer._load_existing_ads_wide_keys", _fake_load_existing)
+    monkeypatch.setattr("src.importers.ivan_ads_wide_importer._upsert_fact_ivan_ads_wide_rows", lambda session, rows: -13)
+
+    summary = apply_ivan_ads_wide_import(parsed)
+
+    assert summary["write_executed"] is True
+    assert summary["rows_inserted"] == 1
+    assert summary["rows_updated"] == 1
+    assert summary["rows_upserted"] == 2

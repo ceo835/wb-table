@@ -911,8 +911,21 @@ def apply_ivan_ads_wide_import(
     with session_scope() as session:
         loaded_at = datetime.now(timezone.utc)
         insert_rows = [_build_insert_row(row, loaded_at=loaded_at) for row in prepared_rows["rows_selected"]]
-        rows_upserted = _upsert_fact_ivan_ads_wide_rows(session, insert_rows)
+        existing_keys_before = _load_existing_ads_wide_keys(session, prepared_rows["rows_selected"])
+        _upsert_fact_ivan_ads_wide_rows(session, insert_rows)
+        existing_keys_after = _load_existing_ads_wide_keys(session, prepared_rows["rows_selected"])
+        if len(existing_keys_after) != len(prepared_rows["rows_selected"]):
+            raise RuntimeError(
+                "fact_ivan_ads_wide_day read-back mismatch after upsert: "
+                f"expected {len(prepared_rows['rows_selected'])} keys, got {len(existing_keys_after)}"
+            )
+
+    rows_updated = len(existing_keys_before)
+    rows_inserted = len(existing_keys_after - existing_keys_before)
+    rows_upserted = rows_inserted + rows_updated
 
     summary["write_executed"] = True
+    summary["rows_inserted"] = rows_inserted
+    summary["rows_updated"] = rows_updated
     summary["rows_upserted"] = rows_upserted
     return summary
