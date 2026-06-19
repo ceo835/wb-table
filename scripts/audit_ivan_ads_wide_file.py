@@ -14,7 +14,11 @@ if str(SRC_DIR) not in sys.path:
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.importers.ivan_ads_wide_importer import build_ivan_ads_wide_audit_summary, parse_ivan_ads_wide_csv
+from src.importers.ivan_ads_wide_importer import (
+    build_ivan_ads_wide_audit_summary,
+    parse_ivan_ads_wide_csv,
+    write_ivan_ads_wide_duplicate_report,
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -29,6 +33,7 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     parsed = parse_ivan_ads_wide_csv(args.file)
     summary = build_ivan_ads_wide_audit_summary(parsed)
+    summary["duplicate_report_path"] = str(write_ivan_ads_wide_duplicate_report(parsed))
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
     return 0
 

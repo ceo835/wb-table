@@ -210,11 +210,22 @@ def test_build_ivan_ads_wide_duplicate_report_separates_exact_and_conflicting_gr
     assert report["top_dates_with_duplicates"][0]["date"] == "2026-06-18"
     assert report["top_nm_ids_with_duplicates"][0]["nm_id"] == 111111
     assert report["top_campaign_refs_with_duplicates"][0]["campaign_ref"] == "section_1_group_1"
+    assert report["candidate_key_expansion_analysis"]["date+nm_id+campaign_ref+source_section"]["remaining_conflicting_duplicate_keys"] == 1
 
-    exact_row = next(row for row in report["duplicate_rows"] if row["nm_id"] == 111111)
-    conflicting_row = next(row for row in report["duplicate_rows"] if row["nm_id"] == 222222)
-    assert exact_row["rows_identical"] is True
-    assert conflicting_row["rows_identical"] is False
+    exact_group = next(row for row in report["duplicate_groups"] if row["nm_id"] == 111111)
+    conflicting_group = next(row for row in report["duplicate_groups"] if row["nm_id"] == 222222)
+    assert exact_group["rows_identical"] is True
+    assert conflicting_group["rows_identical"] is False
+
+    conflicting_source_rows = [row for row in report["duplicate_rows"] if row["nm_id"] == 222222]
+    assert len(conflicting_source_rows) == 2
+    assert conflicting_source_rows[0]["source_row_number"] == 4
+    assert conflicting_source_rows[1]["source_row_number"] == 5
+    assert conflicting_source_rows[0]["source_section"] == 1
+    assert conflicting_source_rows[0]["source_group_index"] == 1
+    assert conflicting_source_rows[0]["source_column_start"] == 2
+    assert conflicting_source_rows[0]["raw_nm_id"] == "222222"
+    assert conflicting_source_rows[0]["raw_values_json"] is not None
 
 
 def test_build_ivan_ads_wide_import_dry_run_summary_dedupe_exact_drops_only_exact_duplicates(

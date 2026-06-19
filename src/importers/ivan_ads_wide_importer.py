@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -21,6 +22,7 @@ CSV_CANDIDATE_DELIMITERS = ",;\t"
 IVAN_ADS_WIDE_IMPORT_SOURCE = "IVAN_ADS_WIDE_IMPORT"
 IVAN_ADS_WIDE_DATA_STATUS = "MANUAL_UPLOAD"
 TARGET_TABLE_NAME = "fact_ivan_ads_wide_day"
+DEFAULT_DUPLICATE_REPORT_DIR = Path("data/manual_imports/ivan_ads_wide/reports")
 DATE_HEADER = "Дата"
 GLOBAL_NM_ID_HEADER = "Артикул WB"
 GROUP_ARTICLE_ALIASES = ("Артикул WB", "Артикул")
@@ -34,6 +36,36 @@ GROUP_METRIC_HEADERS: tuple[tuple[str, str], ...] = (
     ("ad_cpm", "CPM"),
 )
 AD_METRIC_FIELDS = tuple(field_name for field_name, _header in GROUP_METRIC_HEADERS)
+DUPLICATE_REPORT_COLUMNS = (
+    "date",
+    "nm_id",
+    "supplier_article",
+    "campaign_ref",
+    "duplicate_count",
+    "ad_spend",
+    "ad_atbs",
+    "ad_cart_ctr",
+    "ad_cost_per_cart",
+    "ad_views",
+    "ad_cpm",
+    "ad_spend_values",
+    "ad_atbs_values",
+    "ad_cart_ctr_values",
+    "ad_cost_per_cart_values",
+    "ad_views_values",
+    "ad_cpm_values",
+    "rows_identical",
+    "source_row_number",
+    "source_section",
+    "source_group_index",
+    "source_column_start",
+    "raw_campaign_header",
+    "raw_archive_header",
+    "raw_date",
+    "raw_nm_id",
+    "raw_supplier_article",
+    "raw_values_json",
+)
 
 
 @dataclass(frozen=True)
@@ -214,6 +246,242 @@ def _build_duplicate_examples(rows_long: tuple[dict[str, Any], ...]) -> tuple[in
     return duplicate_key_count, tuple(examples)
 
 
+def _normalize_dedupe_mode(dedupe_mode: str | None) -> str | None:
+    if dedupe_mode is None:
+        return None
+    normalized = dedupe_mode.strip().lower()
+    if normalized != "exact":
+        raise ValueError(f"Unsupported dedupe mode: {dedupe_mode}")
+    return normalized
+
+
+def _serialize_decimal_list(rows: list[dict[str, Any]], field_name: str) -> str:
+    values: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        value = row.get(field_name)
+        serialized = "null" if value is None else format(value, "f") if isinstance(value, Decimal) else str(value)
+        if serialized in seen:
+            continue
+        seen.add(serialized)
+        values.append(serialized)
+    return " | ".join(values)
+
+
+def _serialize_scalar(value: Any) -> Any:
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    return value
+
+
+def _build_raw_values_json(
+    *,
+    group_definition: WideGroupDefinition,
+    row_values: list[Any],
+    raw_headers: tuple[str, ...],
+) -> str:
+    payload: dict[str, Any] = {
+        "article_cell": row_values[group_definition.article_column_index] if group_definition.article_column_index < len(row_values) else None,
+        "metric_cells": {},
+    }
+    for field_name, metric_index in group_definition.metric_column_indexes.items():
+        payload["metric_cells"][field_name] = {
+            "header": raw_headers[metric_index] if metric_index < len(raw_headers) else None,
+            "value": row_values[metric_index] if metric_index < len(row_values) else None,
+        }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _duplicate_exact_signature(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("supplier_article"),
+        row.get("title"),
+        row.get("campaign_name"),
+        *(row.get(field_name) for field_name in AD_METRIC_FIELDS),
+    )
+
+
+def _group_rows_by_duplicate_key(
+    rows_long: tuple[dict[str, Any], ...],
+) -> dict[tuple[date, int, str], list[tuple[int, dict[str, Any]]]]:
+    groups: dict[tuple[date, int, str], list[tuple[int, dict[str, Any]]]] = {}
+    for index, row in enumerate(rows_long):
+        key = (row["date"], int(row["nm_id"]), str(row["campaign_ref"]))
+        groups.setdefault(key, []).append((index, row))
+    return {key: grouped_rows for key, grouped_rows in groups.items() if len(grouped_rows) > 1}
+
+
+def _build_candidate_key_expansion_analysis(
+    duplicate_groups: dict[tuple[date, int, str], list[tuple[int, dict[str, Any]]]],
+) -> dict[str, dict[str, int]]:
+    candidate_fields = (
+        ("date+nm_id+campaign_ref+source_section", ("source_section",)),
+        ("date+nm_id+campaign_ref+source_group_index", ("source_group_index",)),
+        ("date+nm_id+campaign_ref+source_column_start", ("source_column_start",)),
+        ("date+nm_id+campaign_ref+raw_campaign_header", ("raw_campaign_header",)),
+        ("date+nm_id+campaign_ref+raw_archive_header", ("raw_archive_header",)),
+        (
+            "date+nm_id+campaign_ref+source_section+source_group_index+source_column_start",
+            ("source_section", "source_group_index", "source_column_start"),
+        ),
+    )
+    analysis: dict[str, dict[str, int]] = {}
+    for label, fields in candidate_fields:
+        remaining_conflicting = 0
+        remaining_duplicate = 0
+        for grouped_rows in duplicate_groups.values():
+            expanded: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+            for _index, row in grouped_rows:
+                suffix_key = tuple(row.get(field_name) for field_name in fields)
+                expanded.setdefault(suffix_key, []).append(row)
+            subgroup_duplicates = [rows for rows in expanded.values() if len(rows) > 1]
+            if subgroup_duplicates:
+                remaining_duplicate += 1
+            if any(len({_duplicate_exact_signature(row) for row in rows}) > 1 for rows in subgroup_duplicates):
+                remaining_conflicting += 1
+        analysis[label] = {
+            "remaining_duplicate_keys": remaining_duplicate,
+            "remaining_conflicting_duplicate_keys": remaining_conflicting,
+        }
+    return analysis
+
+
+def build_ivan_ads_wide_duplicate_report(parsed: ParsedIvanAdsWideCsv) -> dict[str, Any]:
+    duplicate_groups = _group_rows_by_duplicate_key(parsed.rows_long)
+    top_dates: Counter[str] = Counter()
+    top_nm_ids: Counter[int] = Counter()
+    top_campaign_refs: Counter[str] = Counter()
+    duplicate_group_rows: list[dict[str, Any]] = []
+    duplicate_source_rows: list[dict[str, Any]] = []
+    exact_key_count = 0
+    conflicting_key_count = 0
+    duplicate_extra_row_count = 0
+
+    for (row_date, nm_id, campaign_ref), grouped_rows in sorted(
+        duplicate_groups.items(),
+        key=lambda item: (item[0][0], item[0][1], item[0][2]),
+    ):
+        rows_only = [row for _index, row in grouped_rows]
+        rows_identical = len({_duplicate_exact_signature(row) for row in rows_only}) == 1
+        if rows_identical:
+            exact_key_count += 1
+        else:
+            conflicting_key_count += 1
+        duplicate_extra_row_count += len(rows_only) - 1
+        top_dates[row_date.isoformat()] += 1
+        top_nm_ids[nm_id] += 1
+        top_campaign_refs[campaign_ref] += 1
+        group_summary = {
+            "date": row_date.isoformat(),
+            "nm_id": nm_id,
+            "supplier_article": next((row.get("supplier_article") for row in rows_only if row.get("supplier_article")), None),
+            "campaign_ref": campaign_ref,
+            "duplicate_count": len(rows_only),
+            "ad_spend_values": _serialize_decimal_list(rows_only, "ad_spend"),
+            "ad_atbs_values": _serialize_decimal_list(rows_only, "ad_atbs"),
+            "ad_cart_ctr_values": _serialize_decimal_list(rows_only, "ad_cart_ctr"),
+            "ad_cost_per_cart_values": _serialize_decimal_list(rows_only, "ad_cost_per_cart"),
+            "ad_views_values": _serialize_decimal_list(rows_only, "ad_views"),
+            "ad_cpm_values": _serialize_decimal_list(rows_only, "ad_cpm"),
+            "rows_identical": rows_identical,
+        }
+        duplicate_group_rows.append(group_summary)
+        for _index, row in grouped_rows:
+            duplicate_source_rows.append(
+                {
+                    **group_summary,
+                    "ad_spend": _serialize_scalar(row.get("ad_spend")),
+                    "ad_atbs": _serialize_scalar(row.get("ad_atbs")),
+                    "ad_cart_ctr": _serialize_scalar(row.get("ad_cart_ctr")),
+                    "ad_cost_per_cart": _serialize_scalar(row.get("ad_cost_per_cart")),
+                    "ad_views": _serialize_scalar(row.get("ad_views")),
+                    "ad_cpm": _serialize_scalar(row.get("ad_cpm")),
+                    "source_row_number": row.get("source_row_number"),
+                    "source_section": row.get("source_section"),
+                    "source_group_index": row.get("source_group_index"),
+                    "source_column_start": row.get("source_column_start"),
+                    "raw_campaign_header": row.get("raw_campaign_header"),
+                    "raw_archive_header": row.get("raw_archive_header"),
+                    "raw_date": row.get("raw_date"),
+                    "raw_nm_id": row.get("raw_nm_id"),
+                    "raw_supplier_article": row.get("raw_supplier_article"),
+                    "raw_values_json": row.get("raw_values_json"),
+                }
+            )
+
+    return {
+        "duplicate_key_count": len(duplicate_group_rows),
+        "duplicate_exact_key_count": exact_key_count,
+        "duplicate_conflicting_key_count": conflicting_key_count,
+        "duplicate_extra_row_count": duplicate_extra_row_count,
+        "top_dates_with_duplicates": [
+            {"date": duplicate_date, "duplicate_keys": count}
+            for duplicate_date, count in top_dates.most_common(10)
+        ],
+        "top_nm_ids_with_duplicates": [
+            {"nm_id": duplicate_nm_id, "duplicate_keys": count}
+            for duplicate_nm_id, count in top_nm_ids.most_common(10)
+        ],
+        "top_campaign_refs_with_duplicates": [
+            {"campaign_ref": duplicate_campaign_ref, "duplicate_keys": count}
+            for duplicate_campaign_ref, count in top_campaign_refs.most_common(10)
+        ],
+        "candidate_key_expansion_analysis": _build_candidate_key_expansion_analysis(duplicate_groups),
+        "duplicate_examples": duplicate_group_rows[:30],
+        "duplicate_groups": duplicate_group_rows,
+        "duplicate_rows": duplicate_source_rows,
+    }
+
+
+def write_ivan_ads_wide_duplicate_report(
+    parsed: ParsedIvanAdsWideCsv,
+    *,
+    output_path: str | Path | None = None,
+) -> Path:
+    duplicate_report = build_ivan_ads_wide_duplicate_report(parsed)
+    report_path = Path(output_path) if output_path is not None else (
+        DEFAULT_DUPLICATE_REPORT_DIR / f"ivan_ads_wide_duplicates_{date.today().isoformat()}.csv"
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with report_path.open("w", encoding="utf-8", newline="") as file_handle:
+        writer = csv.DictWriter(file_handle, fieldnames=DUPLICATE_REPORT_COLUMNS)
+        writer.writeheader()
+        for row in duplicate_report["duplicate_rows"]:
+            writer.writerow({column: row.get(column) for column in DUPLICATE_REPORT_COLUMNS})
+    return report_path
+
+
+def _prepare_rows_for_import(
+    parsed: ParsedIvanAdsWideCsv,
+    *,
+    dedupe_mode: str | None,
+) -> dict[str, Any]:
+    normalized_dedupe_mode = _normalize_dedupe_mode(dedupe_mode)
+    duplicate_groups = _group_rows_by_duplicate_key(parsed.rows_long)
+    exact_duplicate_indexes_to_drop: set[int] = set()
+    conflicting_duplicate_key_count = 0
+
+    for grouped_rows in duplicate_groups.values():
+        rows_only = [row for _index, row in grouped_rows]
+        if len({_duplicate_exact_signature(row) for row in rows_only}) == 1:
+            if normalized_dedupe_mode == "exact":
+                exact_duplicate_indexes_to_drop.update(index for index, _row in grouped_rows[1:])
+        else:
+            conflicting_duplicate_key_count += 1
+
+    selected_rows = tuple(
+        row for index, row in enumerate(parsed.rows_long) if index not in exact_duplicate_indexes_to_drop
+    )
+    return {
+        "dedupe_mode": normalized_dedupe_mode,
+        "rows_selected": selected_rows,
+        "rows_dropped_by_exact_dedupe": len(exact_duplicate_indexes_to_drop),
+        "conflicting_duplicate_key_count": conflicting_duplicate_key_count,
+    }
+
+
 def parse_ivan_ads_wide_csv(file_path: str | Path) -> ParsedIvanAdsWideCsv:
     resolved_path = Path(file_path)
     encoding, delimiter = _detect_csv_format(resolved_path)
@@ -233,7 +501,8 @@ def parse_ivan_ads_wide_csv(file_path: str | Path) -> ParsedIvanAdsWideCsv:
     rows_long: list[dict[str, Any]] = []
     rows_read = 0
     section_index = 1
-    for raw_row in rows[1:]:
+    current_archive_header: str | None = None
+    for source_row_number, raw_row in enumerate(rows[1:], start=2):
         if not any(_parse_text(cell) is not None for cell in raw_row):
             continue
         if _is_header_row(raw_row):
@@ -241,6 +510,8 @@ def parse_ivan_ads_wide_csv(file_path: str | Path) -> ParsedIvanAdsWideCsv:
             continue
         row_date = _parse_date(raw_row[0] if raw_row else None)
         if row_date is None:
+            non_empty_cells = [_parse_text(cell) for cell in raw_row]
+            current_archive_header = " | ".join(cell for cell in non_empty_cells if cell) or current_archive_header
             continue
         rows_read += 1
         row_values = list(raw_row)
@@ -260,6 +531,20 @@ def parse_ivan_ads_wide_csv(file_path: str | Path) -> ParsedIvanAdsWideCsv:
                 "data_status": IVAN_ADS_WIDE_DATA_STATUS,
                 "source_status": IVAN_ADS_WIDE_IMPORT_SOURCE,
                 "source_file_name": resolved_path.name,
+                "source_row_number": source_row_number,
+                "source_section": section_index,
+                "source_group_index": group_definition.group_index,
+                "source_column_start": group_definition.article_column_index + 1,
+                "raw_campaign_header": raw_headers[group_definition.article_column_index] if group_definition.article_column_index < len(raw_headers) else None,
+                "raw_archive_header": current_archive_header,
+                "raw_date": row_values[0] if row_values else None,
+                "raw_nm_id": row_values[group_definition.article_column_index] if group_definition.article_column_index < len(row_values) else None,
+                "raw_supplier_article": None,
+                "raw_values_json": _build_raw_values_json(
+                    group_definition=group_definition,
+                    row_values=row_values,
+                    raw_headers=tuple(raw_headers),
+                ),
             }
             for field_name, metric_index in group_definition.metric_column_indexes.items():
                 cell_value = row_values[metric_index] if metric_index < len(row_values) else None
@@ -290,6 +575,7 @@ def parse_ivan_ads_wide_csv(file_path: str | Path) -> ParsedIvanAdsWideCsv:
 
 
 def build_ivan_ads_wide_audit_summary(parsed: ParsedIvanAdsWideCsv) -> dict[str, Any]:
+    duplicate_report = build_ivan_ads_wide_duplicate_report(parsed)
     valid_dates = sorted({row["date"] for row in parsed.rows_long if row.get("date") is not None})
     valid_nm_ids = sorted({int(row["nm_id"]) for row in parsed.rows_long if row.get("nm_id") is not None})
     campaign_refs = sorted({str(row["campaign_ref"]) for row in parsed.rows_long if row.get("campaign_ref")})
@@ -315,8 +601,15 @@ def build_ivan_ads_wide_audit_summary(parsed: ParsedIvanAdsWideCsv) -> dict[str,
         "campaign_ref_count": len(campaign_refs),
         "rows_with_useful_ad_metrics": len(parsed.rows_long),
         "rows_with_non_zero_ad_metrics": rows_with_non_zero_ad_metrics,
-        "duplicate_key_count": parsed.duplicate_key_count,
-        "duplicate_key_examples": list(parsed.duplicate_key_examples),
+        "duplicate_key_count": duplicate_report["duplicate_key_count"],
+        "duplicate_exact_key_count": duplicate_report["duplicate_exact_key_count"],
+        "duplicate_conflicting_key_count": duplicate_report["duplicate_conflicting_key_count"],
+        "top_dates_with_duplicates": duplicate_report["top_dates_with_duplicates"],
+        "top_nm_ids_with_duplicates": duplicate_report["top_nm_ids_with_duplicates"],
+        "top_campaign_refs_with_duplicates": duplicate_report["top_campaign_refs_with_duplicates"],
+        "candidate_key_expansion_analysis": duplicate_report["candidate_key_expansion_analysis"],
+        "duplicate_key_examples": duplicate_report["duplicate_examples"],
+        "can_apply_with_dedupe_exact": duplicate_report["duplicate_conflicting_key_count"] == 0 and bool(parsed.rows_long),
         "preview_rows": [
             {
                 key: (value.isoformat() if isinstance(value, date) else format(value, "f") if isinstance(value, Decimal) else value)
@@ -347,7 +640,11 @@ def _load_existing_ads_wide_keys(session, rows: tuple[dict[str, Any], ...] | lis
     }
 
 
-def build_ivan_ads_wide_import_dry_run_summary(parsed: ParsedIvanAdsWideCsv) -> dict[str, Any]:
+def build_ivan_ads_wide_import_dry_run_summary(
+    parsed: ParsedIvanAdsWideCsv,
+    *,
+    dedupe_mode: str | None = None,
+) -> dict[str, Any]:
     if not parsed.found_date_column:
         raise ValueError("В файле не найдена ключевая колонка 'Дата'.")
     if not parsed.found_group_article_alias:
@@ -357,9 +654,13 @@ def build_ivan_ads_wide_import_dry_run_summary(parsed: ParsedIvanAdsWideCsv) -> 
     if not parsed.rows_long:
         raise ValueError("В файле нет ни одной строки с полезными рекламными метриками.")
 
+    duplicate_report = build_ivan_ads_wide_duplicate_report(parsed)
+    prepared_rows = _prepare_rows_for_import(parsed, dedupe_mode=dedupe_mode)
+    selected_rows = prepared_rows["rows_selected"]
+
     try:
         with session_scope() as session:
-            existing_keys = _load_existing_ads_wide_keys(session, parsed.rows_long)
+            existing_keys = _load_existing_ads_wide_keys(session, selected_rows)
         db_status = "ok"
         db_error = None
     except Exception as exc:
@@ -367,11 +668,17 @@ def build_ivan_ads_wide_import_dry_run_summary(parsed: ParsedIvanAdsWideCsv) -> 
         db_status = "db_unavailable"
         db_error = str(exc)
 
-    campaign_ref_counts = Counter(str(row["campaign_ref"]) for row in parsed.rows_long)
+    campaign_ref_counts = Counter(str(row["campaign_ref"]) for row in selected_rows)
+    can_apply_with_dedupe_exact = duplicate_report["duplicate_conflicting_key_count"] == 0 and bool(selected_rows)
+    can_apply = bool(selected_rows) and (
+        duplicate_report["duplicate_key_count"] == 0
+        or (prepared_rows["dedupe_mode"] == "exact" and duplicate_report["duplicate_conflicting_key_count"] == 0)
+    )
     return {
         "mode": "dry-run",
         "write_requested": False,
         "write_executed": False,
+        "dedupe_mode": prepared_rows["dedupe_mode"] or "off",
         "target_table": TARGET_TABLE_NAME,
         "tables_affected": [TARGET_TABLE_NAME],
         "import_source": IVAN_ADS_WIDE_IMPORT_SOURCE,
@@ -379,13 +686,20 @@ def build_ivan_ads_wide_import_dry_run_summary(parsed: ParsedIvanAdsWideCsv) -> 
         "db_status": db_status,
         "db_error": db_error,
         "rows_found_total": len(parsed.rows_long),
-        "rows_planned_for_import": len(parsed.rows_long),
+        "rows_planned_for_import": len(selected_rows),
         "rows_already_in_db": len(existing_keys),
-        "duplicate_key_count": parsed.duplicate_key_count,
-        "duplicate_key_examples": list(parsed.duplicate_key_examples),
-        "period_min": min(row["date"] for row in parsed.rows_long).isoformat(),
-        "period_max": max(row["date"] for row in parsed.rows_long).isoformat(),
-        "unique_nm_id_count": len({int(row["nm_id"]) for row in parsed.rows_long}),
+        "rows_dropped_by_exact_dedupe": prepared_rows["rows_dropped_by_exact_dedupe"],
+        "duplicate_key_count": duplicate_report["duplicate_key_count"],
+        "duplicate_exact_key_count": duplicate_report["duplicate_exact_key_count"],
+        "duplicate_conflicting_key_count": duplicate_report["duplicate_conflicting_key_count"],
+        "top_dates_with_duplicates": duplicate_report["top_dates_with_duplicates"],
+        "top_nm_ids_with_duplicates": duplicate_report["top_nm_ids_with_duplicates"],
+        "top_campaign_refs_with_duplicates": duplicate_report["top_campaign_refs_with_duplicates"],
+        "candidate_key_expansion_analysis": duplicate_report["candidate_key_expansion_analysis"],
+        "duplicate_key_examples": duplicate_report["duplicate_examples"],
+        "period_min": min(row["date"] for row in selected_rows).isoformat(),
+        "period_max": max(row["date"] for row in selected_rows).isoformat(),
+        "unique_nm_id_count": len({int(row["nm_id"]) for row in selected_rows}),
         "wide_groups_found": parsed.group_count,
         "top_campaign_refs": [
             {"campaign_ref": campaign_ref, "rows_count": count}
@@ -394,10 +708,11 @@ def build_ivan_ads_wide_import_dry_run_summary(parsed: ParsedIvanAdsWideCsv) -> 
         "rows_missing_key": 0,
         "rows_with_non_zero_ad_metrics": sum(
             1
-            for row in parsed.rows_long
+            for row in selected_rows
             if any(row.get(field_name) not in (None, Decimal("0"), Decimal("0.00"), Decimal("0.000000")) for field_name in AD_METRIC_FIELDS)
         ),
-        "can_apply": parsed.duplicate_key_count == 0 and bool(parsed.rows_long),
+        "can_apply": can_apply,
+        "can_apply_with_dedupe_exact": can_apply_with_dedupe_exact,
     }
 
 
@@ -457,17 +772,22 @@ def _upsert_fact_ivan_ads_wide_rows(session, rows: list[dict[str, Any]], *, batc
     return total_upserted
 
 
-def apply_ivan_ads_wide_import(parsed: ParsedIvanAdsWideCsv) -> dict[str, Any]:
-    summary = build_ivan_ads_wide_import_dry_run_summary(parsed)
+def apply_ivan_ads_wide_import(parsed: ParsedIvanAdsWideCsv, *, dedupe_mode: str | None = None) -> dict[str, Any]:
+    summary = build_ivan_ads_wide_import_dry_run_summary(parsed, dedupe_mode=dedupe_mode)
     summary["write_requested"] = True
     summary["write_executed"] = False
-    if parsed.duplicate_key_count > 0:
-        summary["write_blocked_reason"] = "duplicate_keys_in_file"
+    if summary["can_apply"] is not True:
+        summary["write_blocked_reason"] = (
+            "conflicting_duplicate_keys_in_file"
+            if summary["duplicate_conflicting_key_count"] > 0
+            else "duplicate_keys_require_dedupe_exact"
+        )
         return summary
 
+    prepared_rows = _prepare_rows_for_import(parsed, dedupe_mode=dedupe_mode)
     with session_scope() as session:
         loaded_at = datetime.now(timezone.utc)
-        insert_rows = [_build_insert_row(row, loaded_at=loaded_at) for row in parsed.rows_long]
+        insert_rows = [_build_insert_row(row, loaded_at=loaded_at) for row in prepared_rows["rows_selected"]]
         rows_upserted = _upsert_fact_ivan_ads_wide_rows(session, insert_rows)
 
     summary["write_executed"] = True
