@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
+from io import BytesIO
 
 import app_streamlit
 import pandas as pd
@@ -28,10 +29,14 @@ from app_streamlit import (
     build_chart_product_options,
     build_chart_scope_rows,
     build_threshold_breaches_table,
+    build_excel_export_bytes,
     build_export_dataframe,
     build_data_quality_label,
+    build_overview_export_tables,
+    build_overview_visible_columns,
     build_wb_site_price_monitor_dataframe,
     filter_products_with_period_data,
+    filter_overview_empty_rows,
     format_wb_conversion_type_label,
     get_latest_product_context,
     build_grouped_by_date_dataset,
@@ -2767,3 +2772,114 @@ def test_filter_products_with_period_data_keeps_products_with_zero_but_non_null_
     )
 
     assert filtered["nm_id"].unique().tolist() == [10]
+
+
+def test_filter_overview_empty_rows_removes_only_fully_empty_rows() -> None:
+    table_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 1,
+                "supplier_article": "empty-all-none",
+                "card_clicks": None,
+                "cart_count": None,
+                "order_count": None,
+                "order_sum": None,
+            },
+            {
+                "nm_id": 2,
+                "supplier_article": "has-clicks-zero-rest",
+                "card_clicks": 5,
+                "cart_count": 0,
+                "order_count": 0,
+                "order_sum": 0,
+            },
+            {
+                "nm_id": 3,
+                "supplier_article": "all-zero-is-real-data",
+                "card_clicks": 0,
+                "cart_count": 0,
+                "order_count": 0,
+                "order_sum": 0,
+            },
+            {
+                "nm_id": 4,
+                "supplier_article": "dash-is-empty-but-order-sum-filled",
+                "card_clicks": "—",
+                "cart_count": "—",
+                "order_count": "—",
+                "order_sum": 1250,
+            },
+        ]
+    )
+
+    result = filter_overview_empty_rows(table_df)
+
+    assert result["nm_id"].tolist() == [2, 3, 4]
+
+
+def test_build_overview_visible_columns_hide_stock_columns() -> None:
+    columns = build_overview_visible_columns()
+
+    assert "current_stock_qty" not in columns
+    assert "current_stock_sum" not in columns
+    assert "wb_buyer_price" in columns
+    assert "card_clicks" in columns
+
+
+def test_build_overview_export_tables_hide_stock_columns_and_empty_rows() -> None:
+    table_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-18",
+                "supplier_article": "hidden-empty",
+                "nm_id": 101,
+                "card_clicks": None,
+                "cart_count": None,
+                "order_count": None,
+                "order_sum": None,
+                "current_stock_qty": 10,
+                "current_stock_sum": 1000,
+                "wb_buyer_price": 799,
+            },
+            {
+                "report_date": "2026-06-18",
+                "supplier_article": "kept-row",
+                "nm_id": 202,
+                "card_clicks": 7,
+                "cart_count": 0,
+                "order_count": 0,
+                "order_sum": 0,
+                "current_stock_qty": 20,
+                "current_stock_sum": 2000,
+                "wb_buyer_price": 899,
+            },
+        ]
+    )
+
+    display_df, export_df = build_overview_export_tables(table_df, show_empty_rows=False)
+
+    assert display_df["nm_id"].tolist() == [202]
+    assert "current_stock_qty" not in display_df.columns
+    assert "current_stock_sum" not in display_df.columns
+    assert "Остаток WB" not in export_df.columns
+    assert "Сумма остатков" not in export_df.columns
+    assert export_df["Артикул WB"].tolist() == [202]
+
+
+def test_build_excel_export_bytes_creates_xlsx_from_current_table() -> None:
+    export_df = pd.DataFrame(
+        [
+            {
+                "Дата": "2026-06-18",
+                "Артикул WB": 202,
+                "Артикул продавца": "kept-row",
+                "Цена WB": 899.0,
+            }
+        ]
+    )
+
+    payload = build_excel_export_bytes(export_df)
+    restored = pd.read_excel(BytesIO(payload))
+
+    assert payload[:2] == b"PK"
+    assert restored.to_dict(orient="records") == export_df.to_dict(orient="records")

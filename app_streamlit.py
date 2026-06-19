@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from html import escape
+from io import BytesIO
 import logging
 import os
 import tempfile
@@ -77,6 +78,8 @@ AD_CAMPAIGN_PRODUCT_LABEL = "РК по товару"
 DEFAULT_STREAMLIT_DISPLAY_MIN_DATE = date(2026, 6, 7)
 STREAMLIT_DISPLAY_MIN_DATE_ENV_VAR = "STREAMLIT_DISPLAY_MIN_DATE"
 TABLE_STYLE_LOOKBACK_DAYS = 30
+OVERVIEW_HIDDEN_COLUMNS = {"current_stock_qty", "current_stock_sum"}
+OVERVIEW_EMPTY_ROW_METRIC_COLUMNS = ("card_clicks", "cart_count", "order_count", "order_sum")
 
 LATEST_MODE_LABEL = "Последняя дата + динамика"
 BY_DATE_MODE_LABEL = "По датам"
@@ -2490,10 +2493,8 @@ def build_filtered_dataset(df: pd.DataFrame, data_source: str) -> tuple[pd.DataF
             filtered = filtered[filtered["has_ad_campaign"] | filtered["has_ad_cost"]]
         debug_trace.append(build_debug_snapshot("rows_after_ads_only_filter", filtered))
 
-        show_products_without_data = st.checkbox("Показывать товары без данных", value=False)
-        if not show_products_without_data:
-            filtered = filter_products_with_period_data(filtered)
-        debug_trace.append(build_debug_snapshot("rows_after_products_without_data_filter", filtered))
+        show_products_without_data = st.checkbox("Показывать строки без данных", value=False)
+        debug_trace.append(build_debug_snapshot("rows_after_products_without_data_toggle", filtered))
 
         no_data_only = st.checkbox("Показывать только товары без данных")
         if no_data_only:
@@ -2524,6 +2525,7 @@ def build_filtered_dataset(df: pd.DataFrame, data_source: str) -> tuple[pd.DataF
         tracked_metadata_state=tracked_metadata_state,
     )
     filtered.attrs["data_debug"] = data_debug
+    filtered.attrs["show_rows_without_data"] = bool(show_products_without_data)
     with st.sidebar.expander("DATA DEBUG"):
         st.json(data_debug)
     return filtered, debug_trace
@@ -2827,6 +2829,66 @@ def build_export_dataframe(table_df: pd.DataFrame, display_columns: list[str]) -
     return export_df.where(pd.notna(export_df), "—")
 
 
+def _is_overview_empty_metric_value(value: object) -> bool:
+    if pd.isna(value):
+        return True
+    if isinstance(value, str):
+        return value.strip() in DISPLAY_NUMERIC_PLACEHOLDERS
+    return False
+
+
+def filter_overview_empty_rows(table_df: pd.DataFrame) -> pd.DataFrame:
+    if table_df.empty:
+        return table_df.copy()
+
+    metric_presence_flags = pd.DataFrame(index=table_df.index)
+    for column_name in OVERVIEW_EMPTY_ROW_METRIC_COLUMNS:
+        if column_name in table_df.columns:
+            metric_presence_flags[column_name] = ~table_df[column_name].map(_is_overview_empty_metric_value)
+        else:
+            metric_presence_flags[column_name] = False
+
+    has_any_metric = metric_presence_flags.any(axis=1)
+    return table_df.loc[has_any_metric].copy()
+
+
+def build_overview_visible_columns() -> list[str]:
+    return [column_name for column_name in DISPLAY_COLUMNS_BY_DATE if column_name not in OVERVIEW_HIDDEN_COLUMNS]
+
+
+def build_overview_export_tables(
+    table_df: pd.DataFrame,
+    *,
+    show_empty_rows: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    overview_rows = table_df.copy() if show_empty_rows else filter_overview_empty_rows(table_df)
+    visible_columns = build_overview_visible_columns()
+    display_df = overview_rows.reindex(columns=visible_columns).copy()
+    export_df = build_export_dataframe(overview_rows, visible_columns)
+    return display_df, export_df
+
+
+def build_excel_export_bytes(export_df: pd.DataFrame) -> bytes:
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Итого")
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def build_filtered_table_export_filename(table_df: pd.DataFrame, extension: str) -> str:
+    if "report_date" not in table_df.columns:
+        return f"wb_table_filtered.{extension}"
+
+    report_dates = pd.to_datetime(table_df["report_date"], errors="coerce").dt.date.dropna()
+    if report_dates.empty:
+        return f"wb_table_filtered.{extension}"
+
+    min_date = report_dates.min().isoformat()
+    max_date = report_dates.max().isoformat()
+    return f"wb_table_filtered_{min_date}_{max_date}.{extension}"
+
+
 def get_product_options(filtered: pd.DataFrame) -> tuple[list[str], dict[str, dict[str, object]]]:
     product_rows = (
         filtered.sort_values(["supplier_article", "nm_id", "title"], na_position="last")
@@ -2909,6 +2971,7 @@ def render_overview_tab(
     display_coverage: pd.DataFrame | None = None,
 ) -> tuple[int, int]:
     view_mode = BY_DATE_MODE_LABEL
+    show_empty_rows = bool(filtered.attrs.get("show_rows_without_data", False))
 
     if view_mode == LATEST_MODE_LABEL:
         st.info("Одна строка = один товар. Показана последняя доступная дата и изменение к предыдущей доступной дате по этому товару.")
@@ -2925,14 +2988,27 @@ def render_overview_tab(
         status_column = "data_quality_label"
         download_label = "Скачать расширенный ИТОГО CSV"
 
-    table_display_df = table_df.reindex(columns=display_columns).copy()
-    export_df = build_export_dataframe(table_df, export_columns)
+    if view_mode == LATEST_MODE_LABEL:
+        table_display_df = table_df.reindex(columns=display_columns).copy()
+        export_df = build_export_dataframe(table_df, export_columns)
+    else:
+        table_display_df, export_df = build_overview_export_tables(table_df, show_empty_rows=show_empty_rows)
     export_debug_trace = [
         build_debug_snapshot("rows_before_export_table_df", table_df),
         build_debug_snapshot("rows_before_export_export_df", export_df),
     ]
+    csv_file_name = build_filtered_table_export_filename(table_display_df, "csv")
+    excel_file_name = build_filtered_table_export_filename(table_display_df, "xlsx")
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(download_label, data=csv_bytes, file_name="streamlit_v1_filtered.csv", mime="text/csv")
+    excel_bytes = build_excel_export_bytes(export_df)
+    download_cols = st.columns(2)
+    download_cols[0].download_button(download_label, data=csv_bytes, file_name=csv_file_name, mime="text/csv")
+    download_cols[1].download_button(
+        "Скачать текущую таблицу в Excel",
+        data=excel_bytes,
+        file_name=excel_file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
     with st.expander("Debug фильтрации и экспорта"):
         st.caption("Экспорт CSV строится не из полного load_dataset_from_db(), а из текущего table_df после всех применённых фильтров.")
         st.dataframe(build_debug_trace_frame(filter_debug_trace), width="stretch", hide_index=True)
