@@ -122,149 +122,198 @@ def _to_decimal(value) -> Decimal | None:
 def _format_number(value) -> str:
     decimal_value = _to_decimal(value)
     if decimal_value is None:
-        return "нет данных"
+        return "null"
     if decimal_value == decimal_value.to_integral_value():
-        return f"{int(decimal_value):,}".replace(",", " ")
-    return f"{decimal_value:,.2f}".replace(",", " ")
+        return str(int(decimal_value))
+    return format(decimal_value.normalize(), "f")
 
 
 def _format_currency(value) -> str:
     decimal_value = _to_decimal(value)
     if decimal_value is None:
-        return "нет данных"
-    if decimal_value == decimal_value.to_integral_value():
-        amount = f"{int(decimal_value):,}".replace(",", " ")
-    else:
-        amount = f"{decimal_value:,.2f}".replace(",", " ")
-    return f"{amount} ₽"
+        return "null"
+    return format(decimal_value.normalize(), "f")
 
 
 def _format_date(value: date | str | None) -> str:
     if value is None:
-        return "нет данных"
+        return "null"
     if isinstance(value, date):
         return value.isoformat()
     return str(value)
 
 
+def _format_bool(value: bool | None) -> str:
+    if value is None:
+        return "null"
+    return "true" if value else "false"
+
+
 def _format_db_health_content(tool_result: DbHealthResponse) -> str:
     return "\n".join(
         [
-            "Подключение к PostgreSQL работает.",
-            "",
-            "mart_total_report:",
-            f"- rows: {tool_result.rows}",
-            f"- min_date: {_format_date(tool_result.min_date)}",
-            f"- max_date: {_format_date(tool_result.max_date)}",
+            "db_health:",
+            f"ok: {_format_bool(tool_result.ok)}",
+            f"rows: {tool_result.rows}",
+            f"min_date: {_format_date(tool_result.min_date)}",
+            f"max_date: {_format_date(tool_result.max_date)}",
         ]
     )
 
 
 def _format_dashboard_summary_content(tool_result: DashboardSummaryResponse) -> str:
-    lines = [
-        f"Сводка за {_format_date(tool_result.date_from)} — {_format_date(tool_result.date_to)}:",
-        "",
-        f"- строк: {tool_result.rows}",
-        f"- товаров: {tool_result.nm_count}",
-        f"- переходов в карточку: {_format_number(tool_result.card_clicks)}",
-        f"- корзин: {_format_number(tool_result.cart_count)}",
-        f"- заказов: {_format_number(tool_result.order_count)}",
-        f"- сумма заказов: {_format_currency(tool_result.order_sum)}",
-        f"- рекламные расходы: {_format_currency(tool_result.ad_spend)}",
-        f"- стоимость корзины: {_format_currency(tool_result.cost_per_cart_total)}",
-        f"- CPO: {_format_currency(tool_result.cpo_total)}",
-        "",
-        "Краткий вывод:",
-    ]
-    notes: list[str] = []
-    if tool_result.data_quality.partial_rows:
-        notes.append(f"partial_rows={tool_result.data_quality.partial_rows}")
-    if tool_result.data_quality.empty_rows:
-        notes.append(f"empty_rows={tool_result.data_quality.empty_rows}")
-    notes.extend(tool_result.data_quality.notes)
-    if notes:
-        lines.append("Есть пометки по качеству данных: " + "; ".join(notes))
-    else:
-        lines.append("Данные за период загружены без специальных пометок качества.")
-    return "\n".join(lines)
+    notes_value = "; ".join(tool_result.data_quality.notes) if tool_result.data_quality.notes else "null"
+    return "\n".join(
+        [
+            "dashboard_summary:",
+            f"date_from: {_format_date(tool_result.date_from)}",
+            f"date_to: {_format_date(tool_result.date_to)}",
+            f"rows: {tool_result.rows}",
+            f"nm_count: {tool_result.nm_count}",
+            f"card_clicks_total: {_format_number(tool_result.card_clicks)}",
+            f"cart_count_total: {_format_number(tool_result.cart_count)}",
+            f"order_count_total: {_format_number(tool_result.order_count)}",
+            f"order_sum_total: {_format_currency(tool_result.order_sum)}",
+            f"ad_spend_total: {_format_currency(tool_result.ad_spend)}",
+            f"ad_atbs_total: {_format_number(tool_result.ad_atbs)}",
+            f"ad_orders_total: {_format_number(tool_result.ad_orders)}",
+            f"cost_per_cart_total: {_format_currency(tool_result.cost_per_cart_total)}",
+            f"cpo_total: {_format_currency(tool_result.cpo_total)}",
+            f"drr: {_format_number(tool_result.drr)}",
+            f"partial_rows: {tool_result.data_quality.partial_rows}",
+            f"empty_rows: {tool_result.data_quality.empty_rows}",
+            f"notes: {notes_value}",
+        ]
+    )
 
 
 def _format_mart_schema_content(tool_result: MartSchemaResponse) -> str:
     lines = [
-        f"Схема таблицы {tool_result.table_name}:",
-        "",
-        f"- колонок: {len(tool_result.columns)}",
-        "",
-        "Первые колонки:",
+        "mart_schema:",
+        f"table_name: {tool_result.table_name}",
+        f"columns_count: {len(tool_result.columns)}",
+        "columns_tsv:",
+        "column_name\tdata_type",
     ]
     for column in tool_result.columns[:20]:
-        lines.append(f"- {column.column_name}: {column.data_type}")
+        lines.append(f"{column.column_name}\t{column.data_type}")
     if len(tool_result.columns) > 20:
-        lines.append(f"Показаны первые 20 колонок из {len(tool_result.columns)}.")
+        lines.append(f"truncated_columns: {len(tool_result.columns) - 20}")
     return "\n".join(lines)
 
 
 def _format_product_metrics_content(tool_result: ProductMetricsResponse) -> str:
-    header = (
-        f"Товар nm_id {tool_result.nm_id} за {_format_date(tool_result.date_from)} — "
-        f"{_format_date(tool_result.date_to)}."
-    )
+    header = [
+        "product:",
+        f"nm_id: {tool_result.nm_id}",
+        f"supplier_article: {tool_result.supplier_article or 'null'}",
+        f"title: {tool_result.product_name or 'null'}",
+        f"date_from: {_format_date(tool_result.date_from)}",
+        f"date_to: {_format_date(tool_result.date_to)}",
+    ]
     if not tool_result.found:
-        return "\n".join([header, "", "Данных по товару за выбранный период нет."])
+        return "\n".join(
+            header
+            + [
+                "found: false",
+                "rows_tsv:",
+                "date\tcard_clicks\tctr\tcart_count\tadd_to_cart_conversion\torder_count\tcart_to_order_conversion\torder_sum",
+            ]
+        )
 
-    lines = [
-        header,
+    avg_ctr_values = [item.ctr for item in tool_result.daily if item.ctr is not None]
+    avg_atc_values = [item.add_to_cart_conversion for item in tool_result.daily if item.add_to_cart_conversion is not None]
+    avg_cto_values = [item.cart_to_order_conversion for item in tool_result.daily if item.cart_to_order_conversion is not None]
+    avg_ctr = (sum(avg_ctr_values, Decimal("0")) / len(avg_ctr_values)) if avg_ctr_values else None
+    avg_atc = (sum(avg_atc_values, Decimal("0")) / len(avg_atc_values)) if avg_atc_values else None
+    avg_cto = (sum(avg_cto_values, Decimal("0")) / len(avg_cto_values)) if avg_cto_values else None
+
+    lines = header + [
+        "found: true",
         "",
-        "Итого:",
-        f"- переходов: {_format_number(sum((item.card_clicks or 0) for item in tool_result.daily) if tool_result.daily else None)}",
-        f"- корзин: {_format_number(tool_result.summary.cart_count)}",
-        f"- заказов: {_format_number(tool_result.summary.order_count)}",
-        f"- сумма заказов: {_format_currency(tool_result.summary.order_sum)}",
+        "field_legend:",
+        "card_clicks = переходы в карточку",
+        "cart_count = корзины",
+        "order_count = заказы",
+        "order_sum = сумма заказов",
+        "ctr = CTR",
+        "add_to_cart_conversion = конверсия в корзину",
+        "cart_to_order_conversion = конверсия корзина -> заказ",
         "",
-        "По дням:",
+        "summary:",
+        f"card_clicks_total: {_format_number(sum((item.card_clicks or 0) for item in tool_result.daily) if tool_result.daily else None)}",
+        f"cart_count_total: {_format_number(tool_result.summary.cart_count)}",
+        f"order_count_total: {_format_number(tool_result.summary.order_count)}",
+        f"order_sum_total: {_format_currency(tool_result.summary.order_sum)}",
+        f"avg_ctr: {_format_number(avg_ctr)}",
+        f"avg_add_to_cart_conversion: {_format_number(avg_atc)}",
+        f"avg_cart_to_order_conversion: {_format_number(avg_cto)}",
+        "",
+        "rows_tsv:",
+        "date\tcard_clicks\tctr\tcart_count\tadd_to_cart_conversion\torder_count\tcart_to_order_conversion\torder_sum",
     ]
     daily_rows = tool_result.daily[:MAX_PRODUCT_DAILY_LINES]
     for item in daily_rows:
         lines.append(
-            f"{_format_date(item.date)}: переходы {_format_number(item.card_clicks)}, "
-            f"CTR {_format_number(item.ctr)}, корзины {_format_number(item.cart_count)}, "
-            f"конверсия в корзину {_format_number(item.add_to_cart_conversion)}, "
-            f"заказы {_format_number(item.order_count)}, "
-            f"конверсия в заказ {_format_number(item.cart_to_order_conversion)}, "
-            f"сумма {_format_currency(item.order_sum)}"
+            "\t".join(
+                [
+                    _format_date(item.date),
+                    _format_number(item.card_clicks),
+                    _format_number(item.ctr),
+                    _format_number(item.cart_count),
+                    _format_number(item.add_to_cart_conversion),
+                    _format_number(item.order_count),
+                    _format_number(item.cart_to_order_conversion),
+                    _format_currency(item.order_sum),
+                ]
+            )
         )
     if len(tool_result.daily) > MAX_PRODUCT_DAILY_LINES:
-        lines.append(f"Показаны первые {MAX_PRODUCT_DAILY_LINES} дней из {len(tool_result.daily)}.")
+        lines.append(f"truncated_rows: {len(tool_result.daily) - MAX_PRODUCT_DAILY_LINES}")
     return "\n".join(lines)
 
 
 def _format_price_monitor_content(tool_result: PriceMonitorResponse) -> str:
-    title = (
-        f"Алерты по ценам за {_format_date(tool_result.snapshot_date)}:"
-        if tool_result.items and all(item.is_alert for item in tool_result.items)
-        else f"Мониторинг цен за {_format_date(tool_result.snapshot_date)}:"
-    )
-    lines = [title, ""]
+    title = "price_monitor_alerts_only:" if tool_result.items and all(item.is_alert for item in tool_result.items) else "price_monitor:"
+    lines = [title, f"snapshot_date: {_format_date(tool_result.snapshot_date)}"]
     if tool_result.rows == 0:
-        lines.append("Проверенных товаров за дату нет.")
+        lines.extend(
+            [
+                "rows: 0",
+                "alerts: 0",
+                "rows_tsv:",
+                "nm_id\tsupplier_article\tbuyer_visible_price\tprevious_price\tprice_delta\tfetch_status\tis_alert\tproduct_url",
+            ]
+        )
         return "\n".join(lines)
 
     status_counts = Counter(item.fetch_status or "unknown" for item in tool_result.items)
+    lines.extend([f"rows: {tool_result.rows}", f"alerts: {tool_result.alerts}"])
+    for status_name, count in sorted(status_counts.items()):
+        lines.append(f"status_{status_name}: {count}")
     lines.extend(
         [
-            f"- проверено товаров: {tool_result.rows}",
-            f"- алертов: {tool_result.alerts}",
+            "rows_tsv:",
+            "nm_id\tsupplier_article\tbuyer_visible_price\tprevious_price\tprice_delta\tfetch_status\tis_alert\tproduct_url",
         ]
     )
-    for status_name, count in sorted(status_counts.items()):
-        lines.append(f"- {status_name}: {count}")
-    lines.extend(["", f"Первые {min(len(tool_result.items), MAX_PRICE_MONITOR_LINES)} строк:"])
-    for index, item in enumerate(tool_result.items[:MAX_PRICE_MONITOR_LINES], start=1):
-        supplier_article = item.supplier_article or "нет артикула"
+    for item in tool_result.items[:MAX_PRICE_MONITOR_LINES]:
         lines.append(
-            f"{index}. nm_id {item.nm_id}, артикул {supplier_article}, buyer_price {_format_currency(item.buyer_visible_price)}, "
-            f"previous_price {_format_currency(item.previous_price)}, status {item.fetch_status}"
+            "\t".join(
+                [
+                    str(item.nm_id),
+                    item.supplier_article or "null",
+                    _format_currency(item.buyer_visible_price),
+                    _format_currency(item.previous_price),
+                    _format_currency(item.price_delta),
+                    item.fetch_status or "null",
+                    _format_bool(item.is_alert),
+                    item.product_url or "null",
+                ]
+            )
         )
+    if len(tool_result.items) > MAX_PRICE_MONITOR_LINES:
+        lines.append(f"truncated_rows: {len(tool_result.items) - MAX_PRICE_MONITOR_LINES}")
     return "\n".join(lines)
 
 

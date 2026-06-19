@@ -331,9 +331,10 @@ def test_mcp_tools_call_db_health_returns_structured_content() -> None:
     assert payload["result"]["structuredContent"]["rows"] == 7434
     assert payload["result"]["structuredContent"]["min_date"] == "2026-02-12"
     text = payload["result"]["content"][0]["text"]
-    assert "Подключение к PostgreSQL работает." in text
-    assert "- rows: 7434" in text
-    assert "- min_date: 2026-02-12" in text
+    assert "db_health:" in text
+    assert "ok: true" in text
+    assert "rows: 7434" in text
+    assert "min_date: 2026-02-12" in text
 
 
 def test_mcp_tools_call_get_mart_schema_returns_schema_content() -> None:
@@ -352,7 +353,11 @@ def test_mcp_tools_call_get_mart_schema_returns_schema_content() -> None:
     assert response.status_code == 200
     assert payload["result"]["structuredContent"]["table_name"] == "mart_total_report"
     assert payload["result"]["structuredContent"]["columns"][0]["column_name"] == "report_date"
-    assert "Схема таблицы mart_total_report:" in payload["result"]["content"][0]["text"]
+    text = payload["result"]["content"][0]["text"]
+    assert "mart_schema:" in text
+    assert "table_name: mart_total_report" in text
+    assert "columns_tsv:" in text
+    assert "column_name\tdata_type" in text
 
 
 def test_mcp_tools_call_dashboard_summary_returns_structured_content() -> None:
@@ -379,11 +384,13 @@ def test_mcp_tools_call_dashboard_summary_returns_structured_content() -> None:
     assert payload["result"]["structuredContent"]["rows"] == 12
     assert payload["result"]["structuredContent"]["nm_count"] == 3
     text = payload["result"]["content"][0]["text"]
-    assert "Сводка за 2026-06-07 — 2026-06-18:" in text
-    assert "- строк: 12" in text
-    assert "- товаров: 3" in text
-    assert "- переходов в карточку: 77" in text
-    assert "Краткий вывод:" in text
+    assert "dashboard_summary:" in text
+    assert "date_from: 2026-06-07" in text
+    assert "date_to: 2026-06-18" in text
+    assert "rows: 12" in text
+    assert "nm_count: 3" in text
+    assert "card_clicks_total: 77" in text
+    assert "notes: tracked scope" in text
 
 
 def test_mcp_tools_call_product_metrics_returns_human_readable_content() -> None:
@@ -409,10 +416,13 @@ def test_mcp_tools_call_product_metrics_returns_human_readable_content() -> None
     assert response.status_code == 200
     assert payload["result"]["structuredContent"]["nm_id"] == 91470767
     text = payload["result"]["content"][0]["text"]
-    assert "Товар nm_id 91470767 за 2026-06-07 — 2026-06-18." in text
-    assert "Итого:" in text
-    assert "По дням:" in text
-    assert "2026-06-18: переходы 0" in text
+    assert "product:" in text
+    assert "nm_id: 91470767" in text
+    assert "supplier_article: demo-art" in text
+    assert "summary:" in text
+    assert "rows_tsv:" in text
+    assert "date\tcard_clicks\tctr\tcart_count\tadd_to_cart_conversion\torder_count\tcart_to_order_conversion\torder_sum" in text
+    assert "2026-06-18\t0\t0\t0\t0\t0\t0\t0" in text
 
 
 def test_mcp_tools_call_price_monitor_returns_human_readable_content() -> None:
@@ -437,10 +447,12 @@ def test_mcp_tools_call_price_monitor_returns_human_readable_content() -> None:
     assert response.status_code == 200
     assert payload["result"]["structuredContent"]["rows"] == 2
     text = payload["result"]["content"][0]["text"]
-    assert "Мониторинг цен за 2026-06-18:" in text
-    assert "- проверено товаров: 2" in text
-    assert "- алертов: 1" in text
-    assert "1. nm_id 91470767" in text
+    assert "price_monitor:" in text
+    assert "snapshot_date: 2026-06-18" in text
+    assert "rows: 2" in text
+    assert "alerts: 1" in text
+    assert "rows_tsv:" in text
+    assert "91470767\tavokadogirl\t799\t799\t0\tsuccess\tfalse\thttps://www.wildberries.ru/catalog/91470767/detail.aspx" in text
 
 
 def test_mcp_tools_call_price_monitor_returns_empty_response_without_500() -> None:
@@ -465,7 +477,11 @@ def test_mcp_tools_call_price_monitor_returns_empty_response_without_500() -> No
     assert response.status_code == 200
     assert payload["result"]["structuredContent"]["rows"] == 0
     assert payload["result"]["structuredContent"]["items"] == []
-    assert "Проверенных товаров за дату нет." in payload["result"]["content"][0]["text"]
+    text = payload["result"]["content"][0]["text"]
+    assert "price_monitor:" in text
+    assert "rows: 0" in text
+    assert "alerts: 0" in text
+    assert "rows_tsv:" in text
 
 
 def test_mcp_notifications_initialized_returns_accepted_without_body() -> None:
