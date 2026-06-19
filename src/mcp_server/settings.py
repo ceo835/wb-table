@@ -11,6 +11,10 @@ DEFAULT_QUERY_TIMEOUT_SECONDS = 20
 DEFAULT_MAX_DATE_RANGE_DAYS = 60
 
 
+def _parse_bool_env(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class McpServiceSettings:
     database_url: str
@@ -18,6 +22,7 @@ class McpServiceSettings:
     max_rows: int = DEFAULT_MAX_ROWS
     query_timeout_seconds: int = DEFAULT_QUERY_TIMEOUT_SECONDS
     max_date_range_days: int = DEFAULT_MAX_DATE_RANGE_DAYS
+    mcp_public_mode: bool = False
 
 
 def load_mcp_service_settings() -> McpServiceSettings:
@@ -31,6 +36,7 @@ def load_mcp_service_settings() -> McpServiceSettings:
 
     max_rows = max(1, int(os.getenv("MCP_MAX_ROWS") or DEFAULT_MAX_ROWS))
     query_timeout_seconds = max(1, int(os.getenv("MCP_QUERY_TIMEOUT_SECONDS") or DEFAULT_QUERY_TIMEOUT_SECONDS))
+    mcp_public_mode = _parse_bool_env(os.getenv("MCP_PUBLIC_MODE"))
 
     return McpServiceSettings(
         database_url=database_url,
@@ -38,4 +44,5 @@ def load_mcp_service_settings() -> McpServiceSettings:
         max_rows=max_rows,
         query_timeout_seconds=query_timeout_seconds,
         max_date_range_days=DEFAULT_MAX_DATE_RANGE_DAYS,
+        mcp_public_mode=mcp_public_mode,
     )

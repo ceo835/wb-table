@@ -140,8 +140,14 @@ def create_app(
     async def health() -> HealthResponse:
         return HealthResponse(ok=True)
 
-    @app.post("/mcp", dependencies=[Depends(require_auth)])
-    async def mcp_endpoint(request: Request) -> Response:
+    @app.post("/mcp")
+    async def mcp_endpoint(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    ) -> Response:
+        if not resolved_settings.mcp_public_mode:
+            require_auth(credentials)
+
         payload = await request.json()
         messages = payload if isinstance(payload, list) else [payload]
         responses: list[dict] = []

@@ -139,13 +139,14 @@ class FakeRepository:
         )
 
 
-def build_test_client() -> TestClient:
+def build_test_client(*, mcp_public_mode: bool = False) -> TestClient:
     settings = McpServiceSettings(
         database_url="postgresql+psycopg://example",
         auth_token="test-token",
         max_rows=500,
         query_timeout_seconds=20,
         max_date_range_days=60,
+        mcp_public_mode=mcp_public_mode,
     )
     app = create_app(repository=FakeRepository(), settings=settings)
     return TestClient(app)
@@ -339,6 +340,43 @@ def test_mcp_notifications_initialized_returns_accepted_without_body() -> None:
     )
     assert response.status_code == 202
     assert response.text == ""
+
+
+def test_mcp_public_mode_allows_initialize_without_bearer_token() -> None:
+    client = build_test_client(mcp_public_mode=True)
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "public-test", "version": "1.0"},
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["protocolVersion"] == "2025-06-18"
+
+
+def test_mcp_public_mode_allows_tools_list_without_bearer_token() -> None:
+    client = build_test_client(mcp_public_mode=True)
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 11, "method": "tools/list", "params": {}},
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["tools"][0]["name"] == "db_health"
+
+
+def test_mcp_public_mode_does_not_open_legacy_tools_without_auth() -> None:
+    client = build_test_client(mcp_public_mode=True)
+    response = client.post("/tools/db_health", json={})
+    assert response.status_code == 401
 
 
 def test_none_values_remain_null_in_product_metrics() -> None:
