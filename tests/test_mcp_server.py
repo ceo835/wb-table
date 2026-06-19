@@ -245,6 +245,102 @@ def test_get_db_health_requires_token() -> None:
     assert response.status_code == 401
 
 
+def test_mcp_initialize_returns_streamable_http_server_info() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "1.0"},
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["protocolVersion"] == "2025-06-18"
+    assert payload["result"]["serverInfo"]["name"] == "wb-dashboard-mcp"
+    assert "tools" in payload["result"]["capabilities"]
+
+
+def test_mcp_tools_list_exposes_registered_tools() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    )
+    payload = response.json()
+    tool_names = [tool["name"] for tool in payload["result"]["tools"]]
+    assert response.status_code == 200
+    assert tool_names == [
+        "db_health",
+        "get_dashboard_summary",
+        "get_product_metrics",
+        "get_price_monitor",
+    ]
+
+
+def test_mcp_tools_call_db_health_returns_structured_content() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "db_health", "arguments": {}},
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["isError"] is False
+    assert payload["result"]["structuredContent"]["rows"] == 7434
+    assert payload["result"]["structuredContent"]["min_date"] == "2026-02-12"
+
+
+def test_mcp_tools_call_dashboard_summary_returns_structured_content() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "get_dashboard_summary",
+                "arguments": {
+                    "date_from": "2026-06-07",
+                    "date_to": "2026-06-18",
+                    "only_tracked": True,
+                },
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["structuredContent"]["rows"] == 12
+    assert payload["result"]["structuredContent"]["nm_count"] == 3
+
+
+def test_mcp_notifications_initialized_returns_accepted_without_body() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+    )
+    assert response.status_code == 202
+    assert response.text == ""
+
+
 def test_none_values_remain_null_in_product_metrics() -> None:
     client = build_test_client()
     response = client.post(
