@@ -76,6 +76,7 @@ WB_SITE_PRICE_ALERT_FAILED = "FETCH_FAILED"
 AD_CAMPAIGN_PRODUCT_LABEL = "РК по товару"
 DEFAULT_STREAMLIT_DISPLAY_MIN_DATE = date(2026, 6, 7)
 STREAMLIT_DISPLAY_MIN_DATE_ENV_VAR = "STREAMLIT_DISPLAY_MIN_DATE"
+TABLE_STYLE_LOOKBACK_DAYS = 30
 
 LATEST_MODE_LABEL = "Последняя дата + динамика"
 BY_DATE_MODE_LABEL = "По датам"
@@ -2721,6 +2722,71 @@ def style_table(df: pd.DataFrame, status_column: str | None = None) -> pd.io.for
     return styler.format(precision=2, na_rep="—")
 
 
+def style_table_recent_window(df: pd.DataFrame, status_column: str | None = None) -> pd.io.formats.style.Styler:
+    recent_row_mask = pd.Series(True, index=df.index, dtype=bool)
+    if "report_date" in df.columns:
+        report_dates = pd.to_datetime(df["report_date"], errors="coerce").dt.date
+        non_null_dates = report_dates.dropna()
+        if not non_null_dates.empty:
+            style_cutoff_date = non_null_dates.max() - timedelta(days=TABLE_STYLE_LOOKBACK_DAYS)
+            recent_row_mask = report_dates.ge(style_cutoff_date).fillna(False)
+
+    def status_color(value: object) -> str:
+        if value in ("РќРµС‚ РґР°РЅРЅС‹С…", "NO_DATA"):
+            return "background-color: #fde2e4; color: #7f1d1d;"
+        if value in ("Р”Р°РЅРЅС‹Рµ РµСЃС‚СЊ, РІРЅРµС€РЅРёРµ РёСЃС‚РѕС‡РЅРёРєРё РѕР¶РёРґР°СЋС‚СЃСЏ", "OK_PARTIAL_SOURCES"):
+            return "background-color: #e8f5e9; color: #1b5e20;"
+        if value in ("Р§Р°СЃС‚РёС‡РЅРѕ", "PARTIAL"):
+            return "background-color: #fff3cd; color: #7a4b00;"
+        return ""
+
+    def threshold_warning_color(value: object, threshold: float) -> str:
+        if pd.isna(value):
+            return ""
+        if float(value) > threshold:
+            return "background-color: #ffe5d0; color: #9a3412;"
+        return ""
+
+    def product_group_color(value: object) -> str:
+        if str(value or "").strip():
+            return "background-color: #f8fafc; border-top: 2px solid #d1d5db; font-weight: 600;"
+        return ""
+
+    def recent_only_map(column: pd.Series, formatter) -> list[str]:
+        return [
+            formatter(value) if bool(recent_row_mask.loc[index]) else ""
+            for index, value in column.items()
+        ]
+
+    def wb_price_alert_color(column: pd.Series) -> list[str]:
+        alerts = df.loc[column.index, "wb_price_alert"].fillna(False).astype(bool).tolist()
+        return [
+            "background-color: #fde2e4; color: #7f1d1d;"
+            if is_alert and bool(recent_row_mask.loc[index])
+            else ""
+            for index, is_alert in zip(column.index, alerts)
+        ]
+
+    styler = df.style
+    if status_column in df.columns:
+        styler = styler.apply(lambda column: recent_only_map(column, status_color), subset=[status_column])
+    if "ad_cpo_calc" in df.columns:
+        styler = styler.apply(
+            lambda column: recent_only_map(column, lambda value: threshold_warning_color(value, CHART_THRESHOLD_CPO)),
+            subset=["ad_cpo_calc"],
+        )
+    if "ad_cost_per_cart_calc" in df.columns:
+        styler = styler.apply(
+            lambda column: recent_only_map(column, lambda value: threshold_warning_color(value, CHART_THRESHOLD_CART_COST)),
+            subset=["ad_cost_per_cart_calc"],
+        )
+    if "wb_buyer_price" in df.columns and "wb_price_alert" in df.columns:
+        styler = styler.apply(wb_price_alert_color, subset=["wb_buyer_price"])
+    if "product_group_label" in df.columns:
+        styler = styler.apply(lambda column: recent_only_map(column, product_group_color), subset=["product_group_label"])
+    return styler.format(precision=2, na_rep="вЂ”")
+
+
 def prepare_dataframe_for_streamlit_display(
     df: pd.DataFrame,
     status_column: str | None = None,
@@ -2729,7 +2795,7 @@ def prepare_dataframe_for_streamlit_display(
         "technical_ad_campaign_spend_total",
     }
     safe_df = sanitize_dataframe_for_streamlit_display(df, numeric_columns=numeric_columns)
-    return style_table(safe_df, status_column=status_column)
+    return style_table_recent_window(safe_df, status_column=status_column)
 
 
 def build_export_dataframe(table_df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
@@ -4897,17 +4963,10 @@ def main() -> None:
         st.rerun()
 
     df, data_source = load_app_dataset()
-    display_min_date = resolve_streamlit_display_min_date()
-    df = apply_display_min_date_filter(df, display_min_date=display_min_date)
     display_coverage = df.attrs.get("display_coverage")
     ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
-    ad_campaign_product_df = apply_display_min_date_filter(
-        ad_campaign_product_df,
-        display_min_date=display_min_date,
-    )
     render_compact_metric_css()
     st.caption(f"Источник данных: {'PostgreSQL' if data_source == 'db' else 'CSV'}")
-    st.caption(build_streamlit_display_min_date_caption(display_min_date))
     render_available_dates_summary(df)
     filtered, filter_debug_trace = build_filtered_dataset(df, data_source)
 

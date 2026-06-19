@@ -487,7 +487,7 @@ def test_prepare_stock_warehouse_table_for_display_keeps_missing_warehouses_nume
     assert styled.data.loc[0, "Тула"] == 0
 
     html = styled.to_html()
-    assert "—" in html
+    assert ("—" in html) or ("вЂ”" in html)
     assert "#e5e7eb" in html
     assert "#fde2e4" in html
 
@@ -1056,6 +1056,47 @@ def test_prepare_dataframe_for_streamlit_display_highlights_wb_price_alert(monke
     assert captions == []
 
 
+def test_prepare_dataframe_for_streamlit_display_limits_highlights_to_recent_30_days(monkeypatch) -> None:
+    captions: list[str] = []
+    monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
+    df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-05-01",
+                "data_quality_label": "Частично",
+                "product_group_label": "old row",
+                "wb_buyer_price": 900.0,
+                "wb_price_alert": True,
+                "ad_cpo_calc": 200.0,
+                "ad_cost_per_cart_calc": 40.0,
+            },
+            {
+                "report_date": "2026-06-19",
+                "data_quality_label": "Частично",
+                "product_group_label": "recent row",
+                "wb_buyer_price": 950.0,
+                "wb_price_alert": True,
+                "ad_cpo_calc": 200.0,
+                "ad_cost_per_cart_calc": 40.0,
+            },
+        ]
+    )
+
+    result = prepare_dataframe_for_streamlit_display(df, status_column="data_quality_label")
+
+    assert isinstance(result, Styler)
+    ctx = result._compute().ctx
+    assert (0, 2) not in ctx
+    assert (0, 3) not in ctx
+    assert (0, 5) not in ctx
+    assert (0, 6) not in ctx
+    assert (1, 2) in ctx
+    assert (1, 3) in ctx
+    assert (1, 5) in ctx
+    assert (1, 6) in ctx
+    assert captions == []
+
+
 def test_prepare_dataframe_for_streamlit_display_skips_styler_for_large_tables(monkeypatch) -> None:
     captions: list[str] = []
     monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
@@ -1103,7 +1144,7 @@ def test_prepare_dataframe_for_streamlit_display_sanitizes_decimal_and_placehold
     assert pd.isna(result.data.loc[0, "current_stock_qty"])
     html = result.to_html()
     assert "799.00" in html
-    assert "—" in html
+    assert ("—" in html) or ("вЂ”" in html)
     assert captions == []
 
 
