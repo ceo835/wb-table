@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections import Counter
+from datetime import date
+from decimal import Decimal, InvalidOperation
 import json
 import logging
 import secrets
@@ -29,6 +32,8 @@ security = HTTPBearer(auto_error=False)
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_SERVER_NAME = "wb-dashboard-mcp"
 MCP_SERVER_VERSION = "0.1.0"
+MAX_PRODUCT_DAILY_LINES = 15
+MAX_PRICE_MONITOR_LINES = 10
 
 
 def _tool_schema(model) -> dict:
@@ -41,22 +46,42 @@ def build_mcp_tools_catalog() -> list[dict]:
     return [
         {
             "name": "db_health",
-            "description": "Read-only DB smoke test over mart_total_report.",
+            "description": (
+                "Проверяет подключение MCP-сервера к PostgreSQL и возвращает количество строк, "
+                "минимальную дату и максимальную дату в mart_total_report. Использовать первым "
+                "для диагностики подключения. Ответ показывать пользователю короткой таблицей: "
+                "rows, min_date, max_date."
+            ),
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
             "name": "get_dashboard_summary",
-            "description": "Aggregate dashboard metrics for a date window from mart_total_report.",
+            "description": (
+                "Возвращает агрегированную сводку по витрине mart_total_report за период. "
+                "Использовать для вопросов по общей динамике за даты: строки, товары, переходы, "
+                "корзины, заказы, сумма заказов, рекламные расходы, стоимость корзины, CPO. "
+                "Не использовать для детального вывода по одному товару — для этого есть get_product_metrics."
+            ),
             "inputSchema": _tool_schema(DashboardSummaryRequest),
         },
         {
             "name": "get_product_metrics",
-            "description": "Daily metrics for one nm_id, including WB price snapshot if present.",
+            "description": (
+                "Возвращает дневные метрики одного товара nm_id за период. Использовать для анализа "
+                "конкретного товара по дням: переходы, корзины, заказы, сумма заказов, CTR, "
+                "конверсия в корзину, конверсия в заказ, реклама и цены, если доступны. "
+                "Ответ пользователю показывать таблицей по дням и кратким выводом."
+            ),
             "inputSchema": _tool_schema(ProductMetricsRequest),
         },
         {
             "name": "get_price_monitor",
-            "description": "WB site price monitoring snapshot for the selected date.",
+            "description": (
+                "Возвращает результаты мониторинга цен WB по snapshot_date. Использовать для "
+                "проверки цен и алертов: сколько товаров проверено, какие товары имеют предупреждения, "
+                "какая buyer-visible price и какой статус проверки. При alerts_only=true показывать "
+                "только проблемные строки."
+            ),
             "inputSchema": _tool_schema(PriceMonitorRequest),
         },
     ]
@@ -73,13 +98,172 @@ def build_mcp_error_response(request_id, code: int, message: str) -> JSONRespons
     )
 
 
+def _to_decimal(value) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _format_number(value) -> str:
+    decimal_value = _to_decimal(value)
+    if decimal_value is None:
+        return "нет данных"
+    if decimal_value == decimal_value.to_integral_value():
+        return f"{int(decimal_value):,}".replace(",", " ")
+    return f"{decimal_value:,.2f}".replace(",", " ")
+
+
+def _format_currency(value) -> str:
+    decimal_value = _to_decimal(value)
+    if decimal_value is None:
+        return "нет данных"
+    if decimal_value == decimal_value.to_integral_value():
+        amount = f"{int(decimal_value):,}".replace(",", " ")
+    else:
+        amount = f"{decimal_value:,.2f}".replace(",", " ")
+    return f"{amount} ₽"
+
+
+def _format_date(value: date | str | None) -> str:
+    if value is None:
+        return "нет данных"
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _format_db_health_content(tool_result: DbHealthResponse) -> str:
+    return "\n".join(
+        [
+            "Подключение к PostgreSQL работает.",
+            "",
+            "mart_total_report:",
+            f"- rows: {tool_result.rows}",
+            f"- min_date: {_format_date(tool_result.min_date)}",
+            f"- max_date: {_format_date(tool_result.max_date)}",
+        ]
+    )
+
+
+def _format_dashboard_summary_content(tool_result: DashboardSummaryResponse) -> str:
+    lines = [
+        f"Сводка за {_format_date(tool_result.date_from)} — {_format_date(tool_result.date_to)}:",
+        "",
+        f"- строк: {tool_result.rows}",
+        f"- товаров: {tool_result.nm_count}",
+        f"- переходов в карточку: нет данных",
+        f"- корзин: {_format_number(tool_result.cart_count)}",
+        f"- заказов: {_format_number(tool_result.order_count)}",
+        f"- сумма заказов: {_format_currency(tool_result.order_sum)}",
+        f"- рекламные расходы: {_format_currency(tool_result.ad_spend)}",
+        f"- стоимость корзины: {_format_currency(tool_result.cost_per_cart_total)}",
+        f"- CPO: {_format_currency(tool_result.cpo_total)}",
+        "",
+        "Краткий вывод:",
+    ]
+    notes: list[str] = []
+    if tool_result.data_quality.partial_rows:
+        notes.append(f"partial_rows={tool_result.data_quality.partial_rows}")
+    if tool_result.data_quality.empty_rows:
+        notes.append(f"empty_rows={tool_result.data_quality.empty_rows}")
+    notes.extend(tool_result.data_quality.notes)
+    if notes:
+        lines.append("Есть пометки по качеству данных: " + "; ".join(notes))
+    else:
+        lines.append("Данные за период загружены без специальных пометок качества.")
+    return "\n".join(lines)
+
+
+def _format_product_metrics_content(tool_result: ProductMetricsResponse) -> str:
+    header = (
+        f"Товар nm_id {tool_result.nm_id} за {_format_date(tool_result.date_from)} — "
+        f"{_format_date(tool_result.date_to)}."
+    )
+    if not tool_result.found:
+        return "\n".join([header, "", "Данных по товару за выбранный период нет."])
+
+    lines = [
+        header,
+        "",
+        "Итого:",
+        f"- переходов: {_format_number(sum((item.card_clicks or 0) for item in tool_result.daily) if tool_result.daily else None)}",
+        f"- корзин: {_format_number(tool_result.summary.cart_count)}",
+        f"- заказов: {_format_number(tool_result.summary.order_count)}",
+        f"- сумма заказов: {_format_currency(tool_result.summary.order_sum)}",
+        "",
+        "По дням:",
+    ]
+    daily_rows = tool_result.daily[:MAX_PRODUCT_DAILY_LINES]
+    for item in daily_rows:
+        lines.append(
+            f"{_format_date(item.date)}: переходы {_format_number(item.card_clicks)}, "
+            f"корзины {_format_number(item.cart_count)}, заказы {_format_number(item.order_count)}, "
+            f"сумма {_format_currency(item.order_sum)}"
+        )
+    if len(tool_result.daily) > MAX_PRODUCT_DAILY_LINES:
+        lines.append(f"Показаны первые {MAX_PRODUCT_DAILY_LINES} дней из {len(tool_result.daily)}.")
+    return "\n".join(lines)
+
+
+def _format_price_monitor_content(tool_result: PriceMonitorResponse) -> str:
+    title = (
+        f"Алерты по ценам за {_format_date(tool_result.snapshot_date)}:"
+        if tool_result.items and all(item.is_alert for item in tool_result.items)
+        else f"Мониторинг цен за {_format_date(tool_result.snapshot_date)}:"
+    )
+    lines = [title, ""]
+    if tool_result.rows == 0:
+        lines.append("Проверенных товаров за дату нет.")
+        return "\n".join(lines)
+
+    status_counts = Counter(item.fetch_status or "unknown" for item in tool_result.items)
+    lines.extend(
+        [
+            f"- проверено товаров: {tool_result.rows}",
+            f"- алертов: {tool_result.alerts}",
+        ]
+    )
+    for status_name, count in sorted(status_counts.items()):
+        lines.append(f"- {status_name}: {count}")
+    lines.extend(["", f"Первые {min(len(tool_result.items), MAX_PRICE_MONITOR_LINES)} строк:"])
+    for index, item in enumerate(tool_result.items[:MAX_PRICE_MONITOR_LINES], start=1):
+        supplier_article = item.supplier_article or "нет артикула"
+        lines.append(
+            f"{index}. nm_id {item.nm_id}, артикул {supplier_article}, buyer_price {_format_currency(item.buyer_visible_price)}, "
+            f"previous_price {_format_currency(item.previous_price)}, status {item.fetch_status}"
+        )
+    return "\n".join(lines)
+
+
+def _format_tool_content(tool_result) -> str:
+    if isinstance(tool_result, DbHealthResponse):
+        return _format_db_health_content(tool_result)
+    if isinstance(tool_result, DashboardSummaryResponse):
+        return _format_dashboard_summary_content(tool_result)
+    if isinstance(tool_result, ProductMetricsResponse):
+        return _format_product_metrics_content(tool_result)
+    if isinstance(tool_result, PriceMonitorResponse):
+        return _format_price_monitor_content(tool_result)
+    return json.dumps(tool_result.model_dump(mode="json"), ensure_ascii=False)
+
+
 def _build_tool_result_payload(tool_result) -> dict:
     structured = tool_result.model_dump(mode="json")
+    try:
+        text_content = _format_tool_content(tool_result)
+    except Exception:
+        logger.exception("Failed to build human-readable MCP content")
+        text_content = json.dumps(structured, ensure_ascii=False)
     return {
         "content": [
             {
                 "type": "text",
-                "text": json.dumps(structured, ensure_ascii=False),
+                "text": text_content,
             }
         ],
         "structuredContent": structured,

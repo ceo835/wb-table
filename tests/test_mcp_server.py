@@ -139,7 +139,12 @@ class FakeRepository:
         )
 
 
-def build_test_client(*, mcp_public_mode: bool = False) -> TestClient:
+class EmptyPriceMonitorRepository(FakeRepository):
+    def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse:
+        return PriceMonitorResponse(snapshot_date=payload.snapshot_date, rows=0, alerts=0, items=[])
+
+
+def build_test_client(*, mcp_public_mode: bool = False, repository=None) -> TestClient:
     settings = McpServiceSettings(
         database_url="postgresql+psycopg://example",
         auth_token="test-token",
@@ -148,7 +153,7 @@ def build_test_client(*, mcp_public_mode: bool = False) -> TestClient:
         max_date_range_days=60,
         mcp_public_mode=mcp_public_mode,
     )
-    app = create_app(repository=FakeRepository(), settings=settings)
+    app = create_app(repository=repository or FakeRepository(), settings=settings)
     return TestClient(app)
 
 
@@ -285,6 +290,10 @@ def test_mcp_tools_list_exposes_registered_tools() -> None:
         "get_product_metrics",
         "get_price_monitor",
     ]
+    assert "PostgreSQL" in payload["result"]["tools"][0]["description"]
+    assert "витрине mart_total_report" in payload["result"]["tools"][1]["description"]
+    assert "одного товара" in payload["result"]["tools"][2]["description"]
+    assert "мониторинга цен WB" in payload["result"]["tools"][3]["description"]
 
 
 def test_mcp_tools_call_db_health_returns_structured_content() -> None:
@@ -304,6 +313,10 @@ def test_mcp_tools_call_db_health_returns_structured_content() -> None:
     assert payload["result"]["isError"] is False
     assert payload["result"]["structuredContent"]["rows"] == 7434
     assert payload["result"]["structuredContent"]["min_date"] == "2026-02-12"
+    text = payload["result"]["content"][0]["text"]
+    assert "Подключение к PostgreSQL работает." in text
+    assert "- rows: 7434" in text
+    assert "- min_date: 2026-02-12" in text
 
 
 def test_mcp_tools_call_dashboard_summary_returns_structured_content() -> None:
@@ -329,6 +342,93 @@ def test_mcp_tools_call_dashboard_summary_returns_structured_content() -> None:
     assert response.status_code == 200
     assert payload["result"]["structuredContent"]["rows"] == 12
     assert payload["result"]["structuredContent"]["nm_count"] == 3
+    text = payload["result"]["content"][0]["text"]
+    assert "Сводка за 2026-06-07 — 2026-06-18:" in text
+    assert "- строк: 12" in text
+    assert "- товаров: 3" in text
+    assert "Краткий вывод:" in text
+
+
+def test_mcp_tools_call_product_metrics_returns_human_readable_content() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "get_product_metrics",
+                "arguments": {
+                    "nm_id": 91470767,
+                    "date_from": "2026-06-07",
+                    "date_to": "2026-06-18",
+                },
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["structuredContent"]["nm_id"] == 91470767
+    text = payload["result"]["content"][0]["text"]
+    assert "Товар nm_id 91470767 за 2026-06-07 — 2026-06-18." in text
+    assert "Итого:" in text
+    assert "По дням:" in text
+    assert "2026-06-18: переходы 0" in text
+
+
+def test_mcp_tools_call_price_monitor_returns_human_readable_content() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "get_price_monitor",
+                "arguments": {
+                    "snapshot_date": "2026-06-18",
+                    "alerts_only": False,
+                },
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["structuredContent"]["rows"] == 2
+    text = payload["result"]["content"][0]["text"]
+    assert "Мониторинг цен за 2026-06-18:" in text
+    assert "- проверено товаров: 2" in text
+    assert "- алертов: 1" in text
+    assert "1. nm_id 91470767" in text
+
+
+def test_mcp_tools_call_price_monitor_returns_empty_response_without_500() -> None:
+    client = build_test_client(repository=EmptyPriceMonitorRepository())
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "get_price_monitor",
+                "arguments": {
+                    "snapshot_date": "2026-06-20",
+                    "alerts_only": False,
+                },
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["structuredContent"]["rows"] == 0
+    assert payload["result"]["structuredContent"]["items"] == []
+    assert "Проверенных товаров за дату нет." in payload["result"]["content"][0]["text"]
 
 
 def test_mcp_notifications_initialized_returns_accepted_without_body() -> None:
@@ -435,3 +535,11 @@ def test_build_price_monitor_response_ignores_suppressed_alerts() -> None:
     assert response.items[0].is_alert is False
     assert response.items[0].buyer_visible_price == Decimal("1180")
     assert response.items[0].previous_price == Decimal("630")
+
+
+def test_build_price_monitor_response_returns_empty_payload_without_error() -> None:
+    payload = PriceMonitorRequest(snapshot_date=date(2026, 6, 20), alerts_only=False)
+    response = build_price_monitor_response(payload, [], [])
+    assert response.rows == 0
+    assert response.alerts == 0
+    assert response.items == []
