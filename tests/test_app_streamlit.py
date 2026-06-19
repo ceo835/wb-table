@@ -11,9 +11,11 @@ from app_streamlit import (
     CHART_THRESHOLD_CART_COST,
     CHART_THRESHOLD_CPO,
     DISPLAY_COLUMNS_BY_DATE,
+    DEFAULT_STREAMLIT_DISPLAY_MIN_DATE,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
     apply_display_min_date_filter,
     apply_tracked_scope_filters,
+    build_streamlit_display_min_date_caption,
     build_band_summary_table,
     build_category_summary_table,
     build_chart_series_dataframe,
@@ -50,6 +52,7 @@ from app_streamlit import (
     prepare_dataframe_for_streamlit_display,
     prepare_stock_warehouse_table_for_display,
     resolve_data_source,
+    resolve_streamlit_display_min_date,
     prepare_dataframe,
     build_stock_warehouse_product_table,
     build_stock_warehouse_summary_card_html,
@@ -84,6 +87,24 @@ def test_apply_display_min_date_filter_hides_dates_before_cutoff_and_preserves_a
 
     assert result["report_date"].tolist() == ["2026-06-07", "2026-06-08"]
     assert "display_coverage" in result.attrs
+
+
+def test_resolve_streamlit_display_min_date_uses_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("STREAMLIT_DISPLAY_MIN_DATE", "2026-03-12")
+
+    assert resolve_streamlit_display_min_date().isoformat() == "2026-03-12"
+
+
+def test_resolve_streamlit_display_min_date_falls_back_on_invalid_env(monkeypatch) -> None:
+    monkeypatch.setenv("STREAMLIT_DISPLAY_MIN_DATE", "not-a-date")
+
+    assert resolve_streamlit_display_min_date() == DEFAULT_STREAMLIT_DISPLAY_MIN_DATE
+
+
+def test_build_streamlit_display_min_date_caption_uses_effective_date() -> None:
+    assert build_streamlit_display_min_date_caption(datetime(2026, 3, 12).date()) == (
+        "Технический минимум отображения: 2026-03-12"
+    )
 
 
 def test_prepare_dataframe_builds_data_quality_status_when_missing() -> None:

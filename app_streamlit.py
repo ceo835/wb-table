@@ -75,6 +75,7 @@ WB_SITE_PRICE_ALERT_NO_DATA = "NO_PRICE_DATA"
 WB_SITE_PRICE_ALERT_FAILED = "FETCH_FAILED"
 AD_CAMPAIGN_PRODUCT_LABEL = "РК по товару"
 DEFAULT_STREAMLIT_DISPLAY_MIN_DATE = date(2026, 6, 7)
+STREAMLIT_DISPLAY_MIN_DATE_ENV_VAR = "STREAMLIT_DISPLAY_MIN_DATE"
 
 LATEST_MODE_LABEL = "Последняя дата + динамика"
 BY_DATE_MODE_LABEL = "По датам"
@@ -1189,17 +1190,35 @@ def load_app_dataset() -> tuple[pd.DataFrame, str]:
 
 
 def resolve_streamlit_display_min_date() -> date | None:
-    raw_value = (os.getenv("STREAMLIT_DISPLAY_MIN_DATE") or "").strip()
+    raw_value = (os.getenv(STREAMLIT_DISPLAY_MIN_DATE_ENV_VAR) or "").strip()
     if not raw_value:
         return DEFAULT_STREAMLIT_DISPLAY_MIN_DATE
     try:
         return date.fromisoformat(raw_value)
     except ValueError:
+        logger.warning(
+            "Invalid %s value %r, falling back to default %s",
+            STREAMLIT_DISPLAY_MIN_DATE_ENV_VAR,
+            raw_value,
+            DEFAULT_STREAMLIT_DISPLAY_MIN_DATE.isoformat(),
+        )
         return DEFAULT_STREAMLIT_DISPLAY_MIN_DATE
 
 
-def apply_display_min_date_filter(df: pd.DataFrame, *, date_column: str = "report_date") -> pd.DataFrame:
-    display_min_date = resolve_streamlit_display_min_date()
+def build_streamlit_display_min_date_caption(display_min_date: date | None) -> str:
+    if display_min_date is None:
+        return "Технический минимум отображения: не ограничен"
+    return f"Технический минимум отображения: {display_min_date.isoformat()}"
+
+
+def apply_display_min_date_filter(
+    df: pd.DataFrame,
+    *,
+    date_column: str = "report_date",
+    display_min_date: date | None = None,
+) -> pd.DataFrame:
+    if display_min_date is None:
+        display_min_date = resolve_streamlit_display_min_date()
     if display_min_date is None or df.empty or date_column not in df.columns:
         return df
 
@@ -4878,12 +4897,17 @@ def main() -> None:
         st.rerun()
 
     df, data_source = load_app_dataset()
-    df = apply_display_min_date_filter(df)
+    display_min_date = resolve_streamlit_display_min_date()
+    df = apply_display_min_date_filter(df, display_min_date=display_min_date)
     display_coverage = df.attrs.get("display_coverage")
     ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
-    ad_campaign_product_df = apply_display_min_date_filter(ad_campaign_product_df)
+    ad_campaign_product_df = apply_display_min_date_filter(
+        ad_campaign_product_df,
+        display_min_date=display_min_date,
+    )
     render_compact_metric_css()
     st.caption(f"Источник данных: {'PostgreSQL' if data_source == 'db' else 'CSV'}")
+    st.caption(build_streamlit_display_min_date_caption(display_min_date))
     render_available_dates_summary(df)
     filtered, filter_debug_trace = build_filtered_dataset(df, data_source)
 
