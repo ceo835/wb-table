@@ -39,6 +39,13 @@ class HealthResponse(ApiModel):
     ok: bool = True
 
 
+class DbHealthResponse(ApiModel):
+    ok: bool
+    rows: int
+    min_date: date | None
+    max_date: date | None
+
+
 class DataQualityResponse(ApiModel):
     partial_rows: int
     empty_rows: int

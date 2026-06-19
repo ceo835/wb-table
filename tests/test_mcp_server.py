@@ -10,6 +10,7 @@ from src.mcp_server.schemas import (
     DashboardSummaryRequest,
     DashboardSummaryResponse,
     DataQualityResponse,
+    DbHealthResponse,
     PriceMonitorRequest,
     PriceMonitorResponse,
     PriceMonitorItemResponse,
@@ -129,6 +130,14 @@ class FakeRepository:
             items=items,
         )
 
+    def get_db_health(self) -> DbHealthResponse:
+        return DbHealthResponse(
+            ok=True,
+            rows=7434,
+            min_date=date(2026, 2, 12),
+            max_date=date(2026, 6, 19),
+        )
+
 
 def build_test_client() -> TestClient:
     settings = McpServiceSettings(
@@ -213,6 +222,27 @@ def test_get_price_monitor_alerts_only_filters_to_alerts() -> None:
     assert response.status_code == 200
     assert len(payload["items"]) == 1
     assert payload["items"][0]["is_alert"] is True
+
+
+def test_get_db_health_works_with_token() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/tools/db_health",
+        headers={"Authorization": "Bearer test-token"},
+        json={},
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["rows"] == 7434
+    assert payload["min_date"] == "2026-02-12"
+    assert payload["max_date"] == "2026-06-19"
+
+
+def test_get_db_health_requires_token() -> None:
+    client = build_test_client()
+    response = client.post("/tools/db_health", json={})
+    assert response.status_code == 401
 
 
 def test_none_values_remain_null_in_product_metrics() -> None:

@@ -11,6 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from src.mcp_server.schemas import (
     DashboardSummaryRequest,
     DashboardSummaryResponse,
+    DbHealthResponse,
     ErrorResponse,
     HealthResponse,
     PriceMonitorRequest,
@@ -66,6 +67,18 @@ def create_app(
         return HealthResponse(ok=True)
 
     @app.post(
+        "/tools/db_health",
+        response_model=DbHealthResponse,
+        dependencies=[Depends(require_auth)],
+    )
+    async def db_health() -> DbHealthResponse:
+        try:
+            return resolved_repository.get_db_health()
+        except Exception:
+            logger.exception("MCP tool failed: db_health")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
+
+    @app.post(
         "/tools/get_dashboard_summary",
         response_model=DashboardSummaryResponse,
         dependencies=[Depends(require_auth)],
@@ -76,7 +89,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except Exception:
-            logger.exception("MCP get_dashboard_summary failed")
+            logger.exception("MCP tool failed: get_dashboard_summary")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
 
     @app.post(
@@ -90,7 +103,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except Exception:
-            logger.exception("MCP get_product_metrics failed")
+            logger.exception("MCP tool failed: get_product_metrics")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
 
     @app.post(
@@ -104,7 +117,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except Exception:
-            logger.exception("MCP get_price_monitor failed")
+            logger.exception("MCP tool failed: get_price_monitor")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
 
     return app

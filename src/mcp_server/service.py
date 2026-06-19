@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+import logging
 from typing import Any, Iterable, Iterator, Protocol
 
 from sqlalchemy import and_, case, distinct, func, select, text
@@ -15,6 +16,7 @@ from src.mcp_server.schemas import (
     DashboardSummaryRequest,
     DashboardSummaryResponse,
     DataQualityResponse,
+    DbHealthResponse,
     PriceMonitorRequest,
     PriceMonitorResponse,
     PriceMonitorItemResponse,
@@ -28,9 +30,11 @@ from src.mcp_server.settings import McpServiceSettings
 
 ACTIVE_ALERT_STATUS = "PRICE_CHANGED_50"
 SUPPRESSED_ALERT_PREFIX = "MANUAL_SUPPRESSED_"
+logger = logging.getLogger(__name__)
 
 
 class McpRepository(Protocol):
+    def get_db_health(self) -> DbHealthResponse: ...
     def get_dashboard_summary(self, payload: DashboardSummaryRequest) -> DashboardSummaryResponse: ...
     def get_product_metrics(self, payload: ProductMetricsRequest) -> ProductMetricsResponse: ...
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse: ...
@@ -288,6 +292,7 @@ class PostgresMcpRepository:
             yield session
             session.rollback()
         except Exception:
+            logger.exception("MCP repository DB session failed")
             session.rollback()
             raise
         finally:
@@ -302,6 +307,22 @@ class PostgresMcpRepository:
                 SettingsProducts.nm_id == MartTotalReport.nm_id,
                 SettingsProducts.active.is_(True),
             ),
+        )
+
+    def get_db_health(self) -> DbHealthResponse:
+        with self.readonly_session() as session:
+            stmt = select(
+                func.count().label("rows"),
+                func.min(MartTotalReport.report_date).label("min_date"),
+                func.max(MartTotalReport.report_date).label("max_date"),
+            )
+            row = session.execute(stmt).one()
+
+        return DbHealthResponse(
+            ok=True,
+            rows=int(row.rows or 0),
+            min_date=row.min_date,
+            max_date=row.max_date,
         )
 
     def get_dashboard_summary(self, payload: DashboardSummaryRequest) -> DashboardSummaryResponse:
