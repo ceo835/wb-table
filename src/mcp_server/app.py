@@ -18,6 +18,7 @@ from src.mcp_server.schemas import (
     DbHealthResponse,
     ErrorResponse,
     HealthResponse,
+    MartSchemaResponse,
     PriceMonitorRequest,
     PriceMonitorResponse,
     ProductMetricsRequest,
@@ -51,6 +52,15 @@ def build_mcp_tools_catalog() -> list[dict]:
                 "минимальную дату и максимальную дату в mart_total_report. Использовать первым "
                 "для диагностики подключения. Ответ показывать пользователю короткой таблицей: "
                 "rows, min_date, max_date."
+            ),
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "get_mart_schema",
+            "description": (
+                "Возвращает реальную схему таблицы mart_total_report: список колонок и их типы. "
+                "Использовать для диагностики, если аналитические MCP tools падают из-за несовпадения "
+                "ожидаемых и фактических колонок в production."
             ),
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
@@ -156,7 +166,7 @@ def _format_dashboard_summary_content(tool_result: DashboardSummaryResponse) -> 
         "",
         f"- строк: {tool_result.rows}",
         f"- товаров: {tool_result.nm_count}",
-        f"- переходов в карточку: нет данных",
+        f"- переходов в карточку: {_format_number(tool_result.card_clicks)}",
         f"- корзин: {_format_number(tool_result.cart_count)}",
         f"- заказов: {_format_number(tool_result.order_count)}",
         f"- сумма заказов: {_format_currency(tool_result.order_sum)}",
@@ -176,6 +186,21 @@ def _format_dashboard_summary_content(tool_result: DashboardSummaryResponse) -> 
         lines.append("Есть пометки по качеству данных: " + "; ".join(notes))
     else:
         lines.append("Данные за период загружены без специальных пометок качества.")
+    return "\n".join(lines)
+
+
+def _format_mart_schema_content(tool_result: MartSchemaResponse) -> str:
+    lines = [
+        f"Схема таблицы {tool_result.table_name}:",
+        "",
+        f"- колонок: {len(tool_result.columns)}",
+        "",
+        "Первые колонки:",
+    ]
+    for column in tool_result.columns[:20]:
+        lines.append(f"- {column.column_name}: {column.data_type}")
+    if len(tool_result.columns) > 20:
+        lines.append(f"Показаны первые 20 колонок из {len(tool_result.columns)}.")
     return "\n".join(lines)
 
 
@@ -202,7 +227,10 @@ def _format_product_metrics_content(tool_result: ProductMetricsResponse) -> str:
     for item in daily_rows:
         lines.append(
             f"{_format_date(item.date)}: переходы {_format_number(item.card_clicks)}, "
-            f"корзины {_format_number(item.cart_count)}, заказы {_format_number(item.order_count)}, "
+            f"CTR {_format_number(item.ctr)}, корзины {_format_number(item.cart_count)}, "
+            f"конверсия в корзину {_format_number(item.add_to_cart_conversion)}, "
+            f"заказы {_format_number(item.order_count)}, "
+            f"конверсия в заказ {_format_number(item.cart_to_order_conversion)}, "
             f"сумма {_format_currency(item.order_sum)}"
         )
     if len(tool_result.daily) > MAX_PRODUCT_DAILY_LINES:
@@ -243,6 +271,8 @@ def _format_price_monitor_content(tool_result: PriceMonitorResponse) -> str:
 def _format_tool_content(tool_result) -> str:
     if isinstance(tool_result, DbHealthResponse):
         return _format_db_health_content(tool_result)
+    if isinstance(tool_result, MartSchemaResponse):
+        return _format_mart_schema_content(tool_result)
     if isinstance(tool_result, DashboardSummaryResponse):
         return _format_dashboard_summary_content(tool_result)
     if isinstance(tool_result, ProductMetricsResponse):
@@ -274,6 +304,8 @@ def _build_tool_result_payload(tool_result) -> dict:
 def _execute_mcp_tool(name: str, arguments: dict, repository: McpRepository) -> dict:
     if name == "db_health":
         result = repository.get_db_health()
+    elif name == "get_mart_schema":
+        result = repository.get_mart_schema()
     elif name == "get_dashboard_summary":
         result = repository.get_dashboard_summary(DashboardSummaryRequest.model_validate(arguments))
     elif name == "get_product_metrics":
@@ -352,7 +384,7 @@ def create_app(
                         "result": {
                             "protocolVersion": MCP_PROTOCOL_VERSION,
                             "capabilities": {
-                                "tools": {"listChanged": False},
+        "tools": {"listChanged": False},
                             },
                             "serverInfo": {
                                 "name": MCP_SERVER_NAME,
@@ -435,6 +467,18 @@ def create_app(
             return resolved_repository.get_db_health()
         except Exception:
             logger.exception("MCP tool failed: db_health")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
+
+    @app.post(
+        "/tools/get_mart_schema",
+        response_model=MartSchemaResponse,
+        dependencies=[Depends(require_auth)],
+    )
+    async def get_mart_schema() -> MartSchemaResponse:
+        try:
+            return resolved_repository.get_mart_schema()
+        except Exception:
+            logger.exception("MCP tool failed: get_mart_schema")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
 
     @app.post(

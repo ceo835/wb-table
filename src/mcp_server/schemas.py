@@ -46,6 +46,16 @@ class DbHealthResponse(ApiModel):
     max_date: date | None
 
 
+class MartSchemaColumnResponse(ApiModel):
+    column_name: str
+    data_type: str
+
+
+class MartSchemaResponse(ApiModel):
+    table_name: str
+    columns: list[MartSchemaColumnResponse]
+
+
 class DataQualityResponse(ApiModel):
     partial_rows: int
     empty_rows: int
@@ -57,6 +67,7 @@ class DashboardSummaryResponse(ApiModel):
     date_to: date
     rows: int
     nm_count: int
+    card_clicks: Decimal | None
     cart_count: Decimal | None
     order_count: Decimal | None
     order_sum: Decimal | None
@@ -74,8 +85,11 @@ class DashboardSummaryResponse(ApiModel):
 class ProductDailyMetricsResponse(ApiModel):
     date: date
     card_clicks: Decimal | None
+    ctr: Decimal | None
     cart_count: Decimal | None
+    add_to_cart_conversion: Decimal | None
     order_count: Decimal | None
+    cart_to_order_conversion: Decimal | None
     order_sum: Decimal | None
     ad_spend: Decimal | None
     ad_clicks: Decimal | None

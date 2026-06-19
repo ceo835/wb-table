@@ -11,6 +11,8 @@ from src.mcp_server.schemas import (
     DashboardSummaryResponse,
     DataQualityResponse,
     DbHealthResponse,
+    MartSchemaResponse,
+    MartSchemaColumnResponse,
     PriceMonitorRequest,
     PriceMonitorResponse,
     PriceMonitorItemResponse,
@@ -31,6 +33,7 @@ class FakeRepository:
             date_to=payload.date_to,
             rows=12,
             nm_count=3,
+            card_clicks=Decimal("77"),
             cart_count=Decimal("44"),
             order_count=Decimal("11"),
             order_sum=Decimal("12345.67"),
@@ -73,8 +76,11 @@ class FakeRepository:
                 ProductDailyMetricsResponse(
                     date=payload.date_to,
                     card_clicks=Decimal("0"),
+                    ctr=Decimal("0"),
                     cart_count=Decimal("0"),
+                    add_to_cart_conversion=Decimal("0"),
                     order_count=Decimal("0"),
+                    cart_to_order_conversion=Decimal("0"),
                     order_sum=Decimal("0"),
                     ad_spend=Decimal("10"),
                     ad_clicks=Decimal("1"),
@@ -136,6 +142,15 @@ class FakeRepository:
             rows=7434,
             min_date=date(2026, 2, 12),
             max_date=date(2026, 6, 19),
+        )
+
+    def get_mart_schema(self) -> MartSchemaResponse:
+        return MartSchemaResponse(
+            table_name="mart_total_report",
+            columns=[
+                MartSchemaColumnResponse(column_name="report_date", data_type="date"),
+                MartSchemaColumnResponse(column_name="nm_id", data_type="bigint"),
+            ],
         )
 
 
@@ -286,14 +301,16 @@ def test_mcp_tools_list_exposes_registered_tools() -> None:
     assert response.status_code == 200
     assert tool_names == [
         "db_health",
+        "get_mart_schema",
         "get_dashboard_summary",
         "get_product_metrics",
         "get_price_monitor",
     ]
     assert "PostgreSQL" in payload["result"]["tools"][0]["description"]
-    assert "витрине mart_total_report" in payload["result"]["tools"][1]["description"]
-    assert "одного товара" in payload["result"]["tools"][2]["description"]
-    assert "мониторинга цен WB" in payload["result"]["tools"][3]["description"]
+    assert "реальную схему таблицы mart_total_report" in payload["result"]["tools"][1]["description"]
+    assert "витрине mart_total_report" in payload["result"]["tools"][2]["description"]
+    assert "одного товара" in payload["result"]["tools"][3]["description"]
+    assert "мониторинга цен WB" in payload["result"]["tools"][4]["description"]
 
 
 def test_mcp_tools_call_db_health_returns_structured_content() -> None:
@@ -317,6 +334,25 @@ def test_mcp_tools_call_db_health_returns_structured_content() -> None:
     assert "Подключение к PostgreSQL работает." in text
     assert "- rows: 7434" in text
     assert "- min_date: 2026-02-12" in text
+
+
+def test_mcp_tools_call_get_mart_schema_returns_schema_content() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/call",
+            "params": {"name": "get_mart_schema", "arguments": {}},
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["structuredContent"]["table_name"] == "mart_total_report"
+    assert payload["result"]["structuredContent"]["columns"][0]["column_name"] == "report_date"
+    assert "Схема таблицы mart_total_report:" in payload["result"]["content"][0]["text"]
 
 
 def test_mcp_tools_call_dashboard_summary_returns_structured_content() -> None:
@@ -346,6 +382,7 @@ def test_mcp_tools_call_dashboard_summary_returns_structured_content() -> None:
     assert "Сводка за 2026-06-07 — 2026-06-18:" in text
     assert "- строк: 12" in text
     assert "- товаров: 3" in text
+    assert "- переходов в карточку: 77" in text
     assert "Краткий вывод:" in text
 
 
