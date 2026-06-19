@@ -13,6 +13,7 @@ from src.importers.ivan_ads_wide_importer import (
     build_ivan_ads_wide_import_dry_run_summary,
     build_ivan_ads_wide_duplicate_report,
     parse_ivan_ads_wide_csv,
+    write_ivan_ads_wide_skipped_conflicts_report,
 )
 
 
@@ -262,3 +263,85 @@ def test_build_ivan_ads_wide_import_dry_run_summary_dedupe_exact_drops_only_exac
     assert summary["duplicate_exact_key_count"] == 1
     assert summary["duplicate_conflicting_key_count"] == 1
     assert summary["can_apply"] is False
+
+
+def test_build_ivan_ads_wide_import_dry_run_summary_skip_conflicts_allows_partial_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_path = _write_cp1251_csv(
+        tmp_path / "ivan_ads_wide_skip_conflicts.csv",
+        [
+            HEADER,
+            '2026-06-18,111111,100,5,"5,00%","20,00",1000,100,,,,,,,,',
+            '2026-06-18,111111,100,5,"5,00%","20,00",1000,100,,,,,,,,',
+            '2026-06-18,222222,200,6,"6,00%","30,00",2000,120,,,,,,,,',
+            '2026-06-18,222222,250,6,"6,00%","30,00",2000,120,,,,,,,,',
+        ],
+    )
+    parsed = parse_ivan_ads_wide_csv(file_path)
+
+    @contextmanager
+    def _dummy_session_scope():
+        class _DummySession:
+            pass
+
+        yield _DummySession()
+
+    monkeypatch.setattr("src.importers.ivan_ads_wide_importer.session_scope", _dummy_session_scope)
+    monkeypatch.setattr("src.importers.ivan_ads_wide_importer._load_existing_ads_wide_keys", lambda session, rows: set())
+
+    summary = build_ivan_ads_wide_import_dry_run_summary(parsed, dedupe_mode="exact", skip_conflicts=True)
+
+    assert summary["original_long_rows"] == 4
+    assert summary["after_exact_dedupe_rows"] == 3
+    assert summary["conflicting_keys_count"] == 1
+    assert summary["conflicting_rows_skipped"] == 2
+    assert summary["clean_rows_to_import"] == 1
+    assert summary["rows_planned_for_import"] == 1
+    assert summary["can_apply"] is True
+    assert summary["import_quality"] == "PARTIAL_CONFLICTS_SKIPPED"
+
+
+def test_build_ivan_ads_wide_import_dry_run_summary_skip_conflicts_requires_dedupe_exact(tmp_path: Path) -> None:
+    file_path = _write_cp1251_csv(
+        tmp_path / "ivan_ads_wide_skip_conflicts_requires_exact.csv",
+        [
+            HEADER,
+            '2026-06-18,111111,100,5,"5,00%","20,00",1000,100,,,,,,,,',
+            '2026-06-18,111111,150,5,"5,00%","20,00",1000,100,,,,,,,,',
+        ],
+    )
+    parsed = parse_ivan_ads_wide_csv(file_path)
+
+    with pytest.raises(ValueError, match="--skip-conflicts requires --dedupe exact"):
+        build_ivan_ads_wide_import_dry_run_summary(parsed, skip_conflicts=True)
+
+
+def test_write_ivan_ads_wide_skipped_conflicts_report_writes_only_conflicting_rows_after_exact_dedupe(
+    tmp_path: Path,
+) -> None:
+    file_path = _write_cp1251_csv(
+        tmp_path / "ivan_ads_wide_skipped_conflicts_report.csv",
+        [
+            HEADER,
+            '2026-06-18,111111,100,5,"5,00%","20,00",1000,100,,,,,,,,',
+            '2026-06-18,111111,100,5,"5,00%","20,00",1000,100,,,,,,,,',
+            '2026-06-18,222222,200,6,"6,00%","30,00",2000,120,,,,,,,,',
+            '2026-06-18,222222,250,6,"6,00%","30,00",2000,120,,,,,,,,',
+        ],
+    )
+    parsed = parse_ivan_ads_wide_csv(file_path)
+    report_path = tmp_path / "skipped_conflicts.csv"
+
+    written_path = write_ivan_ads_wide_skipped_conflicts_report(
+        parsed,
+        dedupe_mode="exact",
+        output_path=report_path,
+    )
+
+    rows = list(report_path.read_text(encoding="utf-8").splitlines())
+    assert written_path == report_path
+    assert len(rows) == 3
+    assert "222222" in rows[1]
+    assert "222222" in rows[2]

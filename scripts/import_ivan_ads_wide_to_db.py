@@ -19,6 +19,7 @@ from src.importers.ivan_ads_wide_importer import (
     build_ivan_ads_wide_import_dry_run_summary,
     parse_ivan_ads_wide_csv,
     write_ivan_ads_wide_duplicate_report,
+    write_ivan_ads_wide_skipped_conflicts_report,
 )
 
 
@@ -28,6 +29,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Explicit dry-run flag. Dry-run is the default.")
     parser.add_argument("--apply", action="store_true", help="Write normalized rows into fact_ivan_ads_wide_day.")
     parser.add_argument("--dedupe", choices=["exact"], help="Allow dropping only fully identical duplicate rows.")
+    parser.add_argument(
+        "--skip-conflicts",
+        action="store_true",
+        help="Requires --dedupe exact. Skip all rows that belong to conflicting duplicate keys.",
+    )
     return parser
 
 
@@ -35,13 +41,23 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     args = build_arg_parser().parse_args()
+    if args.skip_conflicts and args.dedupe != "exact":
+        raise SystemExit("--skip-conflicts requires --dedupe exact")
     parsed = parse_ivan_ads_wide_csv(args.file)
     if args.apply:
-        summary = apply_ivan_ads_wide_import(parsed, dedupe_mode=args.dedupe)
+        summary = apply_ivan_ads_wide_import(parsed, dedupe_mode=args.dedupe, skip_conflicts=args.skip_conflicts)
     else:
-        summary = build_ivan_ads_wide_import_dry_run_summary(parsed, dedupe_mode=args.dedupe)
+        summary = build_ivan_ads_wide_import_dry_run_summary(
+            parsed,
+            dedupe_mode=args.dedupe,
+            skip_conflicts=args.skip_conflicts,
+        )
         summary["dry_run_forced"] = True
     summary["duplicate_report_path"] = str(write_ivan_ads_wide_duplicate_report(parsed))
+    if args.skip_conflicts:
+        summary["skipped_conflicts_report_path"] = str(
+            write_ivan_ads_wide_skipped_conflicts_report(parsed, dedupe_mode=args.dedupe)
+        )
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
     return 0
 
