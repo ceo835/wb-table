@@ -100,10 +100,33 @@ class ProductDailyMetricsResponse(ApiModel):
 
 
 class ProductSummaryResponse(ApiModel):
+    card_clicks_total: Decimal | None = None
     cart_count: Decimal | None
     order_count: Decimal | None
     order_sum: Decimal | None
     ad_spend: Decimal | None
+    avg_ctr: Decimal | None = None
+    avg_add_to_cart_conversion: Decimal | None = None
+    avg_cart_to_order_conversion: Decimal | None = None
+    order_sum_available_dates_count: int = 0
+    order_sum_missing_dates_count: int = 0
+
+
+class ProductPeriodMetaResponse(ApiModel):
+    rows_count: int
+    days_requested: int
+    days_returned: int
+
+
+class ProductDataQualityResponse(ApiModel):
+    order_sum_available_dates_count: int
+    order_sum_missing_dates_count: int
+    order_sum_missing_for_dates: list[date]
+    wb_buyer_price_missing: bool
+    ad_metrics_missing: bool
+    stock_by_size_missing: bool
+    delivery_time_missing: bool
+    cannot_calculate_period_ctr_without_impressions: bool
 
 
 class ProductMetricsResponse(ApiModel):
@@ -115,6 +138,15 @@ class ProductMetricsResponse(ApiModel):
     date_to: date
     daily: list[ProductDailyMetricsResponse]
     summary: ProductSummaryResponse
+    period_meta: ProductPeriodMetaResponse
+    source_coverage: dict[str, str]
+    data_quality: ProductDataQualityResponse
+    field_definitions: dict[str, str]
+    null_semantics: dict[str, str]
+    analysis_status: str
+    allowed_inferences: list[str]
+    forbidden_inferences: list[str]
+    analysis_limits: list[str]
 
 
 class PriceMonitorItemResponse(ApiModel):

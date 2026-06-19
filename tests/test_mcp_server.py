@@ -16,9 +16,11 @@ from src.mcp_server.schemas import (
     PriceMonitorRequest,
     PriceMonitorResponse,
     PriceMonitorItemResponse,
+    ProductDataQualityResponse,
     ProductDailyMetricsResponse,
     ProductMetricsRequest,
     ProductMetricsResponse,
+    ProductPeriodMetaResponse,
     ProductSummaryResponse,
 )
 from src.mcp_server.service import build_price_monitor_response
@@ -59,11 +61,49 @@ class FakeRepository:
                 date_to=payload.date_to,
                 daily=[],
                 summary=ProductSummaryResponse(
+                    card_clicks_total=None,
                     cart_count=None,
                     order_count=None,
                     order_sum=None,
                     ad_spend=None,
+                    avg_ctr=None,
+                    avg_add_to_cart_conversion=None,
+                    avg_cart_to_order_conversion=None,
+                    order_sum_available_dates_count=0,
+                    order_sum_missing_dates_count=0,
                 ),
+                period_meta=ProductPeriodMetaResponse(rows_count=0, days_requested=12, days_returned=0),
+                source_coverage={
+                    "funnel": "missing",
+                    "price_monitor": "missing",
+                    "ad_metrics": "missing",
+                    "stock_by_size": "missing",
+                    "delivery_time": "missing",
+                },
+                data_quality=ProductDataQualityResponse(
+                    order_sum_available_dates_count=0,
+                    order_sum_missing_dates_count=0,
+                    order_sum_missing_for_dates=[],
+                    wb_buyer_price_missing=True,
+                    ad_metrics_missing=True,
+                    stock_by_size_missing=True,
+                    delivery_time_missing=True,
+                    cannot_calculate_period_ctr_without_impressions=True,
+                ),
+                field_definitions={
+                    "ctr": "percent",
+                    "add_to_cart_conversion": "percent",
+                    "cart_to_order_conversion": "percent",
+                    "order_sum_null": "missing_data_not_zero",
+                },
+                null_semantics={
+                    "order_sum": "missing_data_not_zero",
+                    "wb_buyer_price": "missing_snapshot_not_zero",
+                },
+                analysis_status="NO_DATA",
+                allowed_inferences=[],
+                forbidden_inferences=["price_cause", "stock_cause", "ad_cause", "promo_cause", "delivery_cause"],
+                analysis_limits=["rows not found"],
             )
         return ProductMetricsResponse(
             found=True,
@@ -91,11 +131,54 @@ class FakeRepository:
                 )
             ],
             summary=ProductSummaryResponse(
+                card_clicks_total=Decimal("0"),
                 cart_count=Decimal("0"),
                 order_count=Decimal("0"),
                 order_sum=Decimal("0"),
                 ad_spend=Decimal("10"),
+                avg_ctr=Decimal("0"),
+                avg_add_to_cart_conversion=Decimal("0"),
+                avg_cart_to_order_conversion=Decimal("0"),
+                order_sum_available_dates_count=1,
+                order_sum_missing_dates_count=0,
             ),
+            period_meta=ProductPeriodMetaResponse(rows_count=1, days_requested=12, days_returned=1),
+            source_coverage={
+                "funnel": "full",
+                "price_monitor": "missing",
+                "ad_metrics": "full",
+                "stock_by_size": "missing",
+                "delivery_time": "missing",
+            },
+            data_quality=ProductDataQualityResponse(
+                order_sum_available_dates_count=1,
+                order_sum_missing_dates_count=0,
+                order_sum_missing_for_dates=[],
+                wb_buyer_price_missing=True,
+                ad_metrics_missing=False,
+                stock_by_size_missing=True,
+                delivery_time_missing=True,
+                cannot_calculate_period_ctr_without_impressions=True,
+            ),
+            field_definitions={
+                "ctr": "percent",
+                "add_to_cart_conversion": "percent",
+                "cart_to_order_conversion": "percent",
+                "order_sum_null": "missing_data_not_zero",
+            },
+            null_semantics={
+                "order_sum": "missing_data_not_zero",
+                "wb_buyer_price": "missing_snapshot_not_zero",
+                "ad_metrics": "missing_metric_not_zero",
+                "current_stock_qty": "missing_snapshot_not_zero",
+            },
+            analysis_status="LIMITED",
+            allowed_inferences=["funnel_trend", "conversion_change", "day_to_day_trend"],
+            forbidden_inferences=["price_cause", "stock_cause", "promo_cause", "delivery_cause"],
+            analysis_limits=[
+                "Можно анализировать изменение переходов, корзин, заказов и конверсий.",
+                "Если поле отсутствует или равно null, это означает нет данных, а не ноль.",
+            ],
         )
 
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse:
@@ -415,11 +498,18 @@ def test_mcp_tools_call_product_metrics_returns_human_readable_content() -> None
     payload = response.json()
     assert response.status_code == 200
     assert payload["result"]["structuredContent"]["nm_id"] == 91470767
+    assert payload["result"]["structuredContent"]["analysis_status"] == "LIMITED"
+    assert payload["result"]["structuredContent"]["data_quality"]["wb_buyer_price_missing"] is True
+    assert "price_cause" in payload["result"]["structuredContent"]["forbidden_inferences"]
     text = payload["result"]["content"][0]["text"]
     assert "product:" in text
     assert "nm_id: 91470767" in text
     assert "supplier_article: demo-art" in text
     assert "summary:" in text
+    assert "DATA_QUALITY:" in text
+    assert "SOURCE_COVERAGE:" in text
+    assert "ANALYSIS_STATUS:" in text
+    assert "ANALYSIS_LIMITS:" in text
     assert "rows_tsv:" in text
     assert "date\tcard_clicks\tctr\tcart_count\tadd_to_cart_conversion\torder_count\tcart_to_order_conversion\torder_sum" in text
     assert "2026-06-18\t0\t0\t0\t0\t0\t0\t0" in text

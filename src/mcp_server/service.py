@@ -22,9 +22,11 @@ from src.mcp_server.schemas import (
     PriceMonitorRequest,
     PriceMonitorResponse,
     PriceMonitorItemResponse,
+    ProductDataQualityResponse,
     ProductDailyMetricsResponse,
     ProductMetricsRequest,
     ProductMetricsResponse,
+    ProductPeriodMetaResponse,
     ProductSummaryResponse,
 )
 from src.mcp_server.settings import McpServiceSettings
@@ -127,6 +129,17 @@ def _row_value(row: Any, key: str) -> Any:
     if hasattr(row, "_mapping"):
         return row._mapping.get(key)
     return None
+
+
+def _coverage_status(values: list[Any]) -> str:
+    if not values:
+        return "missing"
+    non_null = sum(value is not None for value in values)
+    if non_null == 0:
+        return "missing"
+    if non_null == len(values):
+        return "full"
+    return "partial"
 
 
 def validate_date_window(
@@ -232,67 +245,196 @@ def build_product_metrics_response(
             date_to=payload.date_to,
             daily=[],
             summary=ProductSummaryResponse(
+                card_clicks_total=None,
                 cart_count=None,
                 order_count=None,
                 order_sum=None,
                 ad_spend=None,
+                avg_ctr=None,
+                avg_add_to_cart_conversion=None,
+                avg_cart_to_order_conversion=None,
+                order_sum_available_dates_count=0,
+                order_sum_missing_dates_count=0,
             ),
+            period_meta=ProductPeriodMetaResponse(
+                rows_count=0,
+                days_requested=(payload.date_to - payload.date_from).days + 1,
+                days_returned=0,
+            ),
+            source_coverage={
+                "funnel": "missing",
+                "price_monitor": "missing",
+                "ad_metrics": "missing",
+                "stock_by_size": "missing",
+                "delivery_time": "missing",
+            },
+            data_quality=ProductDataQualityResponse(
+                order_sum_available_dates_count=0,
+                order_sum_missing_dates_count=0,
+                order_sum_missing_for_dates=[],
+                wb_buyer_price_missing=True,
+                ad_metrics_missing=True,
+                stock_by_size_missing=True,
+                delivery_time_missing=True,
+                cannot_calculate_period_ctr_without_impressions=True,
+            ),
+            field_definitions={
+                "ctr": "percent",
+                "add_to_cart_conversion": "percent",
+                "cart_to_order_conversion": "percent",
+                "order_sum_null": "missing_data_not_zero",
+            },
+            null_semantics={
+                "order_sum": "missing_data_not_zero",
+                "wb_buyer_price": "missing_snapshot_not_zero",
+                "ad_metrics": "missing_metric_not_zero",
+                "current_stock_qty": "missing_snapshot_not_zero",
+            },
+            analysis_status="NO_DATA",
+            allowed_inferences=[],
+            forbidden_inferences=[
+                "price_cause",
+                "stock_cause",
+                "ad_cause",
+                "promo_cause",
+                "delivery_cause",
+            ],
+            analysis_limits=[
+                "По выбранному nm_id и периоду строки в mart_total_report не найдены.",
+                "Причину просадки или роста по цене, остаткам, рекламе и доставке утверждать нельзя.",
+            ],
         )
 
     daily: list[ProductDailyMetricsResponse] = []
+    card_clicks_total = Decimal("0")
     cart_total = Decimal("0")
     order_total = Decimal("0")
     order_sum_total = Decimal("0")
     ad_spend_total = Decimal("0")
+    ctr_values: list[Decimal] = []
+    atc_values: list[Decimal] = []
+    cto_values: list[Decimal] = []
+    order_sum_missing_for_dates: list[date] = []
+    ad_presence_markers: list[bool] = []
+    stock_presence_markers: list[bool] = []
+    price_presence_markers: list[bool] = []
     has_cart = False
+    has_card_clicks = False
     has_orders = False
     has_order_sum = False
     has_ad_spend = False
 
     for row in mart_rows:
         report_date = row["report_date"]
+        card_clicks = _as_decimal(row.get("card_clicks"))
+        ctr = _as_decimal(row.get("ctr"))
         cart_count = _as_decimal(row.get("cart_count"))
+        add_to_cart_conversion = _as_decimal(row.get("add_to_cart_conversion"))
         order_count = _as_decimal(row.get("order_count"))
+        cart_to_order_conversion = _as_decimal(row.get("cart_to_order_conversion"))
         order_sum = _as_decimal(row.get("order_sum"))
         ad_spend = _as_decimal(row.get("ad_campaign_spend_total"))
         ad_clicks = _as_decimal(row.get("ad_clicks_total"))
         ad_atbs = _as_decimal(row.get("ad_atbs_total"))
         ad_orders = _as_decimal(row.get("ad_orders_total"))
         current_stock_qty = _as_decimal(row.get("current_stock_qty"))
+        wb_buyer_price = price_by_date.get((report_date, payload.nm_id))
 
+        if card_clicks is not None:
+            card_clicks_total += card_clicks
+            has_card_clicks = True
+        if ctr is not None:
+            ctr_values.append(ctr)
         if cart_count is not None:
             cart_total += cart_count
             has_cart = True
+        if add_to_cart_conversion is not None:
+            atc_values.append(add_to_cart_conversion)
         if order_count is not None:
             order_total += order_count
             has_orders = True
+        if cart_to_order_conversion is not None:
+            cto_values.append(cart_to_order_conversion)
         if order_sum is not None:
             order_sum_total += order_sum
             has_order_sum = True
+        else:
+            order_sum_missing_for_dates.append(report_date)
         if ad_spend is not None:
             ad_spend_total += ad_spend
             has_ad_spend = True
+        ad_presence_markers.append(any(value is not None for value in (ad_spend, ad_clicks, ad_atbs, ad_orders)))
+        stock_presence_markers.append(current_stock_qty is not None)
+        price_presence_markers.append(wb_buyer_price is not None)
 
         daily.append(
             ProductDailyMetricsResponse(
                 date=report_date,
-                card_clicks=_as_decimal(row.get("card_clicks")),
-                ctr=_as_decimal(row.get("ctr")),
+                card_clicks=card_clicks,
+                ctr=ctr,
                 cart_count=cart_count,
-                add_to_cart_conversion=_as_decimal(row.get("add_to_cart_conversion")),
+                add_to_cart_conversion=add_to_cart_conversion,
                 order_count=order_count,
-                cart_to_order_conversion=_as_decimal(row.get("cart_to_order_conversion")),
+                cart_to_order_conversion=cart_to_order_conversion,
                 order_sum=order_sum,
                 ad_spend=ad_spend,
                 ad_clicks=ad_clicks,
                 ad_atbs=ad_atbs,
                 ad_orders=ad_orders,
                 current_stock_qty=current_stock_qty,
-                wb_buyer_price=price_by_date.get((report_date, payload.nm_id)),
+                wb_buyer_price=wb_buyer_price,
             )
         )
 
     first_row = mart_rows[0]
+    avg_ctr = (sum(ctr_values, Decimal("0")) / len(ctr_values)) if ctr_values else None
+    avg_atc = (sum(atc_values, Decimal("0")) / len(atc_values)) if atc_values else None
+    avg_cto = (sum(cto_values, Decimal("0")) / len(cto_values)) if cto_values else None
+    order_sum_available_dates_count = len(daily) - len(order_sum_missing_for_dates)
+    source_coverage = {
+        "funnel": "full",
+        "price_monitor": _coverage_status(price_presence_markers),
+        "ad_metrics": _coverage_status(ad_presence_markers),
+        "stock_by_size": _coverage_status(stock_presence_markers),
+        "delivery_time": "missing",
+    }
+    wb_buyer_price_missing = source_coverage["price_monitor"] == "missing"
+    ad_metrics_missing = source_coverage["ad_metrics"] == "missing"
+    stock_by_size_missing = source_coverage["stock_by_size"] == "missing"
+    delivery_time_missing = True
+    forbidden_inferences = ["promo_cause"]
+    if wb_buyer_price_missing:
+        forbidden_inferences.append("price_cause")
+    if stock_by_size_missing:
+        forbidden_inferences.append("stock_cause")
+    if ad_metrics_missing:
+        forbidden_inferences.append("ad_cause")
+    if delivery_time_missing:
+        forbidden_inferences.append("delivery_cause")
+    analysis_limits = [
+        "Можно анализировать изменение переходов, корзин, заказов и конверсий.",
+        "Если поле отсутствует или равно null, это означает нет данных, а не ноль.",
+        "Нельзя утверждать причину в цене, остатках, рекламе, промо или доставке без соответствующих полей.",
+    ]
+    if order_sum_missing_for_dates:
+        analysis_limits.append("Если order_sum заполнен частично, выручку анализировать осторожно.")
+    if wb_buyer_price_missing:
+        analysis_limits.append("Для проверки гипотезы о цене нужен wb_buyer_price по дням.")
+    if stock_by_size_missing:
+        analysis_limits.append("Для проверки гипотезы об остатках нужны подтверждённые stock-поля по дням.")
+    if ad_metrics_missing:
+        analysis_limits.append("Для проверки гипотезы о рекламе нужны ad-метрики по дням.")
+    analysis_status = (
+        "LIMITED"
+        if (
+            order_sum_missing_for_dates
+            or wb_buyer_price_missing
+            or ad_metrics_missing
+            or stock_by_size_missing
+            or delivery_time_missing
+        )
+        else "OK"
+    )
     return ProductMetricsResponse(
         found=True,
         nm_id=payload.nm_id,
@@ -302,11 +444,53 @@ def build_product_metrics_response(
         date_to=payload.date_to,
         daily=daily,
         summary=ProductSummaryResponse(
+            card_clicks_total=card_clicks_total if has_card_clicks else None,
             cart_count=cart_total if has_cart else None,
             order_count=order_total if has_orders else None,
             order_sum=order_sum_total if has_order_sum else None,
             ad_spend=ad_spend_total if has_ad_spend else None,
+            avg_ctr=avg_ctr,
+            avg_add_to_cart_conversion=avg_atc,
+            avg_cart_to_order_conversion=avg_cto,
+            order_sum_available_dates_count=order_sum_available_dates_count,
+            order_sum_missing_dates_count=len(order_sum_missing_for_dates),
         ),
+        period_meta=ProductPeriodMetaResponse(
+            rows_count=len(daily),
+            days_requested=(payload.date_to - payload.date_from).days + 1,
+            days_returned=len(daily),
+        ),
+        source_coverage=source_coverage,
+        data_quality=ProductDataQualityResponse(
+            order_sum_available_dates_count=order_sum_available_dates_count,
+            order_sum_missing_dates_count=len(order_sum_missing_for_dates),
+            order_sum_missing_for_dates=order_sum_missing_for_dates,
+            wb_buyer_price_missing=wb_buyer_price_missing,
+            ad_metrics_missing=ad_metrics_missing,
+            stock_by_size_missing=stock_by_size_missing,
+            delivery_time_missing=delivery_time_missing,
+            cannot_calculate_period_ctr_without_impressions=True,
+        ),
+        field_definitions={
+            "ctr": "percent",
+            "add_to_cart_conversion": "percent",
+            "cart_to_order_conversion": "percent",
+            "order_sum_null": "missing_data_not_zero",
+        },
+        null_semantics={
+            "order_sum": "missing_data_not_zero",
+            "wb_buyer_price": "missing_snapshot_not_zero",
+            "ad_metrics": "missing_metric_not_zero",
+            "current_stock_qty": "missing_snapshot_not_zero",
+        },
+        analysis_status=analysis_status,
+        allowed_inferences=[
+            "funnel_trend",
+            "conversion_change",
+            "day_to_day_trend",
+        ],
+        forbidden_inferences=forbidden_inferences,
+        analysis_limits=analysis_limits,
     )
 
 

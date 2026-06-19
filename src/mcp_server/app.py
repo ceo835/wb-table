@@ -211,25 +211,57 @@ def _format_product_metrics_content(tool_result: ProductMetricsResponse) -> str:
         f"date_from: {_format_date(tool_result.date_from)}",
         f"date_to: {_format_date(tool_result.date_to)}",
     ]
+    order_sum_missing_dates = (
+        ",".join(_format_date(item) for item in tool_result.data_quality.order_sum_missing_for_dates)
+        if tool_result.data_quality.order_sum_missing_for_dates
+        else "null"
+    )
     if not tool_result.found:
         return "\n".join(
             header
             + [
                 "found: false",
+                "",
+                "period_meta:",
+                f"rows_count: {tool_result.period_meta.rows_count}",
+                f"days_requested: {tool_result.period_meta.days_requested}",
+                f"days_returned: {tool_result.period_meta.days_returned}",
+                "",
+                "DATA_QUALITY:",
+                f"order_sum_available_dates_count: {tool_result.data_quality.order_sum_available_dates_count}",
+                f"order_sum_missing_dates_count: {tool_result.data_quality.order_sum_missing_dates_count}",
+                f"order_sum_missing_for_dates: {order_sum_missing_dates}",
+                f"order_sum_null_meaning: {tool_result.field_definitions.get('order_sum_null', 'missing_data_not_zero')}",
+                f"wb_buyer_price_missing: {_format_bool(tool_result.data_quality.wb_buyer_price_missing)}",
+                f"ad_metrics_missing: {_format_bool(tool_result.data_quality.ad_metrics_missing)}",
+                f"stock_by_size_missing: {_format_bool(tool_result.data_quality.stock_by_size_missing)}",
+                f"delivery_time_missing: {_format_bool(tool_result.data_quality.delivery_time_missing)}",
+                (
+                    "cannot_calculate_period_ctr_without_impressions: "
+                    f"{_format_bool(tool_result.data_quality.cannot_calculate_period_ctr_without_impressions)}"
+                ),
+                "",
+                "SOURCE_COVERAGE:",
+                *[f"{key}: {value}" for key, value in tool_result.source_coverage.items()],
+                "",
+                "ANALYSIS_STATUS:",
+                tool_result.analysis_status,
+                "",
+                "ANALYSIS_LIMITS:",
+                *[f"- {item}" for item in tool_result.analysis_limits],
+                "",
                 "rows_tsv:",
                 "date\tcard_clicks\tctr\tcart_count\tadd_to_cart_conversion\torder_count\tcart_to_order_conversion\torder_sum",
             ]
         )
 
-    avg_ctr_values = [item.ctr for item in tool_result.daily if item.ctr is not None]
-    avg_atc_values = [item.add_to_cart_conversion for item in tool_result.daily if item.add_to_cart_conversion is not None]
-    avg_cto_values = [item.cart_to_order_conversion for item in tool_result.daily if item.cart_to_order_conversion is not None]
-    avg_ctr = (sum(avg_ctr_values, Decimal("0")) / len(avg_ctr_values)) if avg_ctr_values else None
-    avg_atc = (sum(avg_atc_values, Decimal("0")) / len(avg_atc_values)) if avg_atc_values else None
-    avg_cto = (sum(avg_cto_values, Decimal("0")) / len(avg_cto_values)) if avg_cto_values else None
-
     lines = header + [
         "found: true",
+        "",
+        "period_meta:",
+        f"rows_count: {tool_result.period_meta.rows_count}",
+        f"days_requested: {tool_result.period_meta.days_requested}",
+        f"days_returned: {tool_result.period_meta.days_returned}",
         "",
         "field_legend:",
         "card_clicks = переходы в карточку",
@@ -241,13 +273,43 @@ def _format_product_metrics_content(tool_result: ProductMetricsResponse) -> str:
         "cart_to_order_conversion = конверсия корзина -> заказ",
         "",
         "summary:",
-        f"card_clicks_total: {_format_number(sum((item.card_clicks or 0) for item in tool_result.daily) if tool_result.daily else None)}",
+        f"card_clicks_total: {_format_number(tool_result.summary.card_clicks_total)}",
         f"cart_count_total: {_format_number(tool_result.summary.cart_count)}",
         f"order_count_total: {_format_number(tool_result.summary.order_count)}",
         f"order_sum_total: {_format_currency(tool_result.summary.order_sum)}",
-        f"avg_ctr: {_format_number(avg_ctr)}",
-        f"avg_add_to_cart_conversion: {_format_number(avg_atc)}",
-        f"avg_cart_to_order_conversion: {_format_number(avg_cto)}",
+        f"ad_spend_total: {_format_currency(tool_result.summary.ad_spend)}",
+        f"avg_ctr: {_format_number(tool_result.summary.avg_ctr)}",
+        f"avg_add_to_cart_conversion: {_format_number(tool_result.summary.avg_add_to_cart_conversion)}",
+        f"avg_cart_to_order_conversion: {_format_number(tool_result.summary.avg_cart_to_order_conversion)}",
+        "",
+        "DATA_QUALITY:",
+        f"order_sum_available_dates_count: {tool_result.data_quality.order_sum_available_dates_count}",
+        f"order_sum_missing_dates_count: {tool_result.data_quality.order_sum_missing_dates_count}",
+        f"order_sum_missing_for_dates: {order_sum_missing_dates}",
+        f"order_sum_null_meaning: {tool_result.field_definitions.get('order_sum_null', 'missing_data_not_zero')}",
+        f"wb_buyer_price_missing: {_format_bool(tool_result.data_quality.wb_buyer_price_missing)}",
+        f"ad_metrics_missing: {_format_bool(tool_result.data_quality.ad_metrics_missing)}",
+        f"stock_by_size_missing: {_format_bool(tool_result.data_quality.stock_by_size_missing)}",
+        f"delivery_time_missing: {_format_bool(tool_result.data_quality.delivery_time_missing)}",
+        (
+            "cannot_calculate_period_ctr_without_impressions: "
+            f"{_format_bool(tool_result.data_quality.cannot_calculate_period_ctr_without_impressions)}"
+        ),
+        "",
+        "SOURCE_COVERAGE:",
+        *[f"{key}: {value}" for key, value in tool_result.source_coverage.items()],
+        "",
+        "ANALYSIS_STATUS:",
+        tool_result.analysis_status,
+        "",
+        "ALLOWED_INFERENCES:",
+        *[f"- {item}" for item in tool_result.allowed_inferences],
+        "",
+        "FORBIDDEN_INFERENCES:",
+        *[f"- {item}" for item in tool_result.forbidden_inferences],
+        "",
+        "ANALYSIS_LIMITS:",
+        *[f"- {item}" for item in tool_result.analysis_limits],
         "",
         "rows_tsv:",
         "date\tcard_clicks\tctr\tcart_count\tadd_to_cart_conversion\torder_count\tcart_to_order_conversion\torder_sum",
