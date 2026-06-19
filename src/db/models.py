@@ -673,6 +673,31 @@ class FactVbroManual(Base, StatusMixin):
     manual_file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class FactIvanAdsWideDay(Base, StatusMixin):
+    __tablename__ = "fact_ivan_ads_wide_day"
+    __table_args__ = (
+        UniqueConstraint("date", "nm_id", "campaign_ref", name="uq_fact_ivan_ads_wide_day_date_nm_campaign"),
+        Index("idx_fact_ivan_ads_wide_day_date_nm", "date", "nm_id"),
+        Index("idx_fact_ivan_ads_wide_day_campaign", "campaign_ref", "date"),
+        Index("idx_fact_ivan_ads_wide_day_status", "source_status"),
+    )
+
+    fact_ivan_ads_wide_day_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    supplier_article: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    campaign_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    campaign_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ad_spend: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    ad_atbs: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    ad_cart_ctr: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    ad_cost_per_cart: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    ad_views: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    ad_cpm: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    source_file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class FactCardComparisonMetric(Base, StatusMixin):
     __tablename__ = "fact_card_comparison_metric"
     __table_args__ = (
