@@ -2795,6 +2795,8 @@ def prepare_dataframe_for_streamlit_display(
         "technical_ad_campaign_spend_total",
     }
     safe_df = sanitize_dataframe_for_streamlit_display(df, numeric_columns=numeric_columns)
+    if safe_df.shape[0] * max(safe_df.shape[1], 1) > STYLER_MAX_CELLS:
+        return safe_df
     return style_table_recent_window(safe_df, status_column=status_column)
 
 

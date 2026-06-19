@@ -1105,14 +1105,14 @@ def test_prepare_dataframe_for_streamlit_display_skips_styler_for_large_tables(m
 
     result = prepare_dataframe_for_streamlit_display(df, status_column=None)
 
-    assert isinstance(result, Styler)
+    assert isinstance(result, pd.DataFrame)
     assert captions == []
 
 
 def test_prepare_dataframe_for_streamlit_display_keeps_styler_for_large_tables(monkeypatch) -> None:
     captions: list[str] = []
     monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
-    monkeypatch.setattr(app_streamlit, "STYLER_MAX_CELLS", 3)
+    monkeypatch.setattr(app_streamlit, "STYLER_MAX_CELLS", 4)
     df = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3, "b": 4}])
 
     result = prepare_dataframe_for_streamlit_display(df, status_column=None)
