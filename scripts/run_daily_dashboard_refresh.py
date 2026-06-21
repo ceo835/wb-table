@@ -5,9 +5,10 @@ import argparse
 import json
 import sys
 import traceback
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -30,10 +31,20 @@ from src.db.stock_warehouse_loader import TRACKED_PRODUCTS_PATH, get_tracked_nm_
 
 DEFAULT_DASHBOARD_START_DATE = date(2026, 6, 7)
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "data" / "processed" / "daily_runs"
+DEFAULT_DAILY_TARGET_TIMEZONE = "Europe/Moscow"
 
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def resolve_default_target_date(
+    now: datetime | None = None,
+    timezone_name: str = DEFAULT_DAILY_TARGET_TIMEZONE,
+) -> date:
+    reference_now = now or datetime.now(UTC)
+    today_in_timezone = reference_now.astimezone(ZoneInfo(timezone_name)).date()
+    return today_in_timezone - timedelta(days=1)
 
 
 def build_summary_paths(output_dir: Path, run_date: date) -> dict[str, Path]:
@@ -101,7 +112,7 @@ def run_daily_dashboard_refresh(
     include_core_refresh: bool = False,
     mart_version: str = "v2",
 ) -> dict[str, Any]:
-    resolved_run_date = run_date or date.today()
+    resolved_run_date = run_date or resolve_default_target_date()
     current_step = "validation"
     summary: dict[str, Any] = {
         "run_started_at": utc_now_iso(),
@@ -232,7 +243,11 @@ def run_daily_dashboard_refresh(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run daily warehouse snapshot + mart rebuild + Streamlit export.")
-    parser.add_argument("--run-date", default=date.today().isoformat(), help="Run date in YYYY-MM-DD. Default: today.")
+    parser.add_argument(
+        "--run-date",
+        default=resolve_default_target_date().isoformat(),
+        help="Run date in YYYY-MM-DD. Default: yesterday in project timezone.",
+    )
     parser.add_argument(
         "--date-from",
         default=DEFAULT_DASHBOARD_START_DATE.isoformat(),

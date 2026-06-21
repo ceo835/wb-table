@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import scripts.run_daily_dashboard_refresh as daily_refresh_script
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from scripts.run_daily_dashboard_refresh import (
     DEFAULT_DASHBOARD_START_DATE,
+    resolve_default_target_date,
     run_daily_dashboard_refresh,
 )
 from src.db.app_job_runs import run_guarded_job
@@ -20,8 +21,10 @@ from src.db.models import AppJobRun
 from src.scheduler.daily_refresh_scheduler import (
     DAILY_REFRESH_JOB_NAME,
     build_next_run_at,
+    execute_daily_refresh_once,
     should_autostart_daily_refresh,
     should_run_startup_catchup,
+    _scheduler_loop,
 )
 
 
@@ -364,3 +367,212 @@ def test_build_next_run_at_returns_same_day_before_cutoff() -> None:
     now = datetime(2026, 6, 16, 7, 30, tzinfo=UTC)
 
     assert build_next_run_at(now) == datetime(2026, 6, 16, 8, 0, tzinfo=UTC)
+
+
+def test_resolve_default_target_date_uses_yesterday_in_project_timezone() -> None:
+    now = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
+
+    assert resolve_default_target_date(now) == date(2026, 6, 20)
+
+
+def test_resolve_default_target_date_uses_project_timezone_not_raw_utc_date() -> None:
+    now = datetime(2026, 6, 20, 21, 30, tzinfo=UTC)
+
+    assert resolve_default_target_date(now) == date(2026, 6, 20)
+
+
+def test_run_daily_dashboard_refresh_uses_manual_run_date_override(monkeypatch, tmp_path: Path) -> None:
+    run_date = date(2026, 6, 19)
+    monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", False, raising=False)
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
+        lambda **kwargs: {
+            "snapshot_date": kwargs["snapshot_date"].isoformat(),
+            "api_status": "200",
+            "rows_in_db_for_snapshot": 100,
+            "unique_nm_ids": 10,
+            "unique_chrt_ids": 10,
+            "unique_warehouses": 2,
+            "request_attempts": [{"status": "200"}],
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.build_mart_total_report",
+        lambda date_from, date_to, version="v2": {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "rows_built": 10,
+            "rows_in_db": 10,
+            "version": version,
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.export_streamlit_v1_dataset",
+        lambda date_from, date_to: {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "total_rows": 10,
+            "output_path": "data/processed/streamlit_v1_dataset.csv",
+        },
+    )
+
+    summary = run_daily_dashboard_refresh(
+        run_date=run_date,
+        date_from=run_date,
+        output_dir=tmp_path,
+        include_core_refresh=False,
+    )
+
+    assert summary["snapshot_date"] == "2026-06-19"
+    assert summary["date_to"] == "2026-06-19"
+    assert summary["mart_summary"]["date_to"] == "2026-06-19"
+    assert summary["streamlit_dataset_summary"]["date_to"] == "2026-06-19"
+
+
+def test_run_daily_dashboard_refresh_default_uses_yesterday_for_core_mart_and_export(
+    monkeypatch, tmp_path: Path
+) -> None:
+    target_date = date(2026, 6, 20)
+    monkeypatch.setattr(daily_refresh_script, "resolve_default_target_date", lambda now=None, timezone_name="Europe/Moscow": target_date)
+    monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", False, raising=False)
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
+        lambda **kwargs: {
+            "snapshot_date": kwargs["snapshot_date"].isoformat(),
+            "api_status": "200",
+            "rows_in_db_for_snapshot": 100,
+            "unique_nm_ids": 10,
+            "unique_chrt_ids": 10,
+            "unique_warehouses": 2,
+            "request_attempts": [{"status": "200"}],
+        },
+    )
+
+    def fake_run_missing_core_dates_load(**kwargs):
+        captured["core_refresh"] = kwargs
+        return {"failed_chunks": []}
+
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.run_missing_core_dates_load",
+        fake_run_missing_core_dates_load,
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.build_mart_total_report",
+        lambda date_from, date_to, version="v2": {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "rows_built": 10,
+            "rows_in_db": 10,
+            "version": version,
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.export_streamlit_v1_dataset",
+        lambda date_from, date_to: {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "total_rows": 10,
+            "output_path": "data/processed/streamlit_v1_dataset.csv",
+        },
+    )
+
+    summary = run_daily_dashboard_refresh(
+        run_date=None,
+        date_from=target_date,
+        output_dir=tmp_path,
+        include_core_refresh=True,
+    )
+
+    assert summary["snapshot_date"] == "2026-06-20"
+    assert captured["core_refresh"] == {
+        "date_from": target_date,
+        "date_to": target_date,
+        "full_range_from": target_date,
+        "full_range_to": target_date,
+        "fullstats_sleep_seconds": 20,
+        "use_tracked_products": True,
+    }
+    assert summary["mart_summary"]["date_to"] == "2026-06-20"
+    assert summary["streamlit_dataset_summary"]["date_to"] == "2026-06-20"
+
+
+def test_execute_daily_refresh_once_uses_yesterday_as_default_run_date(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.scheduler.daily_refresh_scheduler.utc_now",
+        lambda: datetime(2026, 6, 20, 21, 30, tzinfo=UTC),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run_guarded_job(*, job_name, run_date, runner):
+        captured["job_name"] = job_name
+        captured["run_date"] = run_date
+        captured["runner_result"] = runner()
+        return {"status": "success"}
+
+    monkeypatch.setattr("src.scheduler.daily_refresh_scheduler.run_guarded_job", fake_run_guarded_job)
+
+    result = execute_daily_refresh_once(runner=lambda run_date: {"run_date": run_date.isoformat()})
+
+    assert result["status"] == "success"
+    assert captured["job_name"] == DAILY_REFRESH_JOB_NAME
+    assert captured["run_date"] == date(2026, 6, 20)
+    assert captured["runner_result"] == {"run_date": "2026-06-20"}
+
+
+def test_scheduler_startup_catchup_uses_yesterday_target_date(monkeypatch) -> None:
+    now = datetime(2026, 6, 20, 21, 30, tzinfo=UTC)
+    startup_calls: list[date] = []
+
+    monkeypatch.setattr("src.scheduler.daily_refresh_scheduler.utc_now", lambda: now)
+    monkeypatch.setattr("src.scheduler.daily_refresh_scheduler._has_success_for_date", lambda run_date: False)
+    monkeypatch.setattr(
+        "src.scheduler.daily_refresh_scheduler.execute_daily_refresh_once",
+        lambda *, run_date=None, runner=None: startup_calls.append(run_date),
+    )
+    monkeypatch.setattr(
+        "src.scheduler.daily_refresh_scheduler.build_next_run_at",
+        lambda _now: now + timedelta(days=1),
+    )
+
+    class StopAfterStartup:
+        def is_set(self) -> bool:
+            return False
+
+        def wait(self, _seconds: float) -> bool:
+            return True
+
+    _scheduler_loop(StopAfterStartup(), runner=None)
+
+    assert startup_calls == [date(2026, 6, 20)]
+
+
+def test_scheduler_scheduled_run_uses_yesterday_target_date(monkeypatch) -> None:
+    now = datetime(2026, 6, 21, 8, 0, tzinfo=UTC)
+    scheduled_calls: list[date] = []
+
+    monkeypatch.setattr("src.scheduler.daily_refresh_scheduler.utc_now", lambda: now)
+    monkeypatch.setattr("src.scheduler.daily_refresh_scheduler._has_success_for_date", lambda run_date: True)
+    monkeypatch.setattr(
+        "src.scheduler.daily_refresh_scheduler.execute_daily_refresh_once",
+        lambda *, run_date=None, runner=None: scheduled_calls.append(run_date),
+    )
+    monkeypatch.setattr("src.scheduler.daily_refresh_scheduler.build_next_run_at", lambda _now: now)
+
+    class StopAfterScheduledRun:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def is_set(self) -> bool:
+            return False
+
+        def wait(self, _seconds: float) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+    _scheduler_loop(StopAfterScheduledRun(), runner=None)
+
+    assert scheduled_calls == [date(2026, 6, 20)]

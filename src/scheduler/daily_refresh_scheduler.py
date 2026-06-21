@@ -5,7 +5,7 @@ import threading
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Callable, Mapping
 
-from scripts.run_daily_dashboard_refresh import run_daily_dashboard_refresh
+from scripts.run_daily_dashboard_refresh import resolve_default_target_date, run_daily_dashboard_refresh
 from src.db.app_job_runs import JOB_STATUS_FAILED, JOB_STATUS_SKIPPED, JOB_STATUS_SUCCESS, has_successful_job_run, run_guarded_job
 from src.db.connection import create_db_engine
 
@@ -67,7 +67,7 @@ def execute_daily_refresh_once(
     run_date: date | None = None,
     runner: Callable[[date], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    resolved_run_date = run_date or utc_now().date()
+    resolved_run_date = run_date or resolve_default_target_date(utc_now())
     resolved_runner = runner or _default_runner
     result = run_guarded_job(
         job_name=DAILY_REFRESH_JOB_NAME,
@@ -77,7 +77,7 @@ def execute_daily_refresh_once(
     if result["status"] == JOB_STATUS_SKIPPED:
         reason = result.get("reason", "unknown")
         if reason == "already_completed":
-            log_scheduler("Daily refresh skipped: already completed today")
+            log_scheduler(f"Daily refresh skipped: already completed for {resolved_run_date.isoformat()}")
         elif reason == "lock_not_acquired":
             log_scheduler("Daily refresh skipped: advisory lock not acquired")
         else:
@@ -99,9 +99,10 @@ def _scheduler_loop(stop_event: threading.Event, runner: Callable[[date], dict[s
     log_scheduler("Daily refresh scheduler enabled")
 
     now = utc_now()
-    if should_run_startup_catchup(now=now, has_success_today=_has_success_for_date(now.date())):
+    target_date = resolve_default_target_date(now)
+    if should_run_startup_catchup(now=now, has_success_today=_has_success_for_date(target_date)):
         log_scheduler("Daily refresh started")
-        execute_daily_refresh_once(run_date=now.date(), runner=runner)
+        execute_daily_refresh_once(run_date=target_date, runner=runner)
 
     while not stop_event.is_set():
         next_run = build_next_run_at(utc_now())
@@ -110,7 +111,7 @@ def _scheduler_loop(stop_event: threading.Event, runner: Callable[[date], dict[s
         if stop_event.wait(wait_seconds):
             break
         log_scheduler("Daily refresh started")
-        execute_daily_refresh_once(run_date=utc_now().date(), runner=runner)
+        execute_daily_refresh_once(run_date=resolve_default_target_date(utc_now()), runner=runner)
 
 
 def start_daily_refresh_scheduler_once(
