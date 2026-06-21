@@ -8,7 +8,7 @@ import os
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 import altair as alt
@@ -28,10 +28,13 @@ from scripts.export_streamlit_v1_dataset import (
 from src.config.settings import settings
 from src.db.mart_total_report_builder import build_mart_total_report
 from src.db.models import (
+    DimProduct,
     FactStockWarehouseSnapshot,
+    FactIvanAdsWideDay,
     FactWbSitePriceAlert,
     FactWbSitePriceSnapshot,
     MartTotalReport,
+    SettingsProducts,
 )
 from src.db.session import session_scope
 from src.importers.entry_points_importer import import_entry_points_xlsx
@@ -75,6 +78,8 @@ WB_SITE_PRICE_ALERT_CHANGED = "PRICE_CHANGED_50"
 WB_SITE_PRICE_ALERT_NO_DATA = "NO_PRICE_DATA"
 WB_SITE_PRICE_ALERT_FAILED = "FETCH_FAILED"
 AD_CAMPAIGN_PRODUCT_LABEL = "РК по товару"
+IVAN_MANUAL_AD_SOURCE_LABEL = "Иван / ручная реклама"
+API_WB_AD_SOURCE_LABEL = "API WB"
 DEFAULT_STREAMLIT_DISPLAY_MIN_DATE = date(2026, 6, 7)
 STREAMLIT_DISPLAY_MIN_DATE_ENV_VAR = "STREAMLIT_DISPLAY_MIN_DATE"
 TABLE_STYLE_LOOKBACK_DAYS = 30
@@ -1318,6 +1323,62 @@ def load_wb_site_price_alert_from_db(cache_buster: str | None = None) -> pd.Data
             for row in rows
         ]
     return pd.DataFrame(materialized_rows)
+
+
+@st.cache_data(show_spinner=False)
+def load_ivan_ads_wide_day_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+    with session_scope() as session:
+        rows = session.execute(
+            select(FactIvanAdsWideDay).order_by(
+                FactIvanAdsWideDay.date.asc(),
+                FactIvanAdsWideDay.nm_id.asc(),
+                FactIvanAdsWideDay.campaign_ref.asc(),
+            )
+        ).scalars().all()
+        materialized_rows = [
+            {
+                "date": row.date,
+                "nm_id": row.nm_id,
+                "supplier_article": row.supplier_article,
+                "title": row.title,
+                "campaign_ref": row.campaign_ref,
+                "campaign_name": row.campaign_name,
+                "ad_spend": row.ad_spend,
+                "ad_atbs": row.ad_atbs,
+                "ad_cart_ctr": row.ad_cart_ctr,
+                "ad_cost_per_cart": row.ad_cost_per_cart,
+                "ad_views": row.ad_views,
+                "ad_cpm": row.ad_cpm,
+                "data_status": row.data_status,
+                "source_status": row.source_status,
+                "source_file_name": row.source_file_name,
+                "loaded_at": row.loaded_at,
+            }
+            for row in rows
+        ]
+    return pd.DataFrame(materialized_rows)
+
+
+@st.cache_data(show_spinner=False)
+def load_ivan_ads_wide_reference_counts_from_db(cache_buster: str | None = None) -> dict[str, int]:
+    with session_scope() as session:
+        matched_dim_rows = session.execute(
+            select(func.count())
+            .select_from(FactIvanAdsWideDay)
+            .join(DimProduct, DimProduct.nm_id == FactIvanAdsWideDay.nm_id)
+        ).scalar_one()
+        matched_active_rows = session.execute(
+            select(func.count())
+            .select_from(FactIvanAdsWideDay)
+            .join(
+                SettingsProducts,
+                (SettingsProducts.nm_id == FactIvanAdsWideDay.nm_id) & (SettingsProducts.active.is_(True)),
+            )
+        ).scalar_one()
+    return {
+        "matched_dim_product_rows": int(matched_dim_rows or 0),
+        "matched_active_product_rows": int(matched_active_rows or 0),
+    }
 
 
 def build_wb_site_price_monitor_dataframe(
@@ -3590,6 +3651,290 @@ def safe_chart_divide(numerator: object, denominator: object) -> float | None:
     return float(numerator) / denominator_value
 
 
+def _row_has_api_ad_metrics(row: Mapping[str, Any]) -> bool:
+    if bool(row.get("has_ad_cost")) or bool(row.get("has_ad_campaign")):
+        return True
+    for field_name in (
+        "ad_campaign_spend_total",
+        "ad_atbs_total",
+        "ad_views_total",
+        "ad_orders_total",
+        "ad_cost_writeoff_total",
+    ):
+        if not pd.isna(row.get(field_name)):
+            return True
+    return False
+
+
+def aggregate_ivan_manual_ads_for_charts(
+    manual_ads_df: pd.DataFrame,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> pd.DataFrame:
+    columns = [
+        "report_date",
+        "nm_id",
+        "supplier_article",
+        "title",
+        "ad_campaign_spend_total_manual",
+        "ad_atbs_total_manual",
+        "ad_views_total_manual",
+        "ad_cost_per_cart_manual",
+        "ad_cpm_manual",
+        "source_status",
+        "data_status",
+        "import_quality",
+        "ad_data_source",
+    ]
+    if manual_ads_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    df = manual_ads_df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    if date_from is not None:
+        df = df[df["date"] >= date_from].copy()
+    if date_to is not None:
+        df = df[df["date"] <= date_to].copy()
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    for optional_column in ("supplier_article", "title", "source_status", "data_status", "import_quality"):
+        if optional_column not in df.columns:
+            df[optional_column] = pd.NA
+
+    grouped = (
+        df.groupby(["date", "nm_id"], as_index=False)
+        .agg(
+            supplier_article=("supplier_article", "first"),
+            title=("title", "first"),
+            ad_spend=("ad_spend", lambda values: pd.to_numeric(pd.Series(values), errors="coerce").sum(min_count=1)),
+            ad_atbs=("ad_atbs", lambda values: pd.to_numeric(pd.Series(values), errors="coerce").sum(min_count=1)),
+            ad_views=("ad_views", lambda values: pd.to_numeric(pd.Series(values), errors="coerce").sum(min_count=1)),
+            source_status=("source_status", "first"),
+            data_status=("data_status", "first"),
+            import_quality=("import_quality", "first"),
+        )
+        .sort_values(["date", "nm_id"], kind="stable")
+        .reset_index(drop=True)
+    )
+    grouped["ad_cost_per_cart_manual"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_spend"), row.get("ad_atbs")),
+        axis=1,
+    )
+    grouped["ad_cpm_manual"] = grouped.apply(
+        lambda row: (
+            None
+            if safe_chart_divide(row.get("ad_spend"), row.get("ad_views")) is None
+            else safe_chart_divide(row.get("ad_spend"), row.get("ad_views")) * 1000
+        ),
+        axis=1,
+    )
+    grouped["ad_data_source"] = grouped["source_status"].fillna(IVAN_MANUAL_AD_SOURCE_LABEL)
+    grouped = grouped.rename(
+        columns={
+            "date": "report_date",
+            "ad_spend": "ad_campaign_spend_total_manual",
+            "ad_atbs": "ad_atbs_total_manual",
+            "ad_views": "ad_views_total_manual",
+        }
+    )
+    return grouped[columns]
+
+
+def merge_ivan_manual_ads_into_chart_scope(
+    scope_rows: pd.DataFrame,
+    manual_chart_df: pd.DataFrame,
+    *,
+    aggregation_level: str,
+    period_start: date | None,
+    period_end: date | None,
+    total_manual_rows: int,
+    total_manual_products: int,
+    total_manual_spend: float | None,
+    manual_period_start: date | None,
+    manual_period_end: date | None,
+    matched_dim_product_rows: int,
+    matched_active_product_rows: int,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    summary: dict[str, object] = {
+        "api_ad_rows_in_selected_period": 0,
+        "ivan_manual_ad_rows_total": int(total_manual_rows),
+        "ivan_manual_ad_rows_in_selected_period": 0,
+        "ivan_manual_products": int(total_manual_products),
+        "ivan_manual_period": (
+            f"{manual_period_start.isoformat()} .. {manual_period_end.isoformat()}"
+            if manual_period_start and manual_period_end
+            else None
+        ),
+        "ivan_manual_spend_total": total_manual_spend,
+        "ivan_manual_rows_matched_to_dim_product": int(matched_dim_product_rows),
+        "ivan_manual_rows_matched_to_active_products": int(matched_active_product_rows),
+        "ivan_manual_rows_used_in_charts": 0,
+        "ivan_manual_rows_skipped_because_api_exists": 0,
+        "ivan_manual_rows_hidden_by_current_filters": 0,
+    }
+
+    result = scope_rows.copy()
+    if "report_date" in result.columns:
+        result["report_date"] = pd.to_datetime(result["report_date"], errors="coerce").dt.date
+    else:
+        result["report_date"] = pd.NaT
+    manual_period_df = manual_chart_df.copy()
+    if not manual_period_df.empty:
+        manual_period_df["report_date"] = pd.to_datetime(manual_period_df["report_date"], errors="coerce").dt.date
+        if period_start is not None:
+            manual_period_df = manual_period_df[manual_period_df["report_date"] >= period_start].copy()
+        if period_end is not None:
+            manual_period_df = manual_period_df[manual_period_df["report_date"] <= period_end].copy()
+    summary["ivan_manual_ad_rows_in_selected_period"] = int(len(manual_period_df))
+
+    if manual_period_df.empty:
+        return result, summary
+
+    api_mask = result.apply(_row_has_api_ad_metrics, axis=1) if not result.empty else pd.Series(dtype=bool)
+    summary["api_ad_rows_in_selected_period"] = int(api_mask.sum()) if not api_mask.empty else 0
+
+    scope_keys = {
+        (row.report_date, int(row.nm_id))
+        for row in result[["report_date", "nm_id"]].dropna().itertuples(index=False)
+    }
+    api_keys = {
+        (result.iloc[index]["report_date"], int(result.iloc[index]["nm_id"]))
+        for index, is_api in enumerate(api_mask.tolist())
+        if is_api
+    }
+    manual_period_df["_merge_key"] = list(
+        zip(
+            manual_period_df["report_date"],
+            manual_period_df["nm_id"].astype(int),
+        )
+    )
+    manual_keys = set(manual_period_df["_merge_key"].tolist())
+    skipped_api_keys = manual_keys & api_keys
+    if aggregation_level == CHART_LEVEL_CABINET:
+        appendable_keys = {key for key in manual_keys if key not in scope_keys and key not in api_keys}
+    else:
+        appendable_keys = set()
+    used_existing_keys = {key for key in manual_keys if key in scope_keys and key not in api_keys}
+    hidden_keys = manual_keys - skipped_api_keys - appendable_keys - used_existing_keys
+
+    summary["ivan_manual_rows_used_in_charts"] = int(len(used_existing_keys) + len(appendable_keys))
+    summary["ivan_manual_rows_skipped_because_api_exists"] = int(len(skipped_api_keys))
+    summary["ivan_manual_rows_hidden_by_current_filters"] = int(len(hidden_keys))
+
+    for api_column, base_column in (
+        ("ad_campaign_spend_total_api", "ad_campaign_spend_total"),
+        ("ad_atbs_total_api", "ad_atbs_total"),
+        ("ad_views_total_api", "ad_views_total"),
+    ):
+        if api_column not in result.columns:
+            result[api_column] = result.get(base_column)
+
+    merge_columns = [
+        "report_date",
+        "nm_id",
+        "supplier_article",
+        "title",
+        "ad_campaign_spend_total_manual",
+        "ad_atbs_total_manual",
+        "ad_views_total_manual",
+        "ad_cost_per_cart_manual",
+        "ad_cpm_manual",
+        "source_status",
+        "data_status",
+        "import_quality",
+        "ad_data_source",
+    ]
+    result = result.merge(
+        manual_period_df[merge_columns],
+        on=["report_date", "nm_id"],
+        how="left",
+        suffixes=("", "_ivan"),
+    )
+
+    api_mask = result.apply(_row_has_api_ad_metrics, axis=1) if not result.empty else pd.Series(dtype=bool)
+    manual_available_mask = (
+        result.get("ad_campaign_spend_total_manual").notna()
+        | result.get("ad_atbs_total_manual").notna()
+        | result.get("ad_views_total_manual").notna()
+    )
+    manual_used_mask = manual_available_mask & ~api_mask
+
+    for base_column, manual_column in (
+        ("ad_campaign_spend_total", "ad_campaign_spend_total_manual"),
+        ("ad_atbs_total", "ad_atbs_total_manual"),
+        ("ad_views_total", "ad_views_total_manual"),
+    ):
+        if base_column not in result.columns:
+            result[base_column] = pd.NA
+        result[base_column] = result[base_column].where(~manual_used_mask, result[manual_column])
+
+    if "ad_cost_per_cart_calc" not in result.columns:
+        result["ad_cost_per_cart_calc"] = pd.NA
+    if "ad_cpm_calc" not in result.columns:
+        result["ad_cpm_calc"] = pd.NA
+    if "ad_data_source" not in result.columns:
+        result["ad_data_source"] = pd.NA
+    if "has_ad_campaign" not in result.columns:
+        result["has_ad_campaign"] = False
+    if "has_ad_cost" not in result.columns:
+        result["has_ad_cost"] = False
+
+    result["ad_cost_per_cart_calc"] = result["ad_cost_per_cart_calc"].where(~manual_used_mask, result["ad_cost_per_cart_manual"])
+    result["ad_cpm_calc"] = result["ad_cpm_calc"].where(~manual_used_mask, result["ad_cpm_manual"])
+    result["ad_data_source"] = result["ad_data_source"].where(~manual_used_mask, result["ad_data_source_ivan"] if "ad_data_source_ivan" in result.columns else result["ad_data_source"])
+    result.loc[api_mask & result["ad_data_source"].isna(), "ad_data_source"] = API_WB_AD_SOURCE_LABEL
+    result["has_ad_campaign"] = result["has_ad_campaign"].where(~manual_used_mask, True)
+
+    if "source_status_ivan" in result.columns:
+        result["manual_source_status"] = result["source_status_ivan"]
+    if "data_status_ivan" in result.columns:
+        result["manual_data_status"] = result["data_status_ivan"]
+    if "import_quality_ivan" in result.columns:
+        result["manual_import_quality"] = result["import_quality_ivan"]
+
+    if appendable_keys:
+        existing_columns = list(result.columns)
+        appended_rows: list[dict[str, Any]] = []
+        for row in manual_period_df[manual_period_df["_merge_key"].isin(appendable_keys)].to_dict(orient="records"):
+            appended_row = {column_name: pd.NA for column_name in existing_columns}
+            appended_row["report_date"] = row["report_date"]
+            appended_row["nm_id"] = row["nm_id"]
+            appended_row["supplier_article"] = row.get("supplier_article")
+            appended_row["title"] = row.get("title")
+            appended_row["ad_campaign_spend_total"] = row.get("ad_campaign_spend_total_manual")
+            appended_row["ad_atbs_total"] = row.get("ad_atbs_total_manual")
+            appended_row["ad_views_total"] = row.get("ad_views_total_manual")
+            appended_row["ad_campaign_spend_total_api"] = pd.NA
+            appended_row["ad_atbs_total_api"] = pd.NA
+            appended_row["ad_views_total_api"] = pd.NA
+            appended_row["ad_campaign_spend_total_manual"] = row.get("ad_campaign_spend_total_manual")
+            appended_row["ad_atbs_total_manual"] = row.get("ad_atbs_total_manual")
+            appended_row["ad_views_total_manual"] = row.get("ad_views_total_manual")
+            appended_row["ad_cost_per_cart_calc"] = row.get("ad_cost_per_cart_manual")
+            appended_row["ad_cpm_calc"] = row.get("ad_cpm_manual")
+            appended_row["ad_data_source"] = row.get("ad_data_source")
+            appended_row["manual_source_status"] = row.get("source_status")
+            appended_row["manual_data_status"] = row.get("data_status")
+            appended_row["manual_import_quality"] = row.get("import_quality")
+            appended_row["has_ad_campaign"] = True
+            appended_row["has_ad_cost"] = False
+            appended_rows.append(appended_row)
+        if appended_rows:
+            append_df = pd.DataFrame(appended_rows)
+            append_df = append_df.reindex(columns=result.columns)
+            if result.empty:
+                result = append_df.reset_index(drop=True)
+            else:
+                result = result.copy()
+                for appended_row in append_df.to_dict(orient="records"):
+                    result.loc[len(result)] = appended_row
+
+    result.attrs = {}
+    return result, summary
+
+
 def format_wb_conversion_type_label(value: object) -> str:
     if pd.isna(value) or value in (None, ""):
         return "—"
@@ -3932,10 +4277,17 @@ def build_chart_metrics_by_date(
     aggregation_columns = [
         "cart_count",
         "ad_atbs_total",
+        "ad_atbs_total_api",
+        "ad_atbs_total_manual",
         "order_count",
         "ad_orders_total",
         "ad_campaign_spend_total",
+        "ad_campaign_spend_total_api",
+        "ad_campaign_spend_total_manual",
         "ad_cost_writeoff_total",
+        "ad_views_total",
+        "ad_views_total_api",
+        "ad_views_total_manual",
     ]
     available_columns = [column for column in aggregation_columns if column in scope_rows.columns]
     if not available_columns:
@@ -3968,16 +4320,48 @@ def build_chart_metrics_by_date(
     confirmed_mask = ~(lagged_mask | partial_mask)
     if "ad_atbs_total" in grouped.columns:
         grouped["ad_atbs_total_confirmed"] = grouped["ad_atbs_total"].where(confirmed_mask)
+    if "ad_atbs_total_api" in grouped.columns:
+        grouped["ad_atbs_total_api_confirmed"] = grouped["ad_atbs_total_api"].where(confirmed_mask)
+    if "ad_atbs_total_manual" in grouped.columns:
+        grouped["ad_atbs_total_manual_confirmed"] = grouped["ad_atbs_total_manual"]
     if "ad_orders_total" in grouped.columns:
         grouped["ad_orders_total_confirmed"] = grouped["ad_orders_total"].where(confirmed_mask)
     if "ad_campaign_spend_total" in grouped.columns:
         grouped["ad_spend_confirmed"] = grouped["ad_campaign_spend_total"].where(confirmed_mask)
+    if "ad_campaign_spend_total_api" in grouped.columns:
+        grouped["ad_spend_api_confirmed"] = grouped["ad_campaign_spend_total_api"].where(confirmed_mask)
+    if "ad_campaign_spend_total_manual" in grouped.columns:
+        grouped["ad_spend_manual_confirmed"] = grouped["ad_campaign_spend_total_manual"]
     grouped["total_cart_cost"] = grouped.apply(
         lambda row: safe_chart_divide(row.get("ad_campaign_spend_total"), row.get("cart_count")),
         axis=1,
     )
     grouped["ad_cart_cost"] = grouped.apply(
         lambda row: safe_chart_divide(row.get("ad_spend_confirmed"), row.get("ad_atbs_total_confirmed")),
+        axis=1,
+    )
+    grouped["ad_cart_cost_api"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_spend_api_confirmed"), row.get("ad_atbs_total_api_confirmed")),
+        axis=1,
+    )
+    grouped["ad_cart_cost_manual"] = grouped.apply(
+        lambda row: safe_chart_divide(row.get("ad_spend_manual_confirmed"), row.get("ad_atbs_total_manual_confirmed")),
+        axis=1,
+    )
+    grouped["ad_cpm_api"] = grouped.apply(
+        lambda row: (
+            None
+            if safe_chart_divide(row.get("ad_campaign_spend_total_api"), row.get("ad_views_total_api")) is None
+            else safe_chart_divide(row.get("ad_campaign_spend_total_api"), row.get("ad_views_total_api")) * 1000
+        ),
+        axis=1,
+    )
+    grouped["ad_cpm_manual"] = grouped.apply(
+        lambda row: (
+            None
+            if safe_chart_divide(row.get("ad_campaign_spend_total_manual"), row.get("ad_views_total_manual")) is None
+            else safe_chart_divide(row.get("ad_campaign_spend_total_manual"), row.get("ad_views_total_manual")) * 1000
+        ),
         axis=1,
     )
     grouped["total_cpo"] = grouped.apply(
@@ -4605,6 +4989,54 @@ def render_charts_tab(
         ad_campaign_product_df=ad_campaign_product_df,
         selected_conversion_type=selected_conversion_type,
     )
+    cache_buster = resolve_db_dataset_cache_buster()
+    try:
+        raw_manual_ads_df = load_ivan_ads_wide_day_from_db(cache_buster)
+        manual_reference_counts = load_ivan_ads_wide_reference_counts_from_db(cache_buster)
+    except Exception:
+        logger.exception("Не удалось загрузить ручную рекламу Ивана для графиков")
+        raw_manual_ads_df = pd.DataFrame()
+        manual_reference_counts = {
+            "matched_dim_product_rows": 0,
+            "matched_active_product_rows": 0,
+        }
+
+    selected_period_dates = pd.to_datetime(filtered.get("report_date", pd.Series(dtype=object)), errors="coerce").dropna().dt.date
+    selected_period_start = selected_period_dates.min() if not selected_period_dates.empty else None
+    selected_period_end = selected_period_dates.max() if not selected_period_dates.empty else None
+    manual_period_dates = (
+        pd.to_datetime(raw_manual_ads_df.get("date", pd.Series(dtype=object)), errors="coerce").dropna().dt.date
+        if not raw_manual_ads_df.empty
+        else pd.Series(dtype=object)
+    )
+    manual_period_start = manual_period_dates.min() if not manual_period_dates.empty else None
+    manual_period_end = manual_period_dates.max() if not manual_period_dates.empty else None
+    manual_ads_chart_df = aggregate_ivan_manual_ads_for_charts(
+        raw_manual_ads_df,
+        date_from=selected_period_start,
+        date_to=selected_period_end,
+    )
+    total_manual_spend = None
+    if not raw_manual_ads_df.empty and "ad_spend" in raw_manual_ads_df.columns:
+        total_manual_spend = pd.to_numeric(raw_manual_ads_df["ad_spend"], errors="coerce").sum(min_count=1)
+        if not pd.isna(total_manual_spend):
+            total_manual_spend = float(total_manual_spend)
+        else:
+            total_manual_spend = None
+    scope_rows, manual_ads_summary = merge_ivan_manual_ads_into_chart_scope(
+        scope_rows,
+        manual_ads_chart_df,
+        aggregation_level=aggregation_level,
+        period_start=selected_period_start,
+        period_end=selected_period_end,
+        total_manual_rows=len(raw_manual_ads_df),
+        total_manual_products=int(raw_manual_ads_df["nm_id"].nunique()) if not raw_manual_ads_df.empty and "nm_id" in raw_manual_ads_df.columns else 0,
+        total_manual_spend=total_manual_spend,
+        manual_period_start=manual_period_start,
+        manual_period_end=manual_period_end,
+        matched_dim_product_rows=int(manual_reference_counts.get("matched_dim_product_rows", 0)),
+        matched_active_product_rows=int(manual_reference_counts.get("matched_active_product_rows", 0)),
+    )
     chart_df = build_chart_metrics_by_date(scope_rows)
     if chart_df.empty:
         st.info("Нет данных за выбранный период.")
@@ -4621,6 +5053,30 @@ def render_charts_tab(
     else:
         article_caption = f"{fmt_text(context.get('supplier_article'))} | {fmt_text(context.get('nm_id'))} | {fmt_text(context.get('title'))}"
         st.caption(f"Выбранный товар: {article_caption}")
+
+    with st.expander("Диагностика ручной рекламы Ивана", expanded=manual_ads_summary["ivan_manual_ad_rows_in_selected_period"] > 0):
+        diagnostic_cols = st.columns(5)
+        diagnostic_cols[0].metric("API ad rows in selected period", f"{manual_ads_summary['api_ad_rows_in_selected_period']:,}".replace(",", " "))
+        diagnostic_cols[1].metric("Ivan manual ad rows total", f"{manual_ads_summary['ivan_manual_ad_rows_total']:,}".replace(",", " "))
+        diagnostic_cols[2].metric("Ivan manual ad rows in selected period", f"{manual_ads_summary['ivan_manual_ad_rows_in_selected_period']:,}".replace(",", " "))
+        diagnostic_cols[3].metric("Ivan manual products", f"{manual_ads_summary['ivan_manual_products']:,}".replace(",", " "))
+        diagnostic_cols[4].metric("Ivan manual rows used in charts", f"{manual_ads_summary['ivan_manual_rows_used_in_charts']:,}".replace(",", " "))
+        diagnostic_cols = st.columns(5)
+        diagnostic_cols[0].metric("Ivan manual rows skipped because API exists", f"{manual_ads_summary['ivan_manual_rows_skipped_because_api_exists']:,}".replace(",", " "))
+        diagnostic_cols[1].metric("Ivan manual rows hidden by current filters", f"{manual_ads_summary['ivan_manual_rows_hidden_by_current_filters']:,}".replace(",", " "))
+        diagnostic_cols[2].metric("Ivan manual rows matched to dim_product", f"{manual_ads_summary['ivan_manual_rows_matched_to_dim_product']:,}".replace(",", " "))
+        diagnostic_cols[3].metric("Ivan manual rows matched to active products", f"{manual_ads_summary['ivan_manual_rows_matched_to_active_products']:,}".replace(",", " "))
+        diagnostic_cols[4].metric(
+            "Ivan manual spend total",
+            format_chart_kpi_value(manual_ads_summary["ivan_manual_spend_total"], digits=2, suffix=" руб."),
+        )
+        if manual_ads_summary.get("ivan_manual_period"):
+            st.caption(f"Ivan manual period: {manual_ads_summary['ivan_manual_period']}")
+        if manual_ads_summary["ivan_manual_ad_rows_in_selected_period"] > 0 and manual_ads_summary["ivan_manual_rows_used_in_charts"] == 0:
+            st.info(
+                "Ручная реклама Ивана есть в БД, но не сопоставлена с текущим справочником товаров/settings_products.active "
+                "или скрыта текущими фильтрами."
+            )
 
     period_summary = build_chart_period_summary(chart_df)
     total_carts = period_summary["total_carts"]
@@ -4702,14 +5158,18 @@ def render_charts_tab(
     carts_chart = build_user_friendly_chart(
         chart_df=chart_df,
         series_map=(
-            {"cart_count": "Итоговые корзины", "ad_atbs_total_confirmed": "Корзины РК"}
+            {
+                "cart_count": "Итоговые корзины",
+                "ad_atbs_total_api_confirmed": API_WB_AD_SOURCE_LABEL,
+                "ad_atbs_total_manual_confirmed": IVAN_MANUAL_AD_SOURCE_LABEL,
+            }
             if not is_conversion_level
             else {"ad_atbs_total_confirmed": "Корзины РК"}
         ),
         y_title="Корзины, шт.",
         tooltip_value_title="Значение, шт.",
         value_format=".0f",
-        line_colors=["#2563eb", "#f97316"],
+        line_colors=["#2563eb", "#f97316", "#7c3aed"],
     )
     if carts_chart is None:
         st.info("Нет данных за выбранный период.")
@@ -4725,14 +5185,18 @@ def render_charts_tab(
     cart_cost_chart = build_user_friendly_chart(
         chart_df=chart_df,
         series_map=(
-            {"total_cart_cost": "Стоимость корзины ИТОГО", "ad_cart_cost": "Стоимость корзины РК"}
+            {
+                "total_cart_cost": "Стоимость корзины ИТОГО",
+                "ad_cart_cost_api": API_WB_AD_SOURCE_LABEL,
+                "ad_cart_cost_manual": IVAN_MANUAL_AD_SOURCE_LABEL,
+            }
             if not is_conversion_level
             else {"ad_cart_cost": "Стоимость корзины РК"}
         ),
         y_title="Стоимость, руб.",
         tooltip_value_title="Стоимость, руб.",
         value_format=".1f",
-        line_colors=["#0f766e", "#f59e0b"],
+        line_colors=["#0f766e", "#f59e0b", "#7c3aed"],
         threshold=CHART_THRESHOLD_CART_COST,
         threshold_label="Порог 35 руб.",
     )

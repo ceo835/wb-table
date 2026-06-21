@@ -14,8 +14,11 @@ from app_streamlit import (
     DISPLAY_COLUMNS_BY_DATE,
     DEFAULT_STREAMLIT_DISPLAY_MIN_DATE,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
+    CHART_LEVEL_ARTICLE,
+    CHART_LEVEL_CABINET,
     apply_display_min_date_filter,
     apply_tracked_scope_filters,
+    aggregate_ivan_manual_ads_for_charts,
     build_streamlit_display_min_date_caption,
     build_band_summary_table,
     build_category_summary_table,
@@ -55,6 +58,7 @@ from app_streamlit import (
     get_previous_product_date,
     is_password_protection_enabled,
     inspect_tracked_metadata_state,
+    merge_ivan_manual_ads_into_chart_scope,
     prepare_dataframe_for_streamlit_display,
     prepare_stock_warehouse_table_for_display,
     resolve_data_source,
@@ -1224,6 +1228,334 @@ def test_build_chart_series_dataframe_ignores_problematic_dataframe_attrs() -> N
     assert len(result) == 4
     assert set(result["series"]) == {"Заказы", "Сумма заказов"}
     assert result["is_alert"].eq(False).all()
+
+
+def test_aggregate_ivan_manual_ads_for_charts_sums_metrics_and_preserves_source() -> None:
+    raw_df = pd.DataFrame(
+        [
+            {
+                "date": "2026-03-20",
+                "nm_id": 111,
+                "supplier_article": "a-1",
+                "title": "Товар A",
+                "ad_spend": 100.0,
+                "ad_atbs": 10.0,
+                "ad_views": 1000.0,
+                "source_status": "IVAN_ADS_WIDE_IMPORT",
+                "data_status": "MANUAL_UPLOAD",
+                "import_quality": "PARTIAL_CONFLICTS_SKIPPED",
+            },
+            {
+                "date": "2026-03-20",
+                "nm_id": 111,
+                "supplier_article": "a-1",
+                "title": "Товар A",
+                "ad_spend": 50.0,
+                "ad_atbs": 5.0,
+                "ad_views": 500.0,
+                "source_status": "IVAN_ADS_WIDE_IMPORT",
+                "data_status": "MANUAL_UPLOAD",
+                "import_quality": "PARTIAL_CONFLICTS_SKIPPED",
+            },
+        ]
+    )
+
+    result = aggregate_ivan_manual_ads_for_charts(raw_df)
+
+    assert result.to_dict(orient="records") == [
+        {
+            "report_date": pd.Timestamp("2026-03-20").date(),
+            "nm_id": 111,
+            "supplier_article": "a-1",
+            "title": "Товар A",
+            "ad_campaign_spend_total_manual": 150.0,
+            "ad_atbs_total_manual": 15.0,
+            "ad_views_total_manual": 1500.0,
+            "ad_cost_per_cart_manual": 10.0,
+            "ad_cpm_manual": 100.0,
+            "source_status": "IVAN_ADS_WIDE_IMPORT",
+            "data_status": "MANUAL_UPLOAD",
+            "import_quality": "PARTIAL_CONFLICTS_SKIPPED",
+            "ad_data_source": "IVAN_ADS_WIDE_IMPORT",
+        }
+    ]
+
+
+def test_merge_ivan_manual_ads_into_chart_scope_uses_manual_when_api_missing() -> None:
+    scope_rows = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-03-20",
+                "nm_id": 111,
+                "cart_count": 40.0,
+                "order_count": 8.0,
+                "ad_campaign_spend_total": None,
+                "ad_atbs_total": None,
+                "ad_views_total": None,
+                "has_ad_cost": False,
+                "has_ad_campaign": False,
+            }
+        ]
+    )
+    manual_chart_df = pd.DataFrame(
+        [
+            {
+                "report_date": pd.Timestamp("2026-03-20").date(),
+                "nm_id": 111,
+                "supplier_article": "a-1",
+                "title": "Товар A",
+                "ad_campaign_spend_total_manual": 150.0,
+                "ad_atbs_total_manual": 15.0,
+                "ad_views_total_manual": 1500.0,
+                "ad_cost_per_cart_manual": 10.0,
+                "ad_cpm_manual": 100.0,
+                "source_status": "IVAN_ADS_WIDE_IMPORT",
+                "data_status": "MANUAL_UPLOAD",
+                "import_quality": "PARTIAL_CONFLICTS_SKIPPED",
+                "ad_data_source": "IVAN_ADS_WIDE_IMPORT",
+            }
+        ]
+    )
+
+    merged, summary = merge_ivan_manual_ads_into_chart_scope(
+        scope_rows,
+        manual_chart_df,
+        aggregation_level=CHART_LEVEL_CABINET,
+        period_start=pd.Timestamp("2026-03-20").date(),
+        period_end=pd.Timestamp("2026-03-20").date(),
+        total_manual_rows=1,
+        total_manual_products=1,
+        total_manual_spend=150.0,
+        manual_period_start=pd.Timestamp("2026-03-20").date(),
+        manual_period_end=pd.Timestamp("2026-03-20").date(),
+        matched_dim_product_rows=0,
+        matched_active_product_rows=0,
+    )
+
+    assert float(merged.loc[0, "ad_campaign_spend_total"]) == 150.0
+    assert float(merged.loc[0, "ad_atbs_total"]) == 15.0
+    assert float(merged.loc[0, "ad_views_total"]) == 1500.0
+    assert float(merged.loc[0, "ad_cost_per_cart_calc"]) == 10.0
+    assert float(merged.loc[0, "ad_cpm_calc"]) == 100.0
+    assert merged.loc[0, "ad_data_source"] == "IVAN_ADS_WIDE_IMPORT"
+    assert summary["ivan_manual_rows_used_in_charts"] == 1
+    assert summary["ivan_manual_rows_skipped_because_api_exists"] == 0
+    assert summary["ivan_manual_rows_hidden_by_current_filters"] == 0
+
+
+def test_merge_ivan_manual_ads_into_chart_scope_does_not_sum_over_api() -> None:
+    scope_rows = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-05-10",
+                "nm_id": 111,
+                "cart_count": 50.0,
+                "order_count": 10.0,
+                "ad_campaign_spend_total": 90.0,
+                "ad_atbs_total": 9.0,
+                "ad_views_total": 900.0,
+                "has_ad_cost": True,
+                "has_ad_campaign": True,
+            }
+        ]
+    )
+    manual_chart_df = pd.DataFrame(
+        [
+            {
+                "report_date": pd.Timestamp("2026-05-10").date(),
+                "nm_id": 111,
+                "supplier_article": "a-1",
+                "title": "Товар A",
+                "ad_campaign_spend_total_manual": 150.0,
+                "ad_atbs_total_manual": 15.0,
+                "ad_views_total_manual": 1500.0,
+                "ad_cost_per_cart_manual": 10.0,
+                "ad_cpm_manual": 100.0,
+                "source_status": "IVAN_ADS_WIDE_IMPORT",
+                "data_status": "MANUAL_UPLOAD",
+                "import_quality": "PARTIAL_CONFLICTS_SKIPPED",
+                "ad_data_source": "IVAN_ADS_WIDE_IMPORT",
+            }
+        ]
+    )
+
+    merged, summary = merge_ivan_manual_ads_into_chart_scope(
+        scope_rows,
+        manual_chart_df,
+        aggregation_level=CHART_LEVEL_CABINET,
+        period_start=pd.Timestamp("2026-05-10").date(),
+        period_end=pd.Timestamp("2026-05-10").date(),
+        total_manual_rows=1,
+        total_manual_products=1,
+        total_manual_spend=150.0,
+        manual_period_start=pd.Timestamp("2026-05-10").date(),
+        manual_period_end=pd.Timestamp("2026-05-10").date(),
+        matched_dim_product_rows=0,
+        matched_active_product_rows=0,
+    )
+
+    assert float(merged.loc[0, "ad_campaign_spend_total"]) == 90.0
+    assert float(merged.loc[0, "ad_atbs_total"]) == 9.0
+    assert summary["ivan_manual_rows_used_in_charts"] == 0
+    assert summary["ivan_manual_rows_skipped_because_api_exists"] == 1
+
+
+def test_merge_ivan_manual_ads_into_chart_scope_keeps_manual_without_dim_product_in_cabinet() -> None:
+    scope_rows = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-03-20",
+                "nm_id": 111,
+                "cart_count": 40.0,
+                "order_count": 8.0,
+                "ad_campaign_spend_total": None,
+                "ad_atbs_total": None,
+                "ad_views_total": None,
+                "has_ad_cost": False,
+                "has_ad_campaign": False,
+            }
+        ]
+    )
+    manual_chart_df = pd.DataFrame(
+        [
+            {
+                "report_date": pd.Timestamp("2026-03-20").date(),
+                "nm_id": 222,
+                "supplier_article": "b-2",
+                "title": "Товар B",
+                "ad_campaign_spend_total_manual": 200.0,
+                "ad_atbs_total_manual": 20.0,
+                "ad_views_total_manual": 2000.0,
+                "ad_cost_per_cart_manual": 10.0,
+                "ad_cpm_manual": 100.0,
+                "source_status": "IVAN_ADS_WIDE_IMPORT",
+                "data_status": "MANUAL_UPLOAD",
+                "import_quality": "PARTIAL_CONFLICTS_SKIPPED",
+                "ad_data_source": "IVAN_ADS_WIDE_IMPORT",
+            }
+        ]
+    )
+
+    merged, summary = merge_ivan_manual_ads_into_chart_scope(
+        scope_rows,
+        manual_chart_df,
+        aggregation_level=CHART_LEVEL_CABINET,
+        period_start=pd.Timestamp("2026-03-20").date(),
+        period_end=pd.Timestamp("2026-03-20").date(),
+        total_manual_rows=1,
+        total_manual_products=1,
+        total_manual_spend=200.0,
+        manual_period_start=pd.Timestamp("2026-03-20").date(),
+        manual_period_end=pd.Timestamp("2026-03-20").date(),
+        matched_dim_product_rows=0,
+        matched_active_product_rows=0,
+    )
+
+    assert set(merged["nm_id"].tolist()) == {111, 222}
+    manual_row = merged[merged["nm_id"] == 222].iloc[0]
+    assert float(manual_row["ad_campaign_spend_total"]) == 200.0
+    assert summary["ivan_manual_rows_used_in_charts"] == 1
+    assert summary["ivan_manual_rows_hidden_by_current_filters"] == 0
+
+
+def test_merge_ivan_manual_ads_into_chart_scope_reports_hidden_rows_for_article_filter() -> None:
+    scope_rows = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-03-20",
+                "nm_id": 111,
+                "supplier_article": "a-1",
+                "title": "Товар A",
+                "ad_campaign_spend_total": None,
+                "ad_atbs_total": None,
+                "ad_views_total": None,
+                "has_ad_cost": False,
+                "has_ad_campaign": False,
+            }
+        ]
+    )
+    manual_chart_df = pd.DataFrame(
+        [
+            {
+                "report_date": pd.Timestamp("2026-03-20").date(),
+                "nm_id": 222,
+                "supplier_article": "b-2",
+                "title": "Товар B",
+                "ad_campaign_spend_total_manual": 200.0,
+                "ad_atbs_total_manual": 20.0,
+                "ad_views_total_manual": 2000.0,
+                "ad_cost_per_cart_manual": 10.0,
+                "ad_cpm_manual": 100.0,
+                "source_status": "IVAN_ADS_WIDE_IMPORT",
+                "data_status": "MANUAL_UPLOAD",
+                "import_quality": "PARTIAL_CONFLICTS_SKIPPED",
+                "ad_data_source": "IVAN_ADS_WIDE_IMPORT",
+            }
+        ]
+    )
+
+    merged, summary = merge_ivan_manual_ads_into_chart_scope(
+        scope_rows,
+        manual_chart_df,
+        aggregation_level=CHART_LEVEL_ARTICLE,
+        period_start=pd.Timestamp("2026-03-20").date(),
+        period_end=pd.Timestamp("2026-03-20").date(),
+        total_manual_rows=1,
+        total_manual_products=1,
+        total_manual_spend=200.0,
+        manual_period_start=pd.Timestamp("2026-03-20").date(),
+        manual_period_end=pd.Timestamp("2026-03-20").date(),
+        matched_dim_product_rows=0,
+        matched_active_product_rows=0,
+    )
+
+    assert merged["nm_id"].tolist() == [111]
+    assert summary["ivan_manual_rows_used_in_charts"] == 0
+    assert summary["ivan_manual_rows_hidden_by_current_filters"] == 1
+
+
+def test_build_chart_metrics_by_date_keeps_separate_api_and_manual_series() -> None:
+    scope_rows = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-03-20",
+                "cart_count": 40.0,
+                "order_count": 8.0,
+                "ad_campaign_spend_total": 150.0,
+                "ad_atbs_total": 15.0,
+                "ad_cost_writeoff_total": None,
+                "ad_campaign_spend_total_api": None,
+                "ad_campaign_spend_total_manual": 150.0,
+                "ad_atbs_total_api": None,
+                "ad_atbs_total_manual": 15.0,
+            },
+            {
+                "report_date": "2026-05-10",
+                "cart_count": 50.0,
+                "order_count": 10.0,
+                "ad_campaign_spend_total": 90.0,
+                "ad_atbs_total": 9.0,
+                "ad_cost_writeoff_total": 90.0,
+                "ad_campaign_spend_total_api": 90.0,
+                "ad_campaign_spend_total_manual": None,
+                "ad_atbs_total_api": 9.0,
+                "ad_atbs_total_manual": None,
+            },
+        ]
+    )
+
+    chart_df = build_chart_metrics_by_date(scope_rows, reference_date=pd.Timestamp("2026-05-20").date())
+
+    assert "ad_campaign_spend_total_api" in chart_df.columns
+    assert "ad_campaign_spend_total_manual" in chart_df.columns
+    assert "ad_atbs_total_api" in chart_df.columns
+    assert "ad_atbs_total_manual" in chart_df.columns
+    first_row = chart_df.iloc[0]
+    second_row = chart_df.iloc[1]
+    assert float(first_row["ad_campaign_spend_total_manual"]) == 150.0
+    assert pd.isna(first_row["ad_campaign_spend_total_api"])
+    assert float(second_row["ad_campaign_spend_total_api"]) == 90.0
+    assert pd.isna(second_row["ad_campaign_spend_total_manual"])
 
 
 def test_prepare_dataframe_keeps_existing_data_quality_status() -> None:
