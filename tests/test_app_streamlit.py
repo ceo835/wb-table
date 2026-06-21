@@ -1404,7 +1404,7 @@ def test_merge_ivan_manual_ads_into_chart_scope_does_not_sum_over_api() -> None:
     assert summary["ivan_manual_rows_skipped_because_api_exists"] == 1
 
 
-def test_merge_ivan_manual_ads_into_chart_scope_keeps_manual_without_dim_product_in_cabinet() -> None:
+def test_merge_ivan_manual_ads_into_chart_scope_hides_manual_without_scope_match_in_cabinet() -> None:
     scope_rows = pd.DataFrame(
         [
             {
@@ -1455,11 +1455,9 @@ def test_merge_ivan_manual_ads_into_chart_scope_keeps_manual_without_dim_product
         matched_active_product_rows=0,
     )
 
-    assert set(merged["nm_id"].tolist()) == {111, 222}
-    manual_row = merged[merged["nm_id"] == 222].iloc[0]
-    assert float(manual_row["ad_campaign_spend_total"]) == 200.0
-    assert summary["ivan_manual_rows_used_in_charts"] == 1
-    assert summary["ivan_manual_rows_hidden_by_current_filters"] == 0
+    assert merged["nm_id"].tolist() == [111]
+    assert summary["ivan_manual_rows_used_in_charts"] == 0
+    assert summary["ivan_manual_rows_hidden_by_current_filters"] == 1
 
 
 def test_merge_ivan_manual_ads_into_chart_scope_reports_hidden_rows_for_article_filter() -> None:

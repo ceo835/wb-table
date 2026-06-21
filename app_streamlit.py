@@ -3812,10 +3812,7 @@ def merge_ivan_manual_ads_into_chart_scope(
     )
     manual_keys = set(manual_period_df["_merge_key"].tolist())
     skipped_api_keys = manual_keys & api_keys
-    if aggregation_level == CHART_LEVEL_CABINET:
-        appendable_keys = {key for key in manual_keys if key not in scope_keys and key not in api_keys}
-    else:
-        appendable_keys = set()
+    appendable_keys = set()
     used_existing_keys = {key for key in manual_keys if key in scope_keys and key not in api_keys}
     hidden_keys = manual_keys - skipped_api_keys - appendable_keys - used_existing_keys
 
@@ -3893,43 +3890,6 @@ def merge_ivan_manual_ads_into_chart_scope(
         result["manual_data_status"] = result["data_status_ivan"]
     if "import_quality_ivan" in result.columns:
         result["manual_import_quality"] = result["import_quality_ivan"]
-
-    if appendable_keys:
-        existing_columns = list(result.columns)
-        appended_rows: list[dict[str, Any]] = []
-        for row in manual_period_df[manual_period_df["_merge_key"].isin(appendable_keys)].to_dict(orient="records"):
-            appended_row = {column_name: pd.NA for column_name in existing_columns}
-            appended_row["report_date"] = row["report_date"]
-            appended_row["nm_id"] = row["nm_id"]
-            appended_row["supplier_article"] = row.get("supplier_article")
-            appended_row["title"] = row.get("title")
-            appended_row["ad_campaign_spend_total"] = row.get("ad_campaign_spend_total_manual")
-            appended_row["ad_atbs_total"] = row.get("ad_atbs_total_manual")
-            appended_row["ad_views_total"] = row.get("ad_views_total_manual")
-            appended_row["ad_campaign_spend_total_api"] = pd.NA
-            appended_row["ad_atbs_total_api"] = pd.NA
-            appended_row["ad_views_total_api"] = pd.NA
-            appended_row["ad_campaign_spend_total_manual"] = row.get("ad_campaign_spend_total_manual")
-            appended_row["ad_atbs_total_manual"] = row.get("ad_atbs_total_manual")
-            appended_row["ad_views_total_manual"] = row.get("ad_views_total_manual")
-            appended_row["ad_cost_per_cart_calc"] = row.get("ad_cost_per_cart_manual")
-            appended_row["ad_cpm_calc"] = row.get("ad_cpm_manual")
-            appended_row["ad_data_source"] = row.get("ad_data_source")
-            appended_row["manual_source_status"] = row.get("source_status")
-            appended_row["manual_data_status"] = row.get("data_status")
-            appended_row["manual_import_quality"] = row.get("import_quality")
-            appended_row["has_ad_campaign"] = True
-            appended_row["has_ad_cost"] = False
-            appended_rows.append(appended_row)
-        if appended_rows:
-            append_df = pd.DataFrame(appended_rows)
-            append_df = append_df.reindex(columns=result.columns)
-            if result.empty:
-                result = append_df.reset_index(drop=True)
-            else:
-                result = result.copy()
-                for appended_row in append_df.to_dict(orient="records"):
-                    result.loc[len(result)] = appended_row
 
     result.attrs = {}
     return result, summary
@@ -5071,30 +5031,6 @@ def render_charts_tab(
     else:
         article_caption = f"{fmt_text(context.get('supplier_article'))} | {fmt_text(context.get('nm_id'))} | {fmt_text(context.get('title'))}"
         st.caption(f"Выбранный товар: {article_caption}")
-
-    with st.expander("Диагностика ручной рекламы Ивана", expanded=manual_ads_summary["ivan_manual_ad_rows_in_selected_period"] > 0):
-        diagnostic_cols = st.columns(5)
-        diagnostic_cols[0].metric("API ad rows in selected period", f"{manual_ads_summary['api_ad_rows_in_selected_period']:,}".replace(",", " "))
-        diagnostic_cols[1].metric("Ivan manual ad rows total", f"{manual_ads_summary['ivan_manual_ad_rows_total']:,}".replace(",", " "))
-        diagnostic_cols[2].metric("Ivan manual ad rows in selected period", f"{manual_ads_summary['ivan_manual_ad_rows_in_selected_period']:,}".replace(",", " "))
-        diagnostic_cols[3].metric("Ivan manual products", f"{manual_ads_summary['ivan_manual_products']:,}".replace(",", " "))
-        diagnostic_cols[4].metric("Ivan manual rows used in charts", f"{manual_ads_summary['ivan_manual_rows_used_in_charts']:,}".replace(",", " "))
-        diagnostic_cols = st.columns(5)
-        diagnostic_cols[0].metric("Ivan manual rows skipped because API exists", f"{manual_ads_summary['ivan_manual_rows_skipped_because_api_exists']:,}".replace(",", " "))
-        diagnostic_cols[1].metric("Ivan manual rows hidden by current filters", f"{manual_ads_summary['ivan_manual_rows_hidden_by_current_filters']:,}".replace(",", " "))
-        diagnostic_cols[2].metric("Ivan manual rows matched to dim_product", f"{manual_ads_summary['ivan_manual_rows_matched_to_dim_product']:,}".replace(",", " "))
-        diagnostic_cols[3].metric("Ivan manual rows matched to active products", f"{manual_ads_summary['ivan_manual_rows_matched_to_active_products']:,}".replace(",", " "))
-        diagnostic_cols[4].metric(
-            "Ivan manual spend total",
-            format_chart_kpi_value(manual_ads_summary["ivan_manual_spend_total"], digits=2, suffix=" руб."),
-        )
-        if manual_ads_summary.get("ivan_manual_period"):
-            st.caption(f"Ivan manual period: {manual_ads_summary['ivan_manual_period']}")
-        if manual_ads_summary["ivan_manual_ad_rows_in_selected_period"] > 0 and manual_ads_summary["ivan_manual_rows_used_in_charts"] == 0:
-            st.info(
-                "Ручная реклама Ивана есть в БД, но не сопоставлена с текущим справочником товаров/settings_products.active "
-                "или скрыта текущими фильтрами."
-            )
 
     period_summary = build_chart_period_summary(chart_df)
     total_carts = period_summary["total_carts"]
