@@ -1543,6 +1543,73 @@ def build_wb_site_price_monitor_dataframe(
     return display_df
 
 
+def build_wb_site_price_monitor_visibility_summary(
+    snapshot_df: pd.DataFrame,
+    tracked_df: pd.DataFrame,
+    *,
+    snapshot_date: date,
+    show_sellout: bool,
+    visible_rows: int,
+) -> dict[str, Any]:
+    if snapshot_df.empty:
+        return {
+            "checked_products": 0,
+            "prices_received": 0,
+            "rows_written_to_db": 0,
+            "rows_visible_in_streamlit": 0,
+            "hidden_rows_count": 0,
+            "hidden_rows_reason": None,
+            "hidden_nm_ids": [],
+        }
+
+    current_snapshot = snapshot_df.copy()
+    current_snapshot["snapshot_date"] = pd.to_datetime(current_snapshot["snapshot_date"], errors="coerce").dt.date
+    current_snapshot = current_snapshot[current_snapshot["snapshot_date"] == snapshot_date].copy()
+
+    if current_snapshot.empty:
+        return {
+            "checked_products": 0,
+            "prices_received": 0,
+            "rows_written_to_db": 0,
+            "rows_visible_in_streamlit": visible_rows,
+            "hidden_rows_count": 0,
+            "hidden_rows_reason": None,
+            "hidden_nm_ids": [],
+        }
+
+    if not tracked_df.empty:
+        tracked_meta = tracked_df[["nm_id", "lifecycle_status"]].copy()
+        current_snapshot = current_snapshot.merge(
+            tracked_meta.rename(columns={"lifecycle_status": "_tracked_lifecycle_status"}),
+            on="nm_id",
+            how="left",
+        )
+    else:
+        current_snapshot["_tracked_lifecycle_status"] = pd.NA
+
+    lifecycle_raw = (
+        current_snapshot["lifecycle_status"]
+        .where(current_snapshot["lifecycle_status"].notna(), current_snapshot["_tracked_lifecycle_status"])
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+    sellout_mask = lifecycle_raw.eq("sellout")
+    hidden_nm_ids = sorted(current_snapshot.loc[sellout_mask, "nm_id"].dropna().astype(int).unique().tolist())
+    hidden_rows_count = int(sellout_mask.sum()) if not show_sellout else 0
+
+    return {
+        "checked_products": int(len(current_snapshot)),
+        "prices_received": int(current_snapshot["fetch_status"].astype(str).eq("success").sum()),
+        "rows_written_to_db": int(len(current_snapshot)),
+        "rows_visible_in_streamlit": int(visible_rows),
+        "hidden_rows_count": hidden_rows_count,
+        "hidden_rows_reason": "filtered_by_sellout" if hidden_rows_count else None,
+        "hidden_nm_ids": hidden_nm_ids if hidden_rows_count else [],
+    }
+
+
 def style_wb_site_price_monitor_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     safe_df = sanitize_dataframe_for_streamlit_display(
         df,
@@ -1619,6 +1686,13 @@ def render_wb_site_price_tab(data_source: str) -> None:
         show_sellout=show_sellout,
         only_problematic=False,
     )
+    visibility_summary = build_wb_site_price_monitor_visibility_summary(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=selected_snapshot_date,
+        show_sellout=show_sellout,
+        visible_rows=len(display_df),
+    )
     compact_columns = [
         "Артикул WB",
         "Название",
@@ -1664,6 +1738,23 @@ def render_wb_site_price_tab(data_source: str) -> None:
     alert_display_df = alert_display_df.rename(columns={"Цена покупателя": "Текущая цена"})
     technical_df = display_df[[column for column in technical_columns if column in display_df.columns]].copy()
     technical_df = technical_df.rename(columns={"Цена покупателя": "Текущая цена"})
+
+    with st.expander("Диагностика видимости", expanded=visibility_summary["hidden_rows_count"] > 0):
+        diagnostic_cols = st.columns(5)
+        diagnostic_cols[0].metric("Проверено ботом", f"{visibility_summary['checked_products']:,}".replace(",", " "))
+        diagnostic_cols[1].metric("Цен получено", f"{visibility_summary['prices_received']:,}".replace(",", " "))
+        diagnostic_cols[2].metric("Строк в БД", f"{visibility_summary['rows_written_to_db']:,}".replace(",", " "))
+        diagnostic_cols[3].metric(
+            "Видно в Streamlit",
+            f"{visibility_summary['rows_visible_in_streamlit']:,}".replace(",", " "),
+        )
+        diagnostic_cols[4].metric("Скрыто строк", f"{visibility_summary['hidden_rows_count']:,}".replace(",", " "))
+        if visibility_summary["hidden_rows_reason"] == "filtered_by_sellout":
+            hidden_nm_ids = ", ".join(str(value) for value in visibility_summary["hidden_nm_ids"])
+            st.info(
+                "Часть строк скрыта фильтром «Показывать распродажные товары». "
+                f"Скрытые nm_id: {hidden_nm_ids}"
+            )
 
     st.markdown("**Все проверенные цены за дату**")
     st.dataframe(

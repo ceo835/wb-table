@@ -47,6 +47,7 @@ from app_streamlit import (
     build_pipeline_status_messages,
     build_product_timeline_dataset,
     build_warnings,
+    build_wb_site_price_monitor_visibility_summary,
     can_apply_import_summary,
     format_delta,
     get_app_password,
@@ -777,6 +778,59 @@ def test_build_wb_site_price_monitor_dataframe_does_not_recreate_alert_without_a
     assert len(display_df) == 1
     assert bool(display_df.loc[0, "Alert"]) is False
     assert float(display_df.loc[0, "Изменение, ₽"]) == 550.0
+
+
+def test_build_wb_site_price_monitor_visibility_summary_reports_sellout_hidden_rows() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-21",
+                "nm_id": 91470767,
+                "lifecycle_status": "active",
+                "buyer_visible_price": 799.0,
+                "fetch_status": "success",
+            },
+            {
+                "snapshot_date": "2026-06-21",
+                "nm_id": 311071100,
+                "lifecycle_status": "sellout",
+                "buyer_visible_price": 821.0,
+                "fetch_status": "success",
+            },
+            {
+                "snapshot_date": "2026-06-21",
+                "nm_id": 91744473,
+                "lifecycle_status": "active",
+                "buyer_visible_price": 1022.0,
+                "fetch_status": "success",
+            },
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 91470767, "tracked_label": "avokado", "lifecycle_status": "active"},
+            {"nm_id": 311071100, "tracked_label": "avokado duble", "lifecycle_status": "sellout"},
+            {"nm_id": 91744473, "tracked_label": "bear", "lifecycle_status": "active"},
+        ]
+    )
+
+    result = build_wb_site_price_monitor_visibility_summary(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=pd.Timestamp("2026-06-21").date(),
+        show_sellout=False,
+        visible_rows=2,
+    )
+
+    assert result == {
+        "checked_products": 3,
+        "prices_received": 3,
+        "rows_written_to_db": 3,
+        "rows_visible_in_streamlit": 2,
+        "hidden_rows_count": 1,
+        "hidden_rows_reason": "filtered_by_sellout",
+        "hidden_nm_ids": [311071100],
+    }
 
 
 def test_build_stock_warehouse_summary_metrics_counts_ok_zero_and_no_data_rows() -> None:
