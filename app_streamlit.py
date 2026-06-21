@@ -4859,6 +4859,24 @@ def build_threshold_breaches_table(
     return pd.DataFrame(rows)
 
 
+def build_ad_carts_chart_series_map(*, is_conversion_level: bool) -> dict[str, str]:
+    if is_conversion_level:
+        return {"ad_atbs_total_confirmed": "Корзины РК"}
+    return {
+        "cart_count": "Итоговые корзины",
+        "ad_atbs_total_confirmed": "Корзины РК",
+    }
+
+
+def build_ad_cart_cost_chart_series_map(*, is_conversion_level: bool) -> dict[str, str]:
+    if is_conversion_level:
+        return {"ad_cart_cost": "Стоимость корзины РК"}
+    return {
+        "total_cart_cost": "Стоимость корзины ИТОГО",
+        "ad_cart_cost": "Стоимость корзины РК",
+    }
+
+
 def render_charts_tab(
     filtered: pd.DataFrame,
     preselected_product_label: str | None,
@@ -5157,19 +5175,11 @@ def render_charts_tab(
     )
     carts_chart = build_user_friendly_chart(
         chart_df=chart_df,
-        series_map=(
-            {
-                "cart_count": "Итоговые корзины",
-                "ad_atbs_total_api_confirmed": API_WB_AD_SOURCE_LABEL,
-                "ad_atbs_total_manual_confirmed": IVAN_MANUAL_AD_SOURCE_LABEL,
-            }
-            if not is_conversion_level
-            else {"ad_atbs_total_confirmed": "Корзины РК"}
-        ),
+        series_map=build_ad_carts_chart_series_map(is_conversion_level=is_conversion_level),
         y_title="Корзины, шт.",
         tooltip_value_title="Значение, шт.",
         value_format=".0f",
-        line_colors=["#2563eb", "#f97316", "#7c3aed"],
+        line_colors=["#2563eb", "#f97316"],
     )
     if carts_chart is None:
         st.info("Нет данных за выбранный период.")
@@ -5184,19 +5194,11 @@ def render_charts_tab(
     )
     cart_cost_chart = build_user_friendly_chart(
         chart_df=chart_df,
-        series_map=(
-            {
-                "total_cart_cost": "Стоимость корзины ИТОГО",
-                "ad_cart_cost_api": API_WB_AD_SOURCE_LABEL,
-                "ad_cart_cost_manual": IVAN_MANUAL_AD_SOURCE_LABEL,
-            }
-            if not is_conversion_level
-            else {"ad_cart_cost": "Стоимость корзины РК"}
-        ),
+        series_map=build_ad_cart_cost_chart_series_map(is_conversion_level=is_conversion_level),
         y_title="Стоимость, руб.",
         tooltip_value_title="Стоимость, руб.",
         value_format=".1f",
-        line_colors=["#0f766e", "#f59e0b", "#7c3aed"],
+        line_colors=["#0f766e", "#f59e0b"],
         threshold=CHART_THRESHOLD_CART_COST,
         threshold_label="Порог 35 руб.",
     )

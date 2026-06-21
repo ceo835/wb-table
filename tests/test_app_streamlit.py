@@ -13,6 +13,8 @@ from app_streamlit import (
     CHART_THRESHOLD_CPO,
     DISPLAY_COLUMNS_BY_DATE,
     DEFAULT_STREAMLIT_DISPLAY_MIN_DATE,
+    API_WB_AD_SOURCE_LABEL,
+    IVAN_MANUAL_AD_SOURCE_LABEL,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
     CHART_LEVEL_ARTICLE,
     CHART_LEVEL_CABINET,
@@ -28,6 +30,8 @@ from app_streamlit import (
     build_debug_trace_frame,
     build_chart_metrics_by_date,
     build_chart_period_summary,
+    build_ad_cart_cost_chart_series_map,
+    build_ad_carts_chart_series_map,
     apply_product_bands,
     build_chart_product_options,
     build_chart_scope_rows,
@@ -1514,7 +1518,7 @@ def test_merge_ivan_manual_ads_into_chart_scope_reports_hidden_rows_for_article_
     assert summary["ivan_manual_rows_hidden_by_current_filters"] == 1
 
 
-def test_build_chart_metrics_by_date_keeps_separate_api_and_manual_series() -> None:
+def test_build_chart_metrics_by_date_keeps_unified_business_metrics_with_source_diagnostics() -> None:
     scope_rows = pd.DataFrame(
         [
             {
@@ -1548,14 +1552,42 @@ def test_build_chart_metrics_by_date_keeps_separate_api_and_manual_series() -> N
 
     assert "ad_campaign_spend_total_api" in chart_df.columns
     assert "ad_campaign_spend_total_manual" in chart_df.columns
+    assert "ad_atbs_total_api_confirmed" in chart_df.columns
+    assert "ad_atbs_total_manual_confirmed" in chart_df.columns
     assert "ad_atbs_total_api" in chart_df.columns
     assert "ad_atbs_total_manual" in chart_df.columns
+    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-03-20"), "ad_atbs_total_confirmed"].iloc[0]) == 15.0
+    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-05-10"), "ad_atbs_total_confirmed"].iloc[0]) == 9.0
+    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-03-20"), "ad_cart_cost"].iloc[0]) == 10.0
+    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-05-10"), "ad_cart_cost"].iloc[0]) == 10.0
     first_row = chart_df.iloc[0]
     second_row = chart_df.iloc[1]
     assert float(first_row["ad_campaign_spend_total_manual"]) == 150.0
     assert pd.isna(first_row["ad_campaign_spend_total_api"])
     assert float(second_row["ad_campaign_spend_total_api"]) == 90.0
     assert pd.isna(second_row["ad_campaign_spend_total_manual"])
+
+
+def test_build_ad_carts_chart_series_map_uses_only_business_legend_labels() -> None:
+    series_map = build_ad_carts_chart_series_map(is_conversion_level=False)
+
+    assert series_map == {
+        "cart_count": "Итоговые корзины",
+        "ad_atbs_total_confirmed": "Корзины РК",
+    }
+    assert API_WB_AD_SOURCE_LABEL not in series_map.values()
+    assert IVAN_MANUAL_AD_SOURCE_LABEL not in series_map.values()
+
+
+def test_build_ad_cart_cost_chart_series_map_uses_only_business_legend_labels() -> None:
+    series_map = build_ad_cart_cost_chart_series_map(is_conversion_level=False)
+
+    assert series_map == {
+        "total_cart_cost": "Стоимость корзины ИТОГО",
+        "ad_cart_cost": "Стоимость корзины РК",
+    }
+    assert API_WB_AD_SOURCE_LABEL not in series_map.values()
+    assert IVAN_MANUAL_AD_SOURCE_LABEL not in series_map.values()
 
 
 def test_prepare_dataframe_keeps_existing_data_quality_status() -> None:
