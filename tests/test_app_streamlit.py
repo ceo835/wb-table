@@ -1718,8 +1718,8 @@ def test_build_export_dataframe_does_not_create_duplicate_pokazy_columns() -> No
         ],
     )
 
-    assert "Показы.1" not in export_df.columns
-    assert list(export_df.columns).count("Показы") == 1
+    assert "Показы общие.1" not in export_df.columns
+    assert list(export_df.columns).count("Показы общие") == 1
     assert export_df.columns.is_unique
 
 
@@ -2875,6 +2875,11 @@ def test_display_columns_by_date_keep_only_business_columns() -> None:
         "add_to_cart_conversion_calc",
         "cart_to_order_conversion_calc",
         "order_sum",
+        "legacy_cpm_common_calc",
+        "legacy_cost_per_card_click_calc",
+        "legacy_cost_per_all_carts_calc",
+        "legacy_cost_per_order_calc",
+        "legacy_ad_share_of_order_sum_pct",
         "avg_delivery_time",
         "ad_campaign_spend_total",
         "ad_views_total",
@@ -2885,8 +2890,6 @@ def test_display_columns_by_date_keep_only_business_columns() -> None:
         "ad_cpm_calc",
         "ad_cost_per_cart_calc",
         "ad_cpo_calc",
-        "ad_share_of_revenue_calc",
-        "ad_cost_per_all_carts_calc",
         "organic_cart_count",
         "organic_cart_share_calc",
         "current_stock_qty",
@@ -2913,6 +2916,8 @@ def test_display_columns_by_date_keep_only_business_columns() -> None:
         "associated_ad_atbs",
         "multicard_ad_atbs",
         "unknown_ad_atbs",
+        "ad_share_of_revenue_calc",
+        "ad_cost_per_all_carts_calc",
         "search_avg_position",
         "search_visibility",
         "search_clicks",
@@ -2925,6 +2930,23 @@ def test_display_columns_by_date_keep_only_business_columns() -> None:
 
     assert expected_columns.issubset(set(DISPLAY_COLUMNS_BY_DATE))
     assert excluded_columns.isdisjoint(set(DISPLAY_COLUMNS_BY_DATE))
+
+
+def test_display_columns_by_date_places_legacy_block_before_api_ad_block() -> None:
+    legacy_start = DISPLAY_COLUMNS_BY_DATE.index("ad_campaign_spend_total")
+    api_start = DISPLAY_COLUMNS_BY_DATE.index("ad_views_total")
+
+    expected_legacy_block = [
+        "ad_campaign_spend_total",
+        "legacy_cpm_common_calc",
+        "legacy_cost_per_card_click_calc",
+        "legacy_cost_per_all_carts_calc",
+        "legacy_cost_per_order_calc",
+        "legacy_ad_share_of_order_sum_pct",
+    ]
+
+    assert DISPLAY_COLUMNS_BY_DATE[legacy_start:api_start] == expected_legacy_block
+    assert api_start > legacy_start
 
 
 def test_build_export_dataframe_for_by_date_view_omits_technical_columns() -> None:
@@ -2947,6 +2969,11 @@ def test_build_export_dataframe_for_by_date_view_omits_technical_columns() -> No
                 "cart_to_order_conversion_calc": 26.650367,
                 "order_sum": 1000,
                 "ad_campaign_spend_total": 902,
+                "legacy_cpm_common_calc": 6.51,
+                "legacy_cost_per_card_click_calc": 1.25,
+                "legacy_cost_per_all_carts_calc": 7.51,
+                "legacy_cost_per_order_calc": 47.47,
+                "legacy_ad_share_of_order_sum_pct": 90.2,
                 "ad_views_total": 9118,
                 "ad_clicks_total": 649,
                 "ad_atbs_total": 120,
@@ -2985,12 +3012,25 @@ def test_build_export_dataframe_for_by_date_view_omits_technical_columns() -> No
 
     export_df = build_export_dataframe(table_df, DISPLAY_COLUMNS_BY_DATE)
 
-    assert "Показы" in export_df.columns
-    assert "CTR" in export_df.columns
+    assert "Показы общие" in export_df.columns
+    assert "CTR общий" in export_df.columns
     assert "Среднее время доставки" in export_df.columns
     assert "Сумма остатков" in export_df.columns
+    assert "Сумма кампании" in export_df.columns
+    assert "CPM по общим показам" in export_df.columns
+    assert "Цена перехода по общим переходам" in export_df.columns
+    assert "Расход на все корзины" in export_df.columns
+    assert "Расход на все заказы" in export_df.columns
+    assert "Доля рекламы от суммы заказов, %" in export_df.columns
+    assert "CPC РК" in export_df.columns
+    assert "CPM РК" in export_df.columns
+    assert "Цена корзины РК" in export_df.columns
+    assert "CPO РК" in export_df.columns
     assert "Источник точки входа" in export_df.columns
     assert "Источник географии" in export_df.columns
+    assert "CPM" not in export_df.columns
+    assert "CPC" not in export_df.columns
+    assert "CPO" not in export_df.columns
     assert "Показы из Точки входа" not in export_df.columns
     assert "Переходы из Точки входа" not in export_df.columns
     assert "CTR из Точки входа" not in export_df.columns
@@ -3020,7 +3060,7 @@ def test_build_export_dataframe_replaces_missing_values_with_dash() -> None:
         ["supplier_article", "nm_id", "report_date", "ad_cpo_calc", "avg_delivery_time", "current_stock_sum"],
     )
 
-    assert export_df.loc[0, "CPO"] == "—"
+    assert export_df.loc[0, "CPO РК"] == "—"
     assert export_df.loc[0, "Среднее время доставки"] == "—"
     assert export_df.loc[0, "Сумма остатков"] == "—"
 

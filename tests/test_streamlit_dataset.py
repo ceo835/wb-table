@@ -184,6 +184,72 @@ def test_enrich_streamlit_row_recalculates_ad_formulas_when_operands_present() -
     assert abs(float(row["ad_cost_per_all_carts_calc"]) - (30 / 11)) < 1e-9
 
 
+def test_enrich_streamlit_row_calculates_legacy_ad_metrics_from_common_funnel() -> None:
+    row = enrich_streamlit_row(
+        {
+            "has_funnel": True,
+            "has_stock": False,
+            "has_ad_cost": True,
+            "has_ad_campaign": True,
+            "has_search": False,
+            "has_localization_partial": False,
+            "entry_point_status": "FILE_IMPORT_PENDING",
+            "orders_geography_status": "FILE_IMPORT_PENDING",
+            "vbro_status": "MANUAL_PENDING",
+            "impressions": 3449,
+            "card_clicks": 274,
+            "cart_count": 21,
+            "order_count": 2,
+            "order_sum": 2346,
+            "ad_campaign_spend_total": 137.48,
+            "legacy_cpm_common_calc": None,
+            "legacy_cost_per_card_click_calc": None,
+            "legacy_cost_per_all_carts_calc": None,
+            "legacy_cost_per_order_calc": None,
+            "legacy_ad_share_of_order_sum_pct": None,
+        }
+    )
+
+    assert abs(float(row["legacy_cpm_common_calc"]) - (137.48 / 3449 * 1000)) < 1e-9
+    assert abs(float(row["legacy_cost_per_card_click_calc"]) - (137.48 / 274)) < 1e-9
+    assert abs(float(row["legacy_cost_per_all_carts_calc"]) - (137.48 / 21)) < 1e-9
+    assert abs(float(row["legacy_cost_per_order_calc"]) - (137.48 / 2)) < 1e-9
+    assert abs(float(row["legacy_ad_share_of_order_sum_pct"]) - (137.48 / 2346 * 100)) < 1e-9
+
+
+def test_enrich_streamlit_row_keeps_legacy_metrics_null_when_denominator_missing_or_zero() -> None:
+    row = enrich_streamlit_row(
+        {
+            "has_funnel": True,
+            "has_stock": False,
+            "has_ad_cost": True,
+            "has_ad_campaign": True,
+            "has_search": False,
+            "has_localization_partial": False,
+            "entry_point_status": "FILE_IMPORT_PENDING",
+            "orders_geography_status": "FILE_IMPORT_PENDING",
+            "vbro_status": "MANUAL_PENDING",
+            "impressions": None,
+            "card_clicks": 0,
+            "cart_count": 0,
+            "order_count": None,
+            "order_sum": 0,
+            "ad_campaign_spend_total": 137.48,
+            "legacy_cpm_common_calc": None,
+            "legacy_cost_per_card_click_calc": None,
+            "legacy_cost_per_all_carts_calc": None,
+            "legacy_cost_per_order_calc": None,
+            "legacy_ad_share_of_order_sum_pct": None,
+        }
+    )
+
+    assert row["legacy_cpm_common_calc"] is None
+    assert row["legacy_cost_per_card_click_calc"] is None
+    assert row["legacy_cost_per_all_carts_calc"] is None
+    assert row["legacy_cost_per_order_calc"] is None
+    assert row["legacy_ad_share_of_order_sum_pct"] is None
+
+
 def test_attach_wb_price_snapshot_fields_uses_exact_date_and_last_prior_success_price() -> None:
     rows = [
         {"report_date": "2026-06-10", "nm_id": 91470767},

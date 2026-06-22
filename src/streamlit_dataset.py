@@ -40,6 +40,11 @@ STREAMLIT_V1_COLUMNS = [
     "avg_delivery_time",
     "ad_cost_writeoff_total",
     "ad_campaign_spend_total",
+    "legacy_cpm_common_calc",
+    "legacy_cost_per_card_click_calc",
+    "legacy_cost_per_all_carts_calc",
+    "legacy_cost_per_order_calc",
+    "legacy_ad_share_of_order_sum_pct",
     "ad_views_total",
     "ad_clicks_total",
     "ad_atbs_total",
@@ -438,6 +443,33 @@ def enrich_streamlit_row(row: Mapping[str, Any]) -> dict[str, Any]:
         enriched["ad_cpc_calc"] = _safe_divide(
             enriched.get("ad_campaign_spend_total"),
             enriched.get("ad_clicks_total"),
+        )
+    if _is_missing(enriched.get("legacy_cpm_common_calc")):
+        enriched["legacy_cpm_common_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("impressions"),
+            Decimal("1000"),
+        )
+    if _is_missing(enriched.get("legacy_cost_per_card_click_calc")):
+        enriched["legacy_cost_per_card_click_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("card_clicks"),
+        )
+    if _is_missing(enriched.get("legacy_cost_per_all_carts_calc")):
+        enriched["legacy_cost_per_all_carts_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("cart_count"),
+        )
+    if _is_missing(enriched.get("legacy_cost_per_order_calc")):
+        enriched["legacy_cost_per_order_calc"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("order_count"),
+        )
+    if _is_missing(enriched.get("legacy_ad_share_of_order_sum_pct")):
+        enriched["legacy_ad_share_of_order_sum_pct"] = _safe_divide(
+            enriched.get("ad_campaign_spend_total"),
+            enriched.get("order_sum"),
+            Decimal("100"),
         )
     if _is_missing(enriched.get("ad_cpm_calc")):
         enriched["ad_cpm_calc"] = _safe_divide(

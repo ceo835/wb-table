@@ -160,8 +160,12 @@ DISPLAY_COLUMNS_BY_DATE = [
     "add_to_cart_conversion_calc",
     "cart_to_order_conversion_calc",
     "order_sum",
-    "avg_delivery_time",
     "ad_campaign_spend_total",
+    "legacy_cpm_common_calc",
+    "legacy_cost_per_card_click_calc",
+    "legacy_cost_per_all_carts_calc",
+    "legacy_cost_per_order_calc",
+    "legacy_ad_share_of_order_sum_pct",
     "ad_views_total",
     "ad_clicks_total",
     "ad_atbs_total",
@@ -170,14 +174,13 @@ DISPLAY_COLUMNS_BY_DATE = [
     "ad_cpm_calc",
     "ad_cost_per_cart_calc",
     "ad_cpo_calc",
-    "ad_share_of_revenue_calc",
-    "ad_cost_per_all_carts_calc",
     "organic_cart_count",
     "organic_cart_share_calc",
     "current_stock_qty",
     "current_stock_sum",
     "search_queries_count",
     "local_orders_percent",
+    "avg_delivery_time",
     "entry_point_source_label",
     "orders_geography_source_label",
     "vbro_status_label",
@@ -333,6 +336,11 @@ NUMERIC_COLUMNS = [
     "order_sum",
     "ad_cost_writeoff_total",
     "ad_campaign_spend_total",
+    "legacy_cpm_common_calc",
+    "legacy_cost_per_card_click_calc",
+    "legacy_cost_per_all_carts_calc",
+    "legacy_cost_per_order_calc",
+    "legacy_ad_share_of_order_sum_pct",
     "ad_views_total",
     "ad_clicks_total",
     "ad_atbs_total",
@@ -421,9 +429,9 @@ EXPORT_COLUMN_LABELS = {
     "brand": "Бренд",
     "subject": "Предмет",
     "wb_buyer_price": "Цена WB",
-    "impressions": "Показы",
+    "impressions": "Показы общие",
     "card_clicks": "Переходы в карточку",
-    "ctr_calc": "CTR",
+    "ctr_calc": "CTR общий",
     "cart_count": "Положили в корзину",
     "add_to_cart_conversion_calc": "Конверсия в корзину, %",
     "order_count": "Заказы",
@@ -437,15 +445,20 @@ EXPORT_COLUMN_LABELS = {
     "avg_delivery_time": "Среднее время доставки",
     "local_orders_percent": "Локальные заказы, %",
     "ad_cost_writeoff_total": "Списания рекламы",
-    "ad_campaign_spend_total": "Расход РК по статистике",
+    "ad_campaign_spend_total": "Сумма кампании",
+    "legacy_cpm_common_calc": "CPM по общим показам",
+    "legacy_cost_per_card_click_calc": "Цена перехода по общим переходам",
+    "legacy_cost_per_all_carts_calc": "Расход на все корзины",
+    "legacy_cost_per_order_calc": "Расход на все заказы",
+    "legacy_ad_share_of_order_sum_pct": "Доля рекламы от суммы заказов, %",
     "ad_views_total": "Показы РК",
     "ad_clicks_total": "Клики РК",
     "ad_atbs_total": "Корзины РК",
     "ad_orders_total": "Заказы РК",
-    "ad_cpc_calc": "CPC",
-    "ad_cpm_calc": "CPM",
-    "ad_cost_per_cart_calc": "Цена рекламной корзины",
-    "ad_cpo_calc": "CPO",
+    "ad_cpc_calc": "CPC РК",
+    "ad_cpm_calc": "CPM РК",
+    "ad_cost_per_cart_calc": "Цена корзины РК",
+    "ad_cpo_calc": "CPO РК",
     "ad_share_of_revenue_calc": "Доля рекламы, %",
     "direct_ad_atbs": "Прямые корзины РК",
     "associated_ad_atbs": "Ассоциированные корзины РК",
@@ -454,7 +467,7 @@ EXPORT_COLUMN_LABELS = {
     "associated_atbs_percent_calc": "Ассоциированные корзины, %",
     "organic_cart_count": "Органические корзины",
     "organic_cart_share_calc": "Доля органических корзин, %",
-    "ad_cost_per_all_carts_calc": "Расход на все корзины",
+    "ad_cost_per_all_carts_calc": "Тех: расход на все корзины (с assoc.)",
     "organic_cart_share_status": "Статус формулы органики",
     "search_queries_count": "Поисковых запросов",
     "search_avg_position": "Средняя позиция поиска",
@@ -498,8 +511,8 @@ EXPORT_COLUMN_LABELS = {
 
 EXPORT_COLUMN_LABELS.update(
     {
-        "display_impressions": "Показы",
-        "display_ctr_calc": "CTR",
+        "display_impressions": "Показы общие",
+        "display_ctr_calc": "CTR общий",
         "impressions_source_note": "Note: Источник показов",
         "entry_impressions_total": "Показы из Точки входа",
         "entry_card_clicks_total": "Переходы из Точки входа",
@@ -525,7 +538,7 @@ EXPORT_COLUMN_LABELS.update(
     {
         "add_to_cart_conversion_calc": "Конверсия в корзину",
         "cart_to_order_conversion_calc": "Конверсия в заказ",
-        "ad_campaign_spend_total": "Сумма кампания",
+        "ad_campaign_spend_total": "Сумма кампании",
         "technical_ad_campaign_spend_total": "Расход РК по статистике",
         "ad_cost_per_cart_calc": "Цена корзины РК",
         "ad_share_of_revenue_calc": "Доля рекламы от суммы заказов, %",
@@ -2848,82 +2861,6 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         hide_index=True,
     )
 
-    pivot_date_columns = [column for column in history_pivot.columns if column[:4].isdigit()]
-    pivot_display = history_pivot.rename(
-        columns={
-            "nm_id": "Артикул WB",
-            "supplier_article": "Артикул",
-            "product_name": "Товар",
-            "warehouse_name": "Склад",
-        }
-    )
-    st.write("**Pivot по датам**")
-    if should_render_stock_warehouse_history_pivot(pivot_display):
-        st.dataframe(
-            sanitize_dataframe_for_streamlit_display(
-                pivot_display,
-                numeric_columns={"Артикул WB", *pivot_date_columns},
-            ),
-            width="stretch",
-            hide_index=True,
-        )
-    else:
-        pivot_cells = int(pivot_display.shape[0] * pivot_display.shape[1])
-        st.info(
-            "Pivot скрыт, потому что выбранный период слишком большой для браузера. "
-            f"Текущий размер: {pivot_display.shape[0]:,} строк × {pivot_display.shape[1]:,} колонок = {pivot_cells:,} ячеек.".replace(",", " ")
-        )
-
-    anomaly_labels = {
-        STOCK_HISTORY_ANOMALY_ALWAYS_NO_DATA: "ALWAYS_NO_DATA",
-        STOCK_HISTORY_ANOMALY_ALWAYS_ZERO: "ALWAYS_ZERO",
-        STOCK_HISTORY_ANOMALY_ALWAYS_IN_STOCK: "ALWAYS_IN_STOCK",
-        STOCK_HISTORY_ANOMALY_MIXED_ZERO_AND_STOCK: "MIXED_ZERO_AND_STOCK",
-        STOCK_HISTORY_ANOMALY_MIXED_NO_DATA_AND_STOCK: "MIXED_NO_DATA_AND_STOCK",
-        STOCK_HISTORY_ANOMALY_UNSTABLE: "UNSTABLE",
-    }
-    st.write("**Проблемные связки по складам**")
-    if history_ivan_check.empty:
-        st.success("Проблемных связок `nm_id + склад` в выбранном периоде не найдено.")
-    else:
-        ivan_display = history_ivan_check.rename(
-            columns={
-                "nm_id": "Артикул WB",
-                "supplier_article": "Артикул",
-                "product_name": "Товар",
-                "warehouse_name": "Склад",
-                "days_with_stock": "Дней с остатком",
-                "days_zero": "Дней с нулём",
-                "days_no_data": "Дней без данных",
-                "anomaly_type": "Тип аномалии",
-                "comment_for_ivan": "Комментарий",
-            }
-        )
-        ivan_display["Тип аномалии"] = ivan_display["Тип аномалии"].map(
-            lambda value: anomaly_labels.get(str(value), value)
-        )
-        st.dataframe(
-            sanitize_dataframe_for_streamlit_display(
-                ivan_display[
-                    [
-                        "Артикул WB",
-                        "Артикул",
-                        "Товар",
-                        "Склад",
-                        "Дней с остатком",
-                        "Дней с нулём",
-                        "Дней без данных",
-                        "Тип аномалии",
-                        "Комментарий",
-                    ]
-                ],
-                numeric_columns={"Артикул WB", "Дней с остатком", "Дней с нулём", "Дней без данных"},
-            ),
-            width="stretch",
-            hide_index=True,
-        )
-
-
 def save_uploaded_file_to_temp(uploaded_file: Any) -> Path:
     suffix = Path(getattr(uploaded_file, "name", "upload.xlsx")).suffix or ".xlsx"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
@@ -3674,9 +3611,9 @@ def render_overview_tab(
             "brand": st.column_config.TextColumn("Бренд"),
             "subject": st.column_config.TextColumn("Предмет"),
             "wb_buyer_price": st.column_config.NumberColumn("Цена WB", format="%.2f"),
-            "impressions": st.column_config.NumberColumn("Показы", format="%.0f"),
+            "impressions": st.column_config.NumberColumn("Показы общие", format="%.0f"),
             "card_clicks": st.column_config.NumberColumn("Переходы в карточку", format="%.0f"),
-            "ctr_calc": st.column_config.NumberColumn("CTR", format="%.2f"),
+            "ctr_calc": st.column_config.NumberColumn("CTR общий", format="%.2f"),
             "impressions_delta": st.column_config.NumberColumn("Δ Показы", format="%.0f"),
             "cart_count": st.column_config.NumberColumn("Положили в корзину", format="%.0f"),
             "add_to_cart_conversion_calc": st.column_config.NumberColumn("Конверсия в корзину", format="%.2f"),
@@ -3689,9 +3626,13 @@ def render_overview_tab(
             "buyout_sum": st.column_config.NumberColumn("Выкупы, сумма", format="%.2f"),
             "buyout_percent": st.column_config.NumberColumn("Процент выкупа, %", format="%.2f"),
             "cart_to_order_conversion_calc": st.column_config.NumberColumn("Конверсия в заказ", format="%.2f"),
-            "avg_delivery_time": st.column_config.NumberColumn("Среднее время доставки", format="%.2f"),
             "ad_cost_writeoff_total": st.column_config.NumberColumn("Списания рекламы", format="%.2f"),
-            "ad_campaign_spend_total": st.column_config.NumberColumn("Сумма кампания", format="%.2f"),
+            "ad_campaign_spend_total": st.column_config.NumberColumn("Сумма кампании", format="%.2f"),
+            "legacy_cpm_common_calc": st.column_config.NumberColumn("CPM по общим показам", format="%.2f"),
+            "legacy_cost_per_card_click_calc": st.column_config.NumberColumn("Цена перехода по общим переходам", format="%.2f"),
+            "legacy_cost_per_all_carts_calc": st.column_config.NumberColumn("Расход на все корзины", format="%.2f"),
+            "legacy_cost_per_order_calc": st.column_config.NumberColumn("Расход на все заказы", format="%.2f"),
+            "legacy_ad_share_of_order_sum_pct": st.column_config.NumberColumn("Доля рекламы от суммы заказов, %", format="%.2f"),
             "technical_ad_campaign_spend_total": st.column_config.NumberColumn("Расход РК по статистике", format="%.2f"),
             "ad_campaign_spend_delta": st.column_config.NumberColumn("Δ Расход РК", format="%.2f"),
             "ad_views_total": st.column_config.NumberColumn("Показы РК", format="%.0f"),
@@ -3700,10 +3641,10 @@ def render_overview_tab(
             "ad_atbs_delta": st.column_config.NumberColumn("Δ Корзины РК", format="%.0f"),
             "ad_orders_total": st.column_config.NumberColumn("Заказы РК", format="%.0f"),
             "ad_orders_delta": st.column_config.NumberColumn("Δ Заказы РК", format="%.0f"),
-            "ad_cpc_calc": st.column_config.NumberColumn("CPC", format="%.2f"),
-            "ad_cpm_calc": st.column_config.NumberColumn("CPM", format="%.2f"),
+            "ad_cpc_calc": st.column_config.NumberColumn("CPC РК", format="%.2f"),
+            "ad_cpm_calc": st.column_config.NumberColumn("CPM РК", format="%.2f"),
             "ad_cost_per_cart_calc": st.column_config.NumberColumn("Цена корзины РК", format="%.2f"),
-            "ad_cpo_calc": st.column_config.NumberColumn("CPO", format="%.2f"),
+            "ad_cpo_calc": st.column_config.NumberColumn("CPO РК", format="%.2f"),
             "ad_cpo_delta": st.column_config.NumberColumn("Δ CPO", format="%.2f"),
             "ad_share_of_revenue_calc": st.column_config.NumberColumn("Доля рекламы от суммы заказов, %", format="%.2f"),
             "direct_ad_atbs": st.column_config.NumberColumn("Прямые корзины РК", format="%.0f"),
@@ -3713,7 +3654,8 @@ def render_overview_tab(
             "associated_atbs_percent_calc": st.column_config.NumberColumn("Ассоциированные корзины, %", format="%.2f"),
             "organic_cart_count": st.column_config.NumberColumn("Органические корзины", format="%.0f"),
             "organic_cart_share_calc": st.column_config.NumberColumn("Процент органики от рекламных корзин", format="%.2f"),
-            "ad_cost_per_all_carts_calc": st.column_config.NumberColumn("Расход на все корзины", format="%.2f"),
+            "ad_cost_per_all_carts_calc": st.column_config.NumberColumn("Тех: расход на все корзины (с assoc.)", format="%.2f"),
+            "avg_delivery_time": st.column_config.NumberColumn("Среднее время доставки", format="%.2f"),
             "organic_cart_share_status": st.column_config.TextColumn("Статус формулы органики", width="medium"),
             "search_queries_count": st.column_config.NumberColumn("Поисковые запросы", format="%.0f"),
             "search_avg_position": st.column_config.NumberColumn("Средняя позиция поиска", format="%.2f"),
