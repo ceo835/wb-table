@@ -2163,7 +2163,7 @@ def build_stock_warehouse_history_table(
     )
     history_df = history_df.merge(anomaly_df, on=["nm_id", "warehouse_name"], how="left")
     history_df = history_df.sort_values(
-        by=["snapshot_date", "supplier_article", "nm_id", "warehouse_name"],
+        by=["supplier_article", "nm_id", "warehouse_name", "snapshot_date"],
         ascending=[True, True, True, True],
         na_position="last",
     ).reset_index(drop=True)
@@ -2830,7 +2830,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
             "warehouse_name": "Склад",
             "stock_qty": "Остаток",
             "stock_status": "Статус остатка",
-            "loaded_at": "loaded_at",
+            "loaded_at": "Загружено в БД",
         }
     )
     history_display["Статус товара"] = history_display["Статус товара"].map(
@@ -2840,7 +2840,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
     st.dataframe(
         sanitize_dataframe_for_streamlit_display(
             history_display[
-                ["Дата", "Артикул WB", "Артикул", "Товар", "Статус товара", "Склад", "Остаток", "Статус остатка", "loaded_at"]
+                ["Дата", "Артикул WB", "Артикул", "Товар", "Статус товара", "Склад", "Остаток", "Статус остатка", "Загружено в БД"]
             ],
             numeric_columns={"Артикул WB", "Остаток"},
         ),
@@ -2892,14 +2892,14 @@ def render_stock_warehouse_tab(data_source: str) -> None:
                 "supplier_article": "Артикул",
                 "product_name": "Товар",
                 "warehouse_name": "Склад",
-                "days_with_stock": "days_with_stock",
-                "days_zero": "days_zero",
-                "days_no_data": "days_no_data",
-                "anomaly_type": "anomaly_type",
-                "comment_for_ivan": "comment_for_ivan",
+                "days_with_stock": "Дней с остатком",
+                "days_zero": "Дней с нулём",
+                "days_no_data": "Дней без данных",
+                "anomaly_type": "Тип аномалии",
+                "comment_for_ivan": "Комментарий",
             }
         )
-        ivan_display["anomaly_type"] = ivan_display["anomaly_type"].map(
+        ivan_display["Тип аномалии"] = ivan_display["Тип аномалии"].map(
             lambda value: anomaly_labels.get(str(value), value)
         )
         st.dataframe(
@@ -2910,14 +2910,14 @@ def render_stock_warehouse_tab(data_source: str) -> None:
                         "Артикул",
                         "Товар",
                         "Склад",
-                        "days_with_stock",
-                        "days_zero",
-                        "days_no_data",
-                        "anomaly_type",
-                        "comment_for_ivan",
+                        "Дней с остатком",
+                        "Дней с нулём",
+                        "Дней без данных",
+                        "Тип аномалии",
+                        "Комментарий",
                     ]
                 ],
-                numeric_columns={"Артикул WB", "days_with_stock", "days_zero", "days_no_data"},
+                numeric_columns={"Артикул WB", "Дней с остатком", "Дней с нулём", "Дней без данных"},
             ),
             width="stretch",
             hide_index=True,

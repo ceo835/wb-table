@@ -3416,6 +3416,12 @@ def test_build_stock_warehouse_history_table_builds_virtual_grid_and_stock_statu
     )
 
     assert len(history) == 4
+    assert history[["nm_id", "snapshot_date"]].to_dict(orient="records") == [
+        {"nm_id": 101, "snapshot_date": pd.Timestamp("2026-06-18").date()},
+        {"nm_id": 101, "snapshot_date": pd.Timestamp("2026-06-19").date()},
+        {"nm_id": 202, "snapshot_date": pd.Timestamp("2026-06-18").date()},
+        {"nm_id": 202, "snapshot_date": pd.Timestamp("2026-06-19").date()},
+    ]
     row_in_stock = history[
         (history["snapshot_date"] == pd.Timestamp("2026-06-18").date()) & (history["nm_id"] == 101)
     ].iloc[0]
