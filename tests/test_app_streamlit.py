@@ -64,10 +64,16 @@ from app_streamlit import (
     inspect_tracked_metadata_state,
     merge_ivan_manual_ads_into_chart_scope,
     prepare_dataframe_for_streamlit_display,
+    prepare_stock_warehouse_history_snapshot_dataframe,
     prepare_stock_warehouse_table_for_display,
     resolve_data_source,
     resolve_streamlit_display_min_date,
     prepare_dataframe,
+    classify_stock_warehouse_history_anomaly,
+    build_stock_warehouse_history_ivan_check_table,
+    build_stock_warehouse_history_pivot_table,
+    build_stock_warehouse_history_summary_metrics,
+    build_stock_warehouse_history_table,
     build_stock_warehouse_product_table,
     build_stock_warehouse_summary_card_html,
     build_stock_warehouse_display_dataframe,
@@ -3299,3 +3305,260 @@ def test_build_excel_export_bytes_creates_xlsx_from_current_table() -> None:
 
     assert payload[:2] == b"PK"
     assert restored.to_dict(orient="records") == export_df.to_dict(orient="records")
+
+
+def test_prepare_stock_warehouse_history_snapshot_dataframe_keeps_latest_loaded_at_per_day_nm_warehouse() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-18",
+                "nm_id": 101,
+                "chrt_id": 1,
+                "warehouse_id": 10,
+                "warehouse_name": "Коледино",
+                "stock_qty": 5,
+                "loaded_at": "2026-06-18T09:00:00",
+            },
+            {
+                "snapshot_date": "2026-06-18",
+                "nm_id": 101,
+                "chrt_id": 2,
+                "warehouse_id": 10,
+                "warehouse_name": "Коледино",
+                "stock_qty": 7,
+                "loaded_at": "2026-06-18T09:00:00",
+            },
+            {
+                "snapshot_date": "2026-06-18",
+                "nm_id": 101,
+                "chrt_id": 1,
+                "warehouse_id": 10,
+                "warehouse_name": "Коледино",
+                "stock_qty": 3,
+                "loaded_at": "2026-06-18T11:00:00",
+            },
+            {
+                "snapshot_date": "2026-06-18",
+                "nm_id": 101,
+                "chrt_id": 2,
+                "warehouse_id": 10,
+                "warehouse_name": "Коледино",
+                "stock_qty": 2,
+                "loaded_at": "2026-06-18T11:00:00",
+            },
+        ]
+    )
+
+    prepared = prepare_stock_warehouse_history_snapshot_dataframe(raw)
+
+    assert len(prepared) == 1
+    assert prepared.loc[0, "stock_qty"] == 5
+    assert prepared.loc[0, "loaded_at"] == pd.Timestamp("2026-06-18T11:00:00")
+
+
+def test_classify_stock_warehouse_history_anomaly_supports_expected_status_sets() -> None:
+    assert classify_stock_warehouse_history_anomaly(["NO_DATA", "NO_DATA"]) == "ALWAYS_NO_DATA"
+    assert classify_stock_warehouse_history_anomaly(["ZERO_STOCK", "ZERO_STOCK"]) == "ALWAYS_ZERO"
+    assert classify_stock_warehouse_history_anomaly(["IN_STOCK", "IN_STOCK"]) == "ALWAYS_IN_STOCK"
+    assert classify_stock_warehouse_history_anomaly(["ZERO_STOCK", "IN_STOCK"]) == "MIXED_ZERO_AND_STOCK"
+    assert classify_stock_warehouse_history_anomaly(["NO_DATA", "IN_STOCK"]) == "MIXED_NO_DATA_AND_STOCK"
+    assert classify_stock_warehouse_history_anomaly(["NO_DATA", "ZERO_STOCK", "IN_STOCK"]) == "UNSTABLE"
+
+
+def test_build_stock_warehouse_history_table_builds_virtual_grid_and_stock_statuses_in_memory() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-18",
+                "nm_id": 101,
+                "warehouse_id": 10,
+                "warehouse_name": "Коледино",
+                "stock_qty": 4,
+                "loaded_at": "2026-06-18T09:00:00",
+            },
+            {
+                "snapshot_date": "2026-06-19",
+                "nm_id": 101,
+                "warehouse_id": 10,
+                "warehouse_name": "Коледино",
+                "stock_qty": 0,
+                "loaded_at": "2026-06-19T09:00:00",
+            },
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 101,
+                "supplier_article": "sku-101",
+                "item_label": "Товар 101",
+                "tracked_label": "Товар 101",
+                "is_tracked": True,
+                "lifecycle_status": "active",
+            },
+            {
+                "nm_id": 202,
+                "supplier_article": "sku-202",
+                "item_label": "Товар 202",
+                "tracked_label": "Товар 202",
+                "is_tracked": True,
+                "lifecycle_status": "active",
+            },
+        ]
+    )
+
+    history = build_stock_warehouse_history_table(
+        snapshot_df,
+        tracked_df,
+        selected_dates=[pd.Timestamp("2026-06-18").date(), pd.Timestamp("2026-06-19").date()],
+        monitored_warehouses=["Коледино"],
+    )
+
+    assert len(history) == 4
+    row_in_stock = history[
+        (history["snapshot_date"] == pd.Timestamp("2026-06-18").date()) & (history["nm_id"] == 101)
+    ].iloc[0]
+    row_zero = history[
+        (history["snapshot_date"] == pd.Timestamp("2026-06-19").date()) & (history["nm_id"] == 101)
+    ].iloc[0]
+    row_no_data = history[
+        (history["snapshot_date"] == pd.Timestamp("2026-06-18").date()) & (history["nm_id"] == 202)
+    ].iloc[0]
+
+    assert row_in_stock["stock_status"] == "IN_STOCK"
+    assert row_in_stock["stock_qty"] == 4
+    assert row_zero["stock_status"] == "ZERO_STOCK"
+    assert row_zero["stock_qty"] == 0
+    assert row_no_data["stock_status"] == "NO_DATA"
+    assert pd.isna(row_no_data["stock_qty"])
+
+
+def test_build_stock_warehouse_history_summary_metrics_counts_row_statuses() -> None:
+    history = pd.DataFrame(
+        [
+            {
+                "snapshot_date": pd.Timestamp("2026-06-18").date(),
+                "nm_id": 101,
+                "warehouse_name": "Коледино",
+                "stock_status": "IN_STOCK",
+                "anomaly_type": "MIXED_ZERO_AND_STOCK",
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-19").date(),
+                "nm_id": 101,
+                "warehouse_name": "Коледино",
+                "stock_status": "ZERO_STOCK",
+                "anomaly_type": "MIXED_ZERO_AND_STOCK",
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-18").date(),
+                "nm_id": 202,
+                "warehouse_name": "Коледино",
+                "stock_status": "NO_DATA",
+                "anomaly_type": "ALWAYS_NO_DATA",
+            },
+        ]
+    )
+
+    metrics = build_stock_warehouse_history_summary_metrics(history)
+
+    assert metrics == {
+        "dates_count": 2,
+        "products_count": 2,
+        "warehouses_count": 1,
+        "in_stock_rows": 1,
+        "zero_rows": 1,
+        "no_data_rows": 1,
+        "anomalies_count": 2,
+    }
+
+
+def test_build_stock_warehouse_history_pivot_table_keeps_zero_and_missing_distinct() -> None:
+    history = pd.DataFrame(
+        [
+            {
+                "snapshot_date": pd.Timestamp("2026-06-18").date(),
+                "nm_id": 101,
+                "supplier_article": "sku-101",
+                "product_name": "Товар 101",
+                "warehouse_name": "Коледино",
+                "stock_qty": 4,
+                "stock_status": "IN_STOCK",
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-19").date(),
+                "nm_id": 101,
+                "supplier_article": "sku-101",
+                "product_name": "Товар 101",
+                "warehouse_name": "Коледино",
+                "stock_qty": 0,
+                "stock_status": "ZERO_STOCK",
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-18").date(),
+                "nm_id": 202,
+                "supplier_article": "sku-202",
+                "product_name": "Товар 202",
+                "warehouse_name": "Коледино",
+                "stock_qty": pd.NA,
+                "stock_status": "NO_DATA",
+            },
+        ]
+    )
+
+    pivot = build_stock_warehouse_history_pivot_table(history)
+
+    assert pivot.loc[0, "2026-06-18"] == 4
+    assert pivot.loc[0, "2026-06-19"] == 0
+    assert pd.isna(pivot.loc[1, "2026-06-18"])
+
+
+def test_build_stock_warehouse_history_ivan_check_table_contains_only_problem_pairs() -> None:
+    history = pd.DataFrame(
+        [
+            {
+                "snapshot_date": pd.Timestamp("2026-06-18").date(),
+                "nm_id": 101,
+                "supplier_article": "sku-101",
+                "product_name": "Товар 101",
+                "warehouse_name": "Коледино",
+                "stock_status": "NO_DATA",
+                "anomaly_type": "ALWAYS_NO_DATA",
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-19").date(),
+                "nm_id": 101,
+                "supplier_article": "sku-101",
+                "product_name": "Товар 101",
+                "warehouse_name": "Коледино",
+                "stock_status": "NO_DATA",
+                "anomaly_type": "ALWAYS_NO_DATA",
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-18").date(),
+                "nm_id": 202,
+                "supplier_article": "sku-202",
+                "product_name": "Товар 202",
+                "warehouse_name": "Коледино",
+                "stock_status": "IN_STOCK",
+                "anomaly_type": "ALWAYS_IN_STOCK",
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-19").date(),
+                "nm_id": 202,
+                "supplier_article": "sku-202",
+                "product_name": "Товар 202",
+                "warehouse_name": "Коледино",
+                "stock_status": "IN_STOCK",
+                "anomaly_type": "ALWAYS_IN_STOCK",
+            },
+        ]
+    )
+
+    ivan_check = build_stock_warehouse_history_ivan_check_table(history)
+
+    assert ivan_check["nm_id"].tolist() == [101]
+    assert ivan_check.loc[0, "days_with_stock"] == 0
+    assert ivan_check.loc[0, "days_zero"] == 0
+    assert ivan_check.loc[0, "days_no_data"] == 2
+    assert ivan_check.loc[0, "anomaly_type"] == "ALWAYS_NO_DATA"

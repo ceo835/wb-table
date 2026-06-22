@@ -73,6 +73,15 @@ PROBLEM_STATUS_ZERO_MAIN = "ZERO_ON_MAIN_WAREHOUSES"
 PROBLEM_STATUS_PARTIAL_STOCK = "PARTIAL_STOCK"
 PROBLEM_STATUS_NO_DATA_MAIN = "NO_DATA_ON_MAIN_WAREHOUSES"
 STOCK_WAREHOUSE_NO_DATA_DISPLAY = "—"
+STOCK_HISTORY_STATUS_IN_STOCK = "IN_STOCK"
+STOCK_HISTORY_STATUS_ZERO = "ZERO_STOCK"
+STOCK_HISTORY_STATUS_NO_DATA = "NO_DATA"
+STOCK_HISTORY_ANOMALY_ALWAYS_NO_DATA = "ALWAYS_NO_DATA"
+STOCK_HISTORY_ANOMALY_ALWAYS_ZERO = "ALWAYS_ZERO"
+STOCK_HISTORY_ANOMALY_ALWAYS_IN_STOCK = "ALWAYS_IN_STOCK"
+STOCK_HISTORY_ANOMALY_MIXED_ZERO_AND_STOCK = "MIXED_ZERO_AND_STOCK"
+STOCK_HISTORY_ANOMALY_MIXED_NO_DATA_AND_STOCK = "MIXED_NO_DATA_AND_STOCK"
+STOCK_HISTORY_ANOMALY_UNSTABLE = "UNSTABLE"
 WB_SITE_PRICE_ALERT_OK = "OK"
 WB_SITE_PRICE_ALERT_CHANGED = "PRICE_CHANGED_50"
 WB_SITE_PRICE_ALERT_NO_DATA = "NO_PRICE_DATA"
@@ -1950,6 +1959,307 @@ def prepare_stock_warehouse_snapshot_dataframe(df: pd.DataFrame) -> pd.DataFrame
     return aggregated
 
 
+def _first_non_empty_value(series: pd.Series) -> object:
+    for value in series:
+        if pd.notna(value) and str(value).strip() != "":
+            return value
+    return pd.NA
+
+
+def prepare_stock_warehouse_history_snapshot_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    expected_columns = [
+        "snapshot_date",
+        "nm_id",
+        "warehouse_id",
+        "warehouse_name",
+        "region_name",
+        "stock_qty",
+        "in_way_to_client",
+        "in_way_from_client",
+        "source",
+        "loaded_at",
+    ]
+    prepared = df.copy()
+    for column in expected_columns:
+        if column not in prepared.columns:
+            prepared[column] = pd.NA
+
+    if prepared.empty:
+        return prepared[expected_columns].copy()
+
+    prepared["snapshot_date"] = pd.to_datetime(prepared["snapshot_date"], errors="coerce").dt.date
+    prepared["loaded_at"] = pd.to_datetime(prepared["loaded_at"], errors="coerce")
+    prepared["nm_id"] = pd.to_numeric(prepared["nm_id"], errors="coerce")
+    prepared["warehouse_id"] = pd.to_numeric(prepared["warehouse_id"], errors="coerce")
+    for column in ("stock_qty", "in_way_to_client", "in_way_from_client"):
+        prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+    prepared["warehouse_name"] = prepared["warehouse_name"].fillna("").astype(str).str.strip()
+    prepared = prepared.dropna(subset=["snapshot_date", "nm_id", "warehouse_id"]).copy()
+    if prepared.empty:
+        return pd.DataFrame(columns=expected_columns)
+
+    prepared["nm_id"] = prepared["nm_id"].astype(int)
+    prepared["warehouse_id"] = prepared["warehouse_id"].astype(int)
+
+    aggregated = (
+        prepared.groupby(
+            ["snapshot_date", "nm_id", "warehouse_id", "loaded_at"],
+            dropna=False,
+            as_index=False,
+        )
+        .agg(
+            warehouse_name=("warehouse_name", _first_non_empty_value),
+            region_name=("region_name", _first_non_empty_value),
+            source=("source", _first_non_empty_value),
+            stock_qty=("stock_qty", lambda values: values.sum(min_count=1)),
+            in_way_to_client=("in_way_to_client", lambda values: values.sum(min_count=1)),
+            in_way_from_client=("in_way_from_client", lambda values: values.sum(min_count=1)),
+        )
+        .sort_values(
+            by=["snapshot_date", "nm_id", "warehouse_id", "loaded_at"],
+            ascending=[True, True, True, True],
+            na_position="first",
+        )
+        .drop_duplicates(subset=["snapshot_date", "nm_id", "warehouse_id"], keep="last")
+        .reset_index(drop=True)
+    )
+
+    return aggregated.reindex(columns=expected_columns)
+
+
+def _prepare_stock_warehouse_history_product_scope(tracked_df: pd.DataFrame) -> pd.DataFrame:
+    prepared = tracked_df.copy()
+    for column in ("nm_id", "supplier_article", "title", "item_label", "tracked_label", "is_tracked", "lifecycle_status"):
+        if column not in prepared.columns:
+            prepared[column] = pd.NA
+
+    if prepared.empty:
+        return pd.DataFrame(columns=["nm_id", "supplier_article", "product_name", "lifecycle_status"])
+
+    prepared["nm_id"] = pd.to_numeric(prepared["nm_id"], errors="coerce")
+    prepared = prepared.dropna(subset=["nm_id"]).copy()
+    if prepared.empty:
+        return pd.DataFrame(columns=["nm_id", "supplier_article", "product_name", "lifecycle_status"])
+
+    prepared["nm_id"] = prepared["nm_id"].astype(int)
+    prepared["is_tracked"] = prepared["is_tracked"].fillna(False).astype(bool)
+    prepared["lifecycle_status"] = prepared["lifecycle_status"].fillna("not_tracked").astype(str).str.strip().str.lower()
+    prepared = prepared[prepared["is_tracked"]].copy()
+    if prepared.empty:
+        return pd.DataFrame(columns=["nm_id", "supplier_article", "product_name", "lifecycle_status"])
+
+    prepared["supplier_article"] = (
+        prepared["supplier_article"]
+        .where(prepared["supplier_article"].notna(), prepared["tracked_label"])
+        .where(lambda series: series.notna(), prepared["item_label"])
+    )
+    prepared["product_name"] = (
+        prepared["title"]
+        .where(prepared["title"].notna(), prepared["item_label"])
+        .where(lambda series: series.notna(), prepared["tracked_label"])
+        .where(lambda series: series.notna(), prepared["supplier_article"])
+    )
+
+    return (
+        prepared[["nm_id", "supplier_article", "product_name", "lifecycle_status"]]
+        .drop_duplicates(subset=["nm_id"], keep="first")
+        .sort_values(["supplier_article", "nm_id"], na_position="last")
+        .reset_index(drop=True)
+    )
+
+
+def _classify_stock_warehouse_history_status(quantity: object) -> str:
+    if pd.isna(quantity):
+        return STOCK_HISTORY_STATUS_NO_DATA
+    try:
+        return STOCK_HISTORY_STATUS_ZERO if float(quantity) == 0 else STOCK_HISTORY_STATUS_IN_STOCK
+    except (TypeError, ValueError):
+        return STOCK_HISTORY_STATUS_NO_DATA
+
+
+def classify_stock_warehouse_history_anomaly(statuses: list[str] | tuple[str, ...] | pd.Series) -> str:
+    normalized = {str(value) for value in statuses if pd.notna(value)}
+    if not normalized or normalized == {STOCK_HISTORY_STATUS_NO_DATA}:
+        return STOCK_HISTORY_ANOMALY_ALWAYS_NO_DATA
+    if normalized == {STOCK_HISTORY_STATUS_ZERO}:
+        return STOCK_HISTORY_ANOMALY_ALWAYS_ZERO
+    if normalized == {STOCK_HISTORY_STATUS_IN_STOCK}:
+        return STOCK_HISTORY_ANOMALY_ALWAYS_IN_STOCK
+    if normalized == {STOCK_HISTORY_STATUS_ZERO, STOCK_HISTORY_STATUS_IN_STOCK}:
+        return STOCK_HISTORY_ANOMALY_MIXED_ZERO_AND_STOCK
+    if normalized == {STOCK_HISTORY_STATUS_NO_DATA, STOCK_HISTORY_STATUS_IN_STOCK}:
+        return STOCK_HISTORY_ANOMALY_MIXED_NO_DATA_AND_STOCK
+    return STOCK_HISTORY_ANOMALY_UNSTABLE
+
+
+def build_stock_warehouse_history_table(
+    snapshot_df: pd.DataFrame,
+    tracked_df: pd.DataFrame,
+    *,
+    selected_dates: list[date],
+    monitored_warehouses: list[str],
+) -> pd.DataFrame:
+    history_columns = [
+        "snapshot_date",
+        "nm_id",
+        "supplier_article",
+        "product_name",
+        "lifecycle_status",
+        "warehouse_id",
+        "warehouse_name",
+        "stock_qty",
+        "stock_status",
+        "loaded_at",
+        "anomaly_type",
+    ]
+    if not selected_dates or not monitored_warehouses:
+        return pd.DataFrame(columns=history_columns)
+
+    products = _prepare_stock_warehouse_history_product_scope(tracked_df)
+    if products.empty:
+        return pd.DataFrame(columns=history_columns)
+
+    snapshot_prepared = prepare_stock_warehouse_history_snapshot_dataframe(snapshot_df)
+    snapshot_prepared = snapshot_prepared[
+        snapshot_prepared["snapshot_date"].isin(selected_dates)
+        & snapshot_prepared["warehouse_name"].isin(monitored_warehouses)
+    ].copy()
+
+    lookup = {
+        (row["snapshot_date"], int(row["nm_id"]), str(row["warehouse_name"])): row
+        for _, row in snapshot_prepared.iterrows()
+    }
+
+    rows: list[dict[str, object]] = []
+    for _, product in products.iterrows():
+        nm_id = int(product["nm_id"])
+        for warehouse_name in monitored_warehouses:
+            for snapshot_day in selected_dates:
+                source_row = lookup.get((snapshot_day, nm_id, str(warehouse_name)))
+                stock_qty = source_row["stock_qty"] if source_row is not None else pd.NA
+                rows.append(
+                    {
+                        "snapshot_date": snapshot_day,
+                        "nm_id": nm_id,
+                        "supplier_article": product.get("supplier_article"),
+                        "product_name": product.get("product_name"),
+                        "lifecycle_status": product.get("lifecycle_status") or "not_tracked",
+                        "warehouse_id": source_row["warehouse_id"] if source_row is not None else pd.NA,
+                        "warehouse_name": warehouse_name,
+                        "stock_qty": _normalize_stock_display_value(stock_qty),
+                        "stock_status": _classify_stock_warehouse_history_status(stock_qty),
+                        "loaded_at": source_row["loaded_at"] if source_row is not None else pd.NaT,
+                    }
+                )
+
+    history_df = pd.DataFrame(rows)
+    if history_df.empty:
+        return pd.DataFrame(columns=history_columns)
+
+    anomaly_df = (
+        history_df.groupby(["nm_id", "warehouse_name"], as_index=False)
+        .agg(anomaly_type=("stock_status", lambda values: classify_stock_warehouse_history_anomaly(values.tolist())))
+    )
+    history_df = history_df.merge(anomaly_df, on=["nm_id", "warehouse_name"], how="left")
+    history_df = history_df.sort_values(
+        by=["snapshot_date", "supplier_article", "nm_id", "warehouse_name"],
+        ascending=[True, True, True, True],
+        na_position="last",
+    ).reset_index(drop=True)
+    return history_df.reindex(columns=history_columns)
+
+
+def build_stock_warehouse_history_summary_metrics(history_df: pd.DataFrame) -> dict[str, int]:
+    if history_df.empty:
+        return {
+            "dates_count": 0,
+            "products_count": 0,
+            "warehouses_count": 0,
+            "in_stock_rows": 0,
+            "zero_rows": 0,
+            "no_data_rows": 0,
+            "anomalies_count": 0,
+        }
+
+    anomaly_pairs = history_df.loc[
+        history_df["anomaly_type"].ne(STOCK_HISTORY_ANOMALY_ALWAYS_IN_STOCK),
+        ["nm_id", "warehouse_name"],
+    ].drop_duplicates()
+    return {
+        "dates_count": int(history_df["snapshot_date"].nunique()),
+        "products_count": int(history_df["nm_id"].nunique()),
+        "warehouses_count": int(history_df["warehouse_name"].nunique()),
+        "in_stock_rows": int(history_df["stock_status"].eq(STOCK_HISTORY_STATUS_IN_STOCK).sum()),
+        "zero_rows": int(history_df["stock_status"].eq(STOCK_HISTORY_STATUS_ZERO).sum()),
+        "no_data_rows": int(history_df["stock_status"].eq(STOCK_HISTORY_STATUS_NO_DATA).sum()),
+        "anomalies_count": int(len(anomaly_pairs)),
+    }
+
+
+def build_stock_warehouse_history_pivot_table(history_df: pd.DataFrame) -> pd.DataFrame:
+    if history_df.empty:
+        return pd.DataFrame(columns=["nm_id", "supplier_article", "product_name", "warehouse_name"])
+
+    pivot_df = history_df.copy()
+    pivot_df["snapshot_date_label"] = pivot_df["snapshot_date"].map(lambda value: value.isoformat() if pd.notna(value) else "")
+    result = (
+        pivot_df.pivot_table(
+            index=["nm_id", "supplier_article", "product_name", "warehouse_name"],
+            columns="snapshot_date_label",
+            values="stock_qty",
+            aggfunc="first",
+            dropna=False,
+        )
+        .reset_index()
+        .sort_values(["supplier_article", "nm_id", "warehouse_name"], na_position="last")
+        .reset_index(drop=True)
+    )
+    result.columns.name = None
+    return result
+
+
+def build_stock_warehouse_history_ivan_check_table(history_df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "nm_id",
+        "supplier_article",
+        "product_name",
+        "warehouse_name",
+        "days_with_stock",
+        "days_zero",
+        "days_no_data",
+        "anomaly_type",
+        "comment_for_ivan",
+    ]
+    if history_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    summary = (
+        history_df.groupby(
+            ["nm_id", "supplier_article", "product_name", "warehouse_name", "anomaly_type"],
+            dropna=False,
+            as_index=False,
+        )
+        .agg(
+            days_with_stock=("stock_status", lambda values: int((pd.Series(values) == STOCK_HISTORY_STATUS_IN_STOCK).sum())),
+            days_zero=("stock_status", lambda values: int((pd.Series(values) == STOCK_HISTORY_STATUS_ZERO).sum())),
+            days_no_data=("stock_status", lambda values: int((pd.Series(values) == STOCK_HISTORY_STATUS_NO_DATA).sum())),
+        )
+    )
+    summary = summary[summary["anomaly_type"].ne(STOCK_HISTORY_ANOMALY_ALWAYS_IN_STOCK)].copy()
+    comment_map = {
+        STOCK_HISTORY_ANOMALY_ALWAYS_NO_DATA: "Нет строк по складу во всём выбранном периоде.",
+        STOCK_HISTORY_ANOMALY_ALWAYS_ZERO: "Остаток всё время нулевой.",
+        STOCK_HISTORY_ANOMALY_MIXED_ZERO_AND_STOCK: "Остаток переключается между нулём и наличием.",
+        STOCK_HISTORY_ANOMALY_MIXED_NO_DATA_AND_STOCK: "Есть дни без данных и дни с остатком.",
+        STOCK_HISTORY_ANOMALY_UNSTABLE: "Смешаны ноль, наличие и/или отсутствие данных.",
+    }
+    summary["comment_for_ivan"] = summary["anomaly_type"].map(lambda value: comment_map.get(str(value), "Проверьте историю склада."))
+    return summary.reindex(columns=columns).sort_values(
+        ["anomaly_type", "supplier_article", "nm_id", "warehouse_name"],
+        na_position="last",
+    ).reset_index(drop=True)
+
+
 def _normalize_stock_display_value(value: object) -> int | float | object:
     if pd.isna(value):
         return pd.NA
@@ -2443,6 +2753,157 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         width="stretch",
         hide_index=True,
     )
+
+    st.divider()
+    st.write("**История остатков по складам**")
+    history_default_start = available_dates[max(0, len(available_dates) - 7)]
+    history_period = st.date_input(
+        "Период истории складов",
+        value=(history_default_start, available_dates[-1]),
+        min_value=available_dates[0],
+        max_value=available_dates[-1],
+    )
+    if isinstance(history_period, tuple) and len(history_period) == 2:
+        raw_history_start, raw_history_end = history_period
+    else:
+        raw_history_start = raw_history_end = selected_snapshot_date
+    history_start = min(raw_history_start, raw_history_end)
+    history_end = max(raw_history_start, raw_history_end)
+    selected_history_dates = [value for value in available_dates if history_start <= value <= history_end]
+
+    if not selected_history_dates:
+        st.info("В выбранном периоде нет доступных дат snapshot.")
+        return
+
+    history_table = build_stock_warehouse_history_table(
+        snapshot_df,
+        tracked_df,
+        selected_dates=selected_history_dates,
+        monitored_warehouses=selected_warehouses,
+    )
+    history_summary = build_stock_warehouse_history_summary_metrics(history_table)
+    history_pivot = build_stock_warehouse_history_pivot_table(history_table)
+    history_ivan_check = build_stock_warehouse_history_ivan_check_table(history_table)
+
+    history_summary_items = [
+        ("Дат в периоде", f"{history_summary['dates_count']:,}".replace(",", " ")),
+        ("Товаров", f"{history_summary['products_count']:,}".replace(",", " ")),
+        ("Складов", f"{history_summary['warehouses_count']:,}".replace(",", " ")),
+        ("Строк с остатком", f"{history_summary['in_stock_rows']:,}".replace(",", " ")),
+        ("Нулевых строк", f"{history_summary['zero_rows']:,}".replace(",", " ")),
+        ("Строк без данных", f"{history_summary['no_data_rows']:,}".replace(",", " ")),
+        ("Аномалий", f"{history_summary['anomalies_count']:,}".replace(",", " ")),
+    ]
+    history_summary_cols = st.columns(len(history_summary_items))
+    for column, (label, value) in zip(history_summary_cols, history_summary_items):
+        column.markdown(build_stock_warehouse_summary_card_html(label, value, compact=True), unsafe_allow_html=True)
+
+    stock_status_labels = {
+        STOCK_HISTORY_STATUS_IN_STOCK: "Есть остаток",
+        STOCK_HISTORY_STATUS_ZERO: "0",
+        STOCK_HISTORY_STATUS_NO_DATA: "Нет данных",
+    }
+    history_display = history_table.copy()
+    history_display["loaded_at"] = pd.to_datetime(history_display["loaded_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    history_display["loaded_at"] = history_display["loaded_at"].fillna(STOCK_WAREHOUSE_NO_DATA_DISPLAY)
+    history_display["stock_status"] = history_display["stock_status"].map(
+        lambda value: stock_status_labels.get(str(value), value)
+    )
+    history_display = history_display.rename(
+        columns={
+            "snapshot_date": "Дата",
+            "nm_id": "Артикул WB",
+            "supplier_article": "Артикул",
+            "product_name": "Товар",
+            "lifecycle_status": "Статус товара",
+            "warehouse_name": "Склад",
+            "stock_qty": "Остаток",
+            "stock_status": "Статус остатка",
+            "loaded_at": "loaded_at",
+        }
+    )
+    history_display["Статус товара"] = history_display["Статус товара"].map(
+        lambda value: {"active": "Основной", "sellout": "Распродажа"}.get(str(value), value)
+    )
+    st.caption("`NO_DATA` показывается отдельно и не считается нулевым остатком.")
+    st.dataframe(
+        sanitize_dataframe_for_streamlit_display(
+            history_display[
+                ["Дата", "Артикул WB", "Артикул", "Товар", "Статус товара", "Склад", "Остаток", "Статус остатка", "loaded_at"]
+            ],
+            numeric_columns={"Артикул WB", "Остаток"},
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    pivot_date_columns = [column for column in history_pivot.columns if column[:4].isdigit()]
+    pivot_display = history_pivot.rename(
+        columns={
+            "nm_id": "Артикул WB",
+            "supplier_article": "Артикул",
+            "product_name": "Товар",
+            "warehouse_name": "Склад",
+        }
+    )
+    st.write("**Pivot по датам**")
+    st.dataframe(
+        sanitize_dataframe_for_streamlit_display(
+            pivot_display,
+            numeric_columns={"Артикул WB", *pivot_date_columns},
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    anomaly_labels = {
+        STOCK_HISTORY_ANOMALY_ALWAYS_NO_DATA: "ALWAYS_NO_DATA",
+        STOCK_HISTORY_ANOMALY_ALWAYS_ZERO: "ALWAYS_ZERO",
+        STOCK_HISTORY_ANOMALY_ALWAYS_IN_STOCK: "ALWAYS_IN_STOCK",
+        STOCK_HISTORY_ANOMALY_MIXED_ZERO_AND_STOCK: "MIXED_ZERO_AND_STOCK",
+        STOCK_HISTORY_ANOMALY_MIXED_NO_DATA_AND_STOCK: "MIXED_NO_DATA_AND_STOCK",
+        STOCK_HISTORY_ANOMALY_UNSTABLE: "UNSTABLE",
+    }
+    st.write("**Для проверки Иваном**")
+    if history_ivan_check.empty:
+        st.success("Проблемных связок `nm_id + склад` в выбранном периоде не найдено.")
+    else:
+        ivan_display = history_ivan_check.rename(
+            columns={
+                "nm_id": "Артикул WB",
+                "supplier_article": "Артикул",
+                "product_name": "Товар",
+                "warehouse_name": "Склад",
+                "days_with_stock": "days_with_stock",
+                "days_zero": "days_zero",
+                "days_no_data": "days_no_data",
+                "anomaly_type": "anomaly_type",
+                "comment_for_ivan": "comment_for_ivan",
+            }
+        )
+        ivan_display["anomaly_type"] = ivan_display["anomaly_type"].map(
+            lambda value: anomaly_labels.get(str(value), value)
+        )
+        st.dataframe(
+            sanitize_dataframe_for_streamlit_display(
+                ivan_display[
+                    [
+                        "Артикул WB",
+                        "Артикул",
+                        "Товар",
+                        "Склад",
+                        "days_with_stock",
+                        "days_zero",
+                        "days_no_data",
+                        "anomaly_type",
+                        "comment_for_ivan",
+                    ]
+                ],
+                numeric_columns={"Артикул WB", "days_with_stock", "days_zero", "days_no_data"},
+            ),
+            width="stretch",
+            hide_index=True,
+        )
 
 
 def save_uploaded_file_to_temp(uploaded_file: Any) -> Path:
