@@ -75,6 +75,7 @@ from app_streamlit import (
     build_stock_warehouse_history_summary_metrics,
     build_stock_warehouse_history_table,
     build_stock_warehouse_product_table,
+    should_render_stock_warehouse_history_pivot,
     build_stock_warehouse_summary_card_html,
     build_stock_warehouse_display_dataframe,
     build_stock_warehouse_summary_metrics,
@@ -3511,6 +3512,13 @@ def test_build_stock_warehouse_history_pivot_table_keeps_zero_and_missing_distin
     assert pivot.loc[0, "2026-06-18"] == 4
     assert pivot.loc[0, "2026-06-19"] == 0
     assert pd.isna(pivot.loc[1, "2026-06-18"])
+
+
+def test_should_render_stock_warehouse_history_pivot_blocks_oversized_tables() -> None:
+    pivot = pd.DataFrame({"nm_id": range(400), **{f"2026-06-{day:02d}": [1] * 400 for day in range(1, 31)}})
+
+    assert should_render_stock_warehouse_history_pivot(pivot, max_cells=10_000) is False
+    assert should_render_stock_warehouse_history_pivot(pivot, max_cells=20_000) is True
 
 
 def test_build_stock_warehouse_history_ivan_check_table_contains_only_problem_pairs() -> None:

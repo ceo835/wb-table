@@ -101,6 +101,7 @@ CHART_THRESHOLD_CART_COST = 35.0
 CHART_THRESHOLD_CPO = 150.0
 CHART_AD_PARTIAL_SPEND_COVERAGE_THRESHOLD = 0.9
 STYLER_MAX_CELLS = 250_000
+STOCK_WAREHOUSE_HISTORY_PIVOT_MAX_CELLS = 120_000
 CHART_LEVEL_CABINET = "Кабинет"
 CHART_LEVEL_CATEGORY = "Категория"
 CHART_LEVEL_BAND = "Банда"
@@ -2218,6 +2219,16 @@ def build_stock_warehouse_history_pivot_table(history_df: pd.DataFrame) -> pd.Da
     return result
 
 
+def should_render_stock_warehouse_history_pivot(
+    pivot_df: pd.DataFrame,
+    *,
+    max_cells: int = STOCK_WAREHOUSE_HISTORY_PIVOT_MAX_CELLS,
+) -> bool:
+    if pivot_df.empty:
+        return True
+    return int(pivot_df.shape[0] * pivot_df.shape[1]) <= max_cells
+
+
 def build_stock_warehouse_history_ivan_check_table(history_df: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "nm_id",
@@ -2847,14 +2858,21 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         }
     )
     st.write("**Pivot по датам**")
-    st.dataframe(
-        sanitize_dataframe_for_streamlit_display(
-            pivot_display,
-            numeric_columns={"Артикул WB", *pivot_date_columns},
-        ),
-        width="stretch",
-        hide_index=True,
-    )
+    if should_render_stock_warehouse_history_pivot(pivot_display):
+        st.dataframe(
+            sanitize_dataframe_for_streamlit_display(
+                pivot_display,
+                numeric_columns={"Артикул WB", *pivot_date_columns},
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        pivot_cells = int(pivot_display.shape[0] * pivot_display.shape[1])
+        st.info(
+            "Pivot скрыт, потому что выбранный период слишком большой для браузера. "
+            f"Текущий размер: {pivot_display.shape[0]:,} строк × {pivot_display.shape[1]:,} колонок = {pivot_cells:,} ячеек.".replace(",", " ")
+        )
 
     anomaly_labels = {
         STOCK_HISTORY_ANOMALY_ALWAYS_NO_DATA: "ALWAYS_NO_DATA",
@@ -2864,7 +2882,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         STOCK_HISTORY_ANOMALY_MIXED_NO_DATA_AND_STOCK: "MIXED_NO_DATA_AND_STOCK",
         STOCK_HISTORY_ANOMALY_UNSTABLE: "UNSTABLE",
     }
-    st.write("**Для проверки Иваном**")
+    st.write("**Проблемные связки по складам**")
     if history_ivan_check.empty:
         st.success("Проблемных связок `nm_id + склад` в выбранном периоде не найдено.")
     else:
