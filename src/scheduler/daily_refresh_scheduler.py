@@ -59,7 +59,8 @@ def should_run_startup_catchup(*, now: datetime, has_success_today: bool) -> boo
 
 
 def _default_runner(run_date: date) -> dict[str, Any]:
-    return run_daily_dashboard_refresh(run_date=run_date, include_core_refresh=False)
+    log_scheduler(f"Launching daily refresh for target_date={run_date.isoformat()} include_core_refresh=True")
+    return run_daily_dashboard_refresh(run_date=run_date, include_core_refresh=True)
 
 
 def execute_daily_refresh_once(

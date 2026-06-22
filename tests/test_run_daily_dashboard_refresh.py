@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -499,6 +500,68 @@ def test_run_daily_dashboard_refresh_default_uses_yesterday_for_core_mart_and_ex
     assert summary["streamlit_dataset_summary"]["date_to"] == "2026-06-20"
 
 
+def test_run_daily_dashboard_refresh_limits_core_refresh_to_target_date(monkeypatch, tmp_path: Path) -> None:
+    run_date = date(2026, 6, 21)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", False, raising=False)
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
+        lambda **kwargs: {
+            "snapshot_date": kwargs["snapshot_date"].isoformat(),
+            "api_status": "200",
+            "rows_in_db_for_snapshot": 100,
+            "unique_nm_ids": 10,
+            "unique_chrt_ids": 10,
+            "unique_warehouses": 2,
+            "request_attempts": [{"status": "200"}],
+        },
+    )
+
+    def fake_run_missing_core_dates_load(**kwargs):
+        captured["core_refresh"] = kwargs
+        return {"failed_chunks": []}
+
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.run_missing_core_dates_load",
+        fake_run_missing_core_dates_load,
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.build_mart_total_report",
+        lambda date_from, date_to, version="v2": {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "rows_built": 10,
+            "rows_in_db": 10,
+            "version": version,
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.export_streamlit_v1_dataset",
+        lambda date_from, date_to: {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "total_rows": 10,
+            "output_path": "data/processed/streamlit_v1_dataset.csv",
+        },
+    )
+
+    run_daily_dashboard_refresh(
+        run_date=run_date,
+        date_from=DEFAULT_DASHBOARD_START_DATE,
+        output_dir=tmp_path,
+        include_core_refresh=True,
+    )
+
+    assert captured["core_refresh"] == {
+        "date_from": run_date,
+        "date_to": run_date,
+        "full_range_from": run_date,
+        "full_range_to": run_date,
+        "fullstats_sleep_seconds": 20,
+        "use_tracked_products": True,
+    }
+
+
 def test_execute_daily_refresh_once_uses_yesterday_as_default_run_date(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.scheduler.daily_refresh_scheduler.utc_now",
@@ -576,3 +639,40 @@ def test_scheduler_scheduled_run_uses_yesterday_target_date(monkeypatch) -> None
     _scheduler_loop(StopAfterScheduledRun(), runner=None)
 
     assert scheduled_calls == [date(2026, 6, 20)]
+
+
+def test_default_runner_enables_core_refresh(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_daily_dashboard_refresh(*, run_date, include_core_refresh):
+        captured["run_date"] = run_date
+        captured["include_core_refresh"] = include_core_refresh
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "src.scheduler.daily_refresh_scheduler.run_daily_dashboard_refresh",
+        fake_run_daily_dashboard_refresh,
+    )
+
+    scheduler_module = __import__("src.scheduler.daily_refresh_scheduler", fromlist=["_default_runner"])
+    response = scheduler_module._default_runner(date(2026, 6, 21))
+
+    assert response == {"ok": True}
+    assert captured == {
+        "run_date": date(2026, 6, 21),
+        "include_core_refresh": True,
+    }
+
+
+def test_parse_args_uses_core_refresh_by_default_and_supports_explicit_skip(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["run_daily_dashboard_refresh.py"])
+    args = daily_refresh_script.parse_args()
+
+    assert args.include_core_refresh is True
+    assert args.skip_core_refresh is False
+
+    monkeypatch.setattr(sys, "argv", ["run_daily_dashboard_refresh.py", "--skip-core-refresh"])
+    args = daily_refresh_script.parse_args()
+
+    assert args.include_core_refresh is True
+    assert args.skip_core_refresh is True

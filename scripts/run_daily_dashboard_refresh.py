@@ -109,7 +109,7 @@ def run_daily_dashboard_refresh(
     run_date: date | None = None,
     date_from: date = DEFAULT_DASHBOARD_START_DATE,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
-    include_core_refresh: bool = False,
+    include_core_refresh: bool = True,
     mart_version: str = "v2",
 ) -> dict[str, Any]:
     resolved_run_date = run_date or resolve_default_target_date()
@@ -205,9 +205,9 @@ def run_daily_dashboard_refresh(
         if include_core_refresh:
             current_step = "core_refresh"
             core_summary = run_missing_core_dates_load(
-                date_from=date_from,
+                date_from=resolved_run_date,
                 date_to=resolved_run_date,
-                full_range_from=date_from,
+                full_range_from=resolved_run_date,
                 full_range_to=resolved_run_date,
                 fullstats_sleep_seconds=20,
                 use_tracked_products=True,
@@ -261,7 +261,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-core-refresh",
         action="store_true",
-        help="Also run tracked core facts refresh before mart/export rebuild.",
+        default=True,
+        help="Also run tracked core facts refresh before mart/export rebuild. Enabled by default.",
+    )
+    parser.add_argument(
+        "--skip-core-refresh",
+        action="store_true",
+        help="Explicitly skip tracked core facts refresh before mart/export rebuild.",
     )
     parser.add_argument("--version", default="v2", choices=["v1", "v2"])
     return parser.parse_args()
@@ -273,7 +279,7 @@ def main() -> int:
         run_date=date.fromisoformat(args.run_date),
         date_from=date.fromisoformat(args.date_from),
         output_dir=Path(args.output_dir),
-        include_core_refresh=bool(args.include_core_refresh),
+        include_core_refresh=bool(args.include_core_refresh) and not bool(args.skip_core_refresh),
         mart_version=args.version,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
