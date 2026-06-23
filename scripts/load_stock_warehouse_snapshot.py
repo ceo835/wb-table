@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -12,9 +13,12 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.db.stock_warehouse_loader import DEFAULT_OUTPUT_DIR, DEFAULT_PAGE_LIMIT, load_stock_warehouse_snapshot
 
+DEFAULT_TARGET_TIMEZONE = "Europe/Moscow"
+
 
 def default_snapshot_date() -> str:
-    return date.today().isoformat()
+    today_in_timezone = datetime.now(UTC).astimezone(ZoneInfo(DEFAULT_TARGET_TIMEZONE)).date()
+    return (today_in_timezone - timedelta(days=1)).isoformat()
 
 
 def parse_args() -> argparse.Namespace:

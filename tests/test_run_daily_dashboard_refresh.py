@@ -29,15 +29,16 @@ from src.scheduler.daily_refresh_scheduler import (
 )
 
 
-def test_load_stock_warehouse_default_snapshot_date_uses_today(monkeypatch) -> None:
-    class FakeDate(date):
+def test_load_stock_warehouse_default_snapshot_date_uses_yesterday_in_project_timezone(monkeypatch) -> None:
+    class FakeDateTime(datetime):
         @classmethod
-        def today(cls) -> "FakeDate":
-            return cls(2026, 6, 18)
+        def now(cls, tz=None) -> "FakeDateTime":
+            base = cls(2026, 6, 21, 0, 30, tzinfo=UTC)
+            return base if tz is None else base.astimezone(tz)
 
-    monkeypatch.setattr(stock_snapshot_script, "date", FakeDate)
+    monkeypatch.setattr(stock_snapshot_script, "datetime", FakeDateTime)
 
-    assert stock_snapshot_script.default_snapshot_date() == "2026-06-18"
+    assert stock_snapshot_script.default_snapshot_date() == "2026-06-20"
 
 
 def test_run_daily_dashboard_refresh_writes_summary_files(monkeypatch, tmp_path: Path) -> None:
