@@ -2622,6 +2622,10 @@ def build_stock_warehouse_product_table(
                 "zero_warehouses_count",
                 "no_data_warehouses_count",
                 "search_queries",
+                "zone_share_pct",
+                "conversion_pct",
+                "avg_order_value",
+                "lost_orders",
                 "lost_profit_rub",
                 "zero_warehouses",
                 "no_data_warehouses",
@@ -2727,41 +2731,57 @@ def build_stock_warehouse_product_table(
                 search_val = search_queries_dict[query_group]
         row["search_queries"] = search_val
 
+        zone_share_pct = pd.NA
+        conversion_pct = pd.NA
+        avg_order_value_val = pd.NA
+        lost_orders_val = pd.NA
         lost_profit_val = pd.NA
-        if pd.notna(query_group) and query_group and query_group not in ("unknown", "Не определена") and not pd.isna(search_val) and zero_warehouses:
+
+        if pd.notna(query_group) and query_group and query_group not in ("unknown", "Не определена") and not pd.isna(search_val):
             coef = None
             if calculated_conversions_dict is not None:
                 coef = calculated_conversions_dict.get(query_group)
             if coef is None and coefficients_dict is not None:
                 coef = coefficients_dict.get(query_group)
             if coef is not None:
-                avg_order_value = None
-                lookup_data = app_lookup.get((snapshot_date, nm_id))
-                if lookup_data is not None:
-                    order_sum, order_count, wb_buyer_price = lookup_data
-                    if order_count is not None and order_count > 0 and order_sum is not None:
-                        avg_order_value = float(order_sum) / float(order_count)
-                    elif wb_buyer_price is not None and not pd.isna(wb_buyer_price):
-                        avg_order_value = float(wb_buyer_price)
+                conversion_pct = float(coef) * 100.0
+
+            lookup_data = app_lookup.get((snapshot_date, nm_id))
+            if lookup_data is not None:
+                order_sum, order_count, wb_buyer_price = lookup_data
+                if order_count is not None and order_count > 0 and order_sum is not None:
+                    avg_order_value_val = float(order_sum) / float(order_count)
+                elif wb_buyer_price is not None and not pd.isna(wb_buyer_price):
+                    avg_order_value_val = float(wb_buyer_price)
+
+            if zero_warehouses:
+                sum_share = 0.0
+                missing_component = False
+                for wh in zero_warehouses:
+                    wh_info = warehouse_areas_dict.get(wh)
+                    if wh_info is None:
+                        missing_component = True
+                        break
+                    market_area_code, pop_share = wh_info
+                    if pop_share is None or pd.isna(pop_share):
+                        missing_component = True
+                        break
+                    sum_share += float(pop_share)
                 
-                if avg_order_value is not None:
-                    sum_share = 0.0
-                    missing_component = False
-                    for wh in zero_warehouses:
-                        wh_info = warehouse_areas_dict.get(wh)
-                        if wh_info is None:
-                            missing_component = True
-                            break
-                        market_area_code, pop_share = wh_info
-                        if pop_share is None or pd.isna(pop_share):
-                            missing_component = True
-                            break
-                        sum_share += float(pop_share)
-                    
-                    if not missing_component:
-                        lost_impressions = float(search_val) * sum_share / 100.0
-                        lost_orders = lost_impressions * float(coef)
-                        lost_profit_val = lost_orders * float(avg_order_value)
+                if not missing_component:
+                    zone_share_pct = sum_share
+
+            if pd.notna(zone_share_pct) and pd.notna(conversion_pct):
+                lost_impressions = float(search_val) * float(zone_share_pct) / 100.0
+                lost_orders_val = lost_impressions * float(coef)
+                
+                if pd.notna(avg_order_value_val):
+                    lost_profit_val = lost_orders_val * float(avg_order_value_val)
+
+        row["zone_share_pct"] = zone_share_pct
+        row["conversion_pct"] = conversion_pct
+        row["avg_order_value"] = avg_order_value_val
+        row["lost_orders"] = lost_orders_val
         row["lost_profit_rub"] = lost_profit_val
 
         rows.append(row)
@@ -2845,12 +2865,24 @@ def render_compact_metric_css() -> None:
 def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataFrame:
     if product_table.empty:
         return pd.DataFrame(
-            columns=["nm_id", "tracked_label", "query_group", "lifecycle_status", "zero_warehouses", "no_data_warehouses", "search_queries", "lost_profit_rub", "problem_status"]
+            columns=[
+                "nm_id", "tracked_label", "query_group", "lifecycle_status",
+                "zero_warehouses", "no_data_warehouses",
+                "search_queries", "zone_share_pct", "conversion_pct",
+                "avg_order_value", "lost_orders", "lost_profit_rub",
+                "problem_status"
+            ]
         )
     status_column = "problem_status" if "problem_status" in product_table.columns else "stock_status"
     return product_table.loc[
         product_table[status_column].ne(STOCK_STATUS_OK),
-        ["nm_id", "tracked_label", "query_group", "lifecycle_status", "zero_warehouses", "no_data_warehouses", "search_queries", "lost_profit_rub", status_column],
+        [
+            "nm_id", "tracked_label", "query_group", "lifecycle_status",
+            "zero_warehouses", "no_data_warehouses",
+            "search_queries", "zone_share_pct", "conversion_pct",
+            "avg_order_value", "lost_orders", "lost_profit_rub",
+            status_column
+        ],
     ].copy()
 
 
@@ -2902,7 +2934,11 @@ def build_stock_warehouse_display_dataframe(
                 "zero_warehouses": "Нулевые склады",
                 "no_data_warehouses": "Склады без данных",
                 "search_queries": "Поисковые запросы",
-                "lost_profit_rub": "Упущенная выгода, ₽",
+                "zone_share_pct": "Доля зоны, %",
+                "conversion_pct": "Конв. поиск→заказ, %",
+                "avg_order_value": "Средний чек, ₽",
+                "lost_orders": "Упущ. заказы",
+                "lost_profit_rub": "Потенц. выручка, ₽",
             }
         )
         return display_df.reindex(
@@ -2914,7 +2950,11 @@ def build_stock_warehouse_display_dataframe(
                 "Нулевые склады",
                 "Склады без данных",
                 "Поисковые запросы",
-                "Упущенная выгода, ₽",
+                "Доля зоны, %",
+                "Конв. поиск→заказ, %",
+                "Средний чек, ₽",
+                "Упущ. заказы",
+                "Потенц. выручка, ₽",
                 "Проблема",
             ]
         )
@@ -2930,7 +2970,7 @@ def build_stock_warehouse_display_dataframe(
             "zero_warehouses_count": "Складов с нулём",
             "no_data_warehouses_count": "Складов без данных",
             "search_queries": "Поисковые запросы",
-            "lost_profit_rub": "Упущенная выгода, ₽",
+            "lost_profit_rub": "Потенц. выручка, ₽",
         }
     )
     return display_df.drop(
@@ -2968,6 +3008,74 @@ def style_stock_warehouse_table(
             return "background-color: #e5e7eb; color: #374151;"
         return ""
 
+    def format_search_queries(x):
+        if pd.isna(x) or x in ("—", "NO_DATA", ""):
+            return "—"
+        try:
+            return f"{float(x):,.0f}".replace(",", " ")
+        except (ValueError, TypeError):
+            return str(x)
+
+    def format_zone_share(x):
+        if pd.isna(x) or x in ("—", "NO_DATA", ""):
+            return "—"
+        try:
+            return f"{float(x):.2f}%"
+        except (ValueError, TypeError):
+            return str(x)
+
+    def format_pct_3_4(x):
+        if pd.isna(x) or x in ("—", "NO_DATA", ""):
+            return "—"
+        try:
+            val = float(x)
+            if abs(val * 1000 - round(val * 1000)) > 1e-6:
+                return f"{val:.4f}%"
+            return f"{val:.3f}%"
+        except (ValueError, TypeError):
+            return str(x)
+
+    def format_avg_order_value(x):
+        if pd.isna(x) or x in ("—", "NO_DATA", ""):
+            return "—"
+        try:
+            val = float(x)
+            if val.is_integer():
+                return f"{val:,.0f}".replace(",", " ")
+            return f"{val:,.2f}".replace(",", " ")
+        except (ValueError, TypeError):
+            return str(x)
+
+    def format_lost_orders(x):
+        if pd.isna(x) or x in ("—", "NO_DATA", ""):
+            return "—"
+        try:
+            return f"{float(x):.2f}"
+        except (ValueError, TypeError):
+            return str(x)
+
+    def format_potential_revenue(x):
+        if pd.isna(x) or x in ("—", "NO_DATA", ""):
+            return "—"
+        try:
+            return f"{float(x):,.0f}".replace(",", " ")
+        except (ValueError, TypeError):
+            return str(x)
+
+    format_dict = {}
+    if "Поисковые запросы" in df.columns:
+        format_dict["Поисковые запросы"] = format_search_queries
+    if "Доля зоны, %" in df.columns:
+        format_dict["Доля зоны, %"] = format_zone_share
+    if "Конв. поиск→заказ, %" in df.columns:
+        format_dict["Конв. поиск→заказ, %"] = format_pct_3_4
+    if "Средний чек, ₽" in df.columns:
+        format_dict["Средний чек, ₽"] = format_avg_order_value
+    if "Упущ. заказы" in df.columns:
+        format_dict["Упущ. заказы"] = format_lost_orders
+    if "Потенц. выручка, ₽" in df.columns:
+        format_dict["Потенц. выручка, ₽"] = format_potential_revenue
+
     styler = df.style
     if warehouse_columns:
         styler = styler.map(warehouse_value_color, subset=warehouse_columns)
@@ -2977,7 +3085,7 @@ def style_stock_warehouse_table(
         styler = styler.map(stock_status_color, subset=["problem_status"])
     elif "stock_status" in df.columns:
         styler = styler.map(stock_status_color, subset=["stock_status"])
-    return styler.format(precision=0, na_rep="—")
+    return styler.format(format_dict, precision=0, na_rep="—")
 
 
 def prepare_stock_warehouse_table_for_display(
@@ -2991,7 +3099,11 @@ def prepare_stock_warehouse_table_for_display(
         "Складов с нулём",
         "Складов без данных",
         "Поисковые запросы",
-        "Упущенная выгода, ₽",
+        "Доля зоны, %",
+        "Конв. поиск→заказ, %",
+        "Средний чек, ₽",
+        "Упущ. заказы",
+        "Потенц. выручка, ₽",
     }
     safe_df = sanitize_dataframe_for_streamlit_display(df, numeric_columns=numeric_columns)
     return style_stock_warehouse_table(safe_df, warehouse_columns)

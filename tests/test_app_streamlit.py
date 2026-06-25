@@ -665,14 +665,19 @@ def test_build_stock_warehouse_product_table_calculated_conversions_and_display(
     assert row_kids["search_queries"] == 500
     assert row_tshirts["search_queries"] == 800
 
-    # Упущенная выгода:
-    # 1. Для kids_underwear:
-    # lost_impressions = 500 * 10 / 100 = 50
-    # lost_orders = 50 * 0.002 (calculated coef) = 0.1
-    # avg_order_val = 2000.0
-    # lost_profit = 0.1 * 2000.0 = 200.0
-    assert abs(row_kids["lost_profit_rub"] - 200.0) < 1e-5
+    # Проверка промежуточных колонок
+    assert abs(row_kids["zone_share_pct"] - 10.0) < 1e-5
+    assert abs(row_kids["conversion_pct"] - 0.2) < 1e-5
+    assert abs(row_kids["avg_order_value"] - 2000.0) < 1e-5
+    assert abs(row_kids["lost_orders"] - 0.1) < 1e-5
 
+    assert abs(row_tshirts["zone_share_pct"] - 10.0) < 1e-5
+    assert abs(row_tshirts["conversion_pct"] - 0.1) < 1e-5
+    assert abs(row_tshirts["avg_order_value"] - 1500.0) < 1e-5
+    assert abs(row_tshirts["lost_orders"] - 0.08) < 1e-5
+
+    # Упущенная выгода (потенциальная выручка):
+    assert abs(row_kids["lost_profit_rub"] - 200.0) < 1e-5
     # 2. Для women_tshirts (calculated нет, fallback на manual coef 0.001):
     # lost_impressions = 800 * 10 / 100 = 80
     # lost_orders = 80 * 0.001 = 0.08
@@ -839,11 +844,59 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
         "Нулевые склады",
         "Склады без данных",
         "Поисковые запросы",
-        "Упущенная выгода, ₽",
+        "Доля зоны, %",
+        "Конв. поиск→заказ, %",
+        "Средний чек, ₽",
+        "Упущ. заказы",
+        "Потенц. выручка, ₽",
         "Проблема",
     ]
     assert problem_display.loc[0, "Проблема"] == "Есть нулевые остатки"
     assert problem_display.loc[0, "Товарная группа"] == "Не определена"
+
+
+def test_prepare_stock_warehouse_table_for_display_formats_new_lost_profit_columns() -> None:
+    from app_streamlit import prepare_stock_warehouse_table_for_display
+    df = pd.DataFrame(
+        [
+            {
+                "Артикул WB": 100,
+                "Поисковые запросы": 5000,
+                "Доля зоны, %": 10.5,
+                "Конв. поиск→заказ, %": 0.2005,
+                "Средний чек, ₽": 2000,
+                "Упущ. заказы": 10.53,
+                "Потенц. выручка, ₽": 21060,
+                "Владимир WB": 0,
+            },
+            {
+                "Артикул WB": 200,
+                "Поисковые запросы": pd.NA,
+                "Доля зоны, %": pd.NA,
+                "Конв. поиск→заказ, %": pd.NA,
+                "Средний чек, ₽": 1500.5,
+                "Упущ. заказы": pd.NA,
+                "Потенц. выручка, ₽": pd.NA,
+                "Владимир WB": pd.NA,
+            }
+        ]
+    )
+
+    styled = prepare_stock_warehouse_table_for_display(df, ["Владимир WB"])
+    html = styled.to_html()
+
+    # Проверяем форматирование для первой строки
+    assert "5 000" in html
+    assert "10.50%" in html
+    assert "0.2005%" in html
+    assert "2 000" in html
+    assert "10.53" in html
+    assert "21 060" in html
+
+    # Проверяем форматирование для второй строки (дробный средний чек, отсутствующие значения)
+    assert "1 500.50" in html
+    # Должен быть прочерк на месте отсутствующих значений
+    assert (html.count("—") + html.count("вЂ”")) >= 5
 
 
 def test_attach_stock_query_groups_reads_query_group_from_settings_products() -> None:
