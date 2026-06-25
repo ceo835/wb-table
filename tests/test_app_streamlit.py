@@ -600,6 +600,177 @@ def test_build_stock_warehouse_product_table_lost_profit_calculation() -> None:
     assert abs(row_fallback["lost_profit_rub"] - 137.5) < 1e-5
 
 
+def test_build_stock_warehouse_product_table_calculated_conversions_and_display() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 100,
+                "chrt_id": 1,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 0,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 200,
+                "chrt_id": 2,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 0,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 100, "tracked_label": "kids_item", "is_tracked": True, "lifecycle_status": "active", "query_group": "kids_underwear"},
+            {"nm_id": 200, "tracked_label": "tshirt_item", "is_tracked": True, "lifecycle_status": "active", "query_group": "women_tshirts"},
+        ]
+    )
+
+    search_queries_dict = {"kids_underwear": 500, "women_tshirts": 800}
+    # Нет ручного коэффициента для kids_underwear, но есть для women_tshirts
+    coefficients_dict = {"women_tshirts": Decimal("0.001")}
+    # calculated конверсия есть для kids_underwear (например, 0.002), но нет для women_tshirts
+    calculated_conversions_dict = {"kids_underwear": 0.002}
+    warehouse_areas_dict = {"Владимир WB": ("CFO", Decimal("10.0"))}
+    app_lookup = {
+        (datetime(2026, 6, 15).date(), 100): (20000.0, 10.0, 2000.0),
+        (datetime(2026, 6, 15).date(), 200): (15000.0, 10.0, 1500.0),
+    }
+
+    result = build_stock_warehouse_product_table(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=datetime(2026, 6, 15).date(),
+        selected_warehouses=["Владимир WB"],
+        main_warehouses=["Владимир WB"],
+        show_only_tracked=True,
+        show_sellout=True,
+        search_queries_dict=search_queries_dict,
+        coefficients_dict=coefficients_dict,
+        warehouse_areas_dict=warehouse_areas_dict,
+        app_lookup=app_lookup,
+        calculated_conversions_dict=calculated_conversions_dict,
+    )
+
+    row_kids = result.loc[result["nm_id"] == 100].iloc[0]
+    row_tshirts = result.loc[result["nm_id"] == 200].iloc[0]
+
+    # Поисковые запросы отображаются для обеих групп
+    assert row_kids["search_queries"] == 500
+    assert row_tshirts["search_queries"] == 800
+
+    # Упущенная выгода:
+    # 1. Для kids_underwear:
+    # lost_impressions = 500 * 10 / 100 = 50
+    # lost_orders = 50 * 0.002 (calculated coef) = 0.1
+    # avg_order_val = 2000.0
+    # lost_profit = 0.1 * 2000.0 = 200.0
+    assert abs(row_kids["lost_profit_rub"] - 200.0) < 1e-5
+
+    # 2. Для women_tshirts (calculated нет, fallback на manual coef 0.001):
+    # lost_impressions = 800 * 10 / 100 = 80
+    # lost_orders = 80 * 0.001 = 0.08
+    # avg_order_val = 1500.0
+    # lost_profit = 0.08 * 1500 = 120.0
+    assert abs(row_tshirts["lost_profit_rub"] - 120.0) < 1e-5
+
+
+def test_build_stock_warehouse_product_table_no_conversion_keeps_queries_but_hides_profit() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 100,
+                "chrt_id": 1,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 0,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            }
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 100, "tracked_label": "kids_item", "is_tracked": True, "lifecycle_status": "active", "query_group": "kids_underwear"}
+        ]
+    )
+
+    search_queries_dict = {"kids_underwear": 500}
+    result = build_stock_warehouse_product_table(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=datetime(2026, 6, 15).date(),
+        selected_warehouses=["Владимир WB"],
+        main_warehouses=["Владимир WB"],
+        show_only_tracked=True,
+        show_sellout=True,
+        search_queries_dict=search_queries_dict,
+        coefficients_dict={},
+        calculated_conversions_dict={},
+    )
+
+    row = result.iloc[0]
+    assert row["search_queries"] == 500
+    assert pd.isna(row["lost_profit_rub"])
+
+
+def test_calculate_lost_profit_conversions_from_db(monkeypatch) -> None:
+    from app_streamlit import calculate_lost_profit_conversions_from_db
+    import app_streamlit
+    from contextlib import contextmanager
+    from datetime import date
+
+    calculate_lost_profit_conversions_from_db.clear()
+
+    class FakeRow:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class FakeResult:
+        def __init__(self, items):
+            self.items = items
+        def all(self):
+            return self.items
+
+    calls_count = 0
+    def fake_execute(stmt, *args, **kwargs):
+        nonlocal calls_count
+        calls_count += 1
+        if calls_count == 1:
+            return FakeResult([
+                FakeRow(query_group="kids_underwear", orders_sum=10),
+                FakeRow(query_group="women_tshirts", orders_sum=5),
+            ])
+        else:
+            return FakeResult([
+                FakeRow(query_group="kids_underwear", search_queries=5000),
+                FakeRow(query_group="women_tshirts", search_queries=2000),
+            ])
+
+    class FakeSession:
+        def execute(self, stmt, *args, **kwargs):
+            return fake_execute(stmt, *args, **kwargs)
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(app_streamlit, "session_scope", fake_session_scope)
+
+    conversions = calculate_lost_profit_conversions_from_db(date(2026, 6, 24))
+
+    assert abs(conversions.get("kids_underwear", 0) - 0.002) < 1e-6
+    assert abs(conversions.get("women_tshirts", 0) - 0.0025) < 1e-6
+
+
 def test_prepare_stock_warehouse_table_for_display_keeps_missing_warehouses_numeric_safe() -> None:
     df = pd.DataFrame(
         [

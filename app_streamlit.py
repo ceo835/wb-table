@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 import altair as alt
 import pandas as pd
 import streamlit as st
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from src.ad_campaign_product_dataset import (
     AD_CAMPAIGN_PRODUCT_COLUMNS,
@@ -1976,21 +1976,20 @@ def load_search_queries_by_date_from_db(snapshot_date: date, cache_buster: str |
             subq = (
                 select(
                     FactWbSearchQueryTextDay.day.label("day"),
-                    SettingsProducts.query_group.label("query_group"),
+                    FactWbSearchQueryTextDay.query_group.label("query_group"),
                     FactWbSearchQueryTextDay.query_text.label("query_text"),
                     func.max(FactWbSearchQueryTextDay.frequency_current).label("max_freq")
                 )
-                .join(SettingsProducts, FactWbSearchQueryTextDay.nm_id == SettingsProducts.nm_id)
                 .where(
                     FactWbSearchQueryTextDay.day == snapshot_date,
-                    SettingsProducts.query_group.isnot(None),
-                    SettingsProducts.query_group != "unknown",
-                    SettingsProducts.query_group != "Не определена",
-                    SettingsProducts.query_group != ""
+                    FactWbSearchQueryTextDay.query_group.isnot(None),
+                    FactWbSearchQueryTextDay.query_group != "unknown",
+                    FactWbSearchQueryTextDay.query_group != "Не определена",
+                    FactWbSearchQueryTextDay.query_group != ""
                 )
                 .group_by(
                     FactWbSearchQueryTextDay.day,
-                    SettingsProducts.query_group,
+                    FactWbSearchQueryTextDay.query_group,
                     FactWbSearchQueryTextDay.query_text
                 )
                 .subquery()
@@ -2008,6 +2007,68 @@ def load_search_queries_by_date_from_db(snapshot_date: date, cache_buster: str |
             return {row.query_group: int(row.search_queries) for row in rows if row.search_queries is not None}
     except Exception:
         logger.exception("Failed to load search queries aggregates from db for stock warehouse tab")
+        return {}
+
+
+@st.cache_data(show_spinner=False)
+def calculate_lost_profit_conversions_from_db(snapshot_date: date, cache_buster: str | None = None) -> dict[str, float]:
+    try:
+        with session_scope() as session:
+            orders_stmt = (
+                select(
+                    FactWbSearchQueryTextDay.query_group,
+                    func.sum(FactWbSearchQueryTextDay.orders_current).label("orders_sum")
+                )
+                .where(
+                    FactWbSearchQueryTextDay.day == snapshot_date,
+                    FactWbSearchQueryTextDay.query_group.isnot(None),
+                    FactWbSearchQueryTextDay.query_group != "unknown",
+                    FactWbSearchQueryTextDay.query_group != "Не определена",
+                    FactWbSearchQueryTextDay.query_group != ""
+                )
+                .group_by(FactWbSearchQueryTextDay.query_group)
+            )
+            orders_rows = session.execute(orders_stmt).all()
+            orders_map = {row.query_group: int(row.orders_sum or 0) for row in orders_rows}
+
+            subq = (
+                select(
+                    FactWbSearchQueryTextDay.query_group.label("query_group"),
+                    FactWbSearchQueryTextDay.query_text.label("query_text"),
+                    func.max(FactWbSearchQueryTextDay.frequency_current).label("max_freq")
+                )
+                .where(
+                    FactWbSearchQueryTextDay.day == snapshot_date,
+                    FactWbSearchQueryTextDay.query_group.isnot(None),
+                    FactWbSearchQueryTextDay.query_group != "unknown",
+                    FactWbSearchQueryTextDay.query_group != "Не определена",
+                    FactWbSearchQueryTextDay.query_group != ""
+                )
+                .group_by(
+                    FactWbSearchQueryTextDay.query_group,
+                    FactWbSearchQueryTextDay.query_text
+                )
+                .subquery()
+            )
+            
+            freq_stmt = (
+                select(
+                    subq.c.query_group,
+                    func.sum(subq.c.max_freq).label("search_queries")
+                )
+                .group_by(subq.c.query_group)
+            )
+            freq_rows = session.execute(freq_stmt).all()
+            freq_map = {row.query_group: int(row.search_queries or 0) for row in freq_rows}
+
+            conversions = {}
+            for group, orders_sum in orders_map.items():
+                freq = freq_map.get(group, 0)
+                if freq > 0:
+                    conversions[group] = float(orders_sum) / float(freq)
+            return conversions
+    except Exception:
+        logger.exception("Failed to calculate search to order conversions from DB for stock warehouse tab")
         return {}
 
 
@@ -2506,6 +2567,7 @@ def build_stock_warehouse_product_table(
     coefficients_dict: dict[str, Decimal] | None = None,
     warehouse_areas_dict: dict[str, tuple[str, Decimal]] | None = None,
     app_lookup: dict[tuple[date, int], tuple[float, float, float]] | None = None,
+    calculated_conversions_dict: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     warehouse_names = list(dict.fromkeys(selected_warehouses))
     main_warehouse_names = [warehouse for warehouse in dict.fromkeys(main_warehouses or warehouse_names) if warehouse]
@@ -2583,6 +2645,8 @@ def build_stock_warehouse_product_table(
 
     if search_queries_dict is None:
         search_queries_dict = load_search_queries_by_date_from_db(snapshot_date)
+    if calculated_conversions_dict is None:
+        calculated_conversions_dict = calculate_lost_profit_conversions_from_db(snapshot_date)
     if coefficients_dict is None:
         coefficients_dict = load_lost_profit_coefficients_from_db()
     if warehouse_areas_dict is None:
@@ -2665,7 +2729,11 @@ def build_stock_warehouse_product_table(
 
         lost_profit_val = pd.NA
         if pd.notna(query_group) and query_group and query_group not in ("unknown", "Не определена") and not pd.isna(search_val) and zero_warehouses:
-            coef = coefficients_dict.get(query_group)
+            coef = None
+            if calculated_conversions_dict is not None:
+                coef = calculated_conversions_dict.get(query_group)
+            if coef is None and coefficients_dict is not None:
+                coef = coefficients_dict.get(query_group)
             if coef is not None:
                 avg_order_value = None
                 lookup_data = app_lookup.get((snapshot_date, nm_id))
@@ -2952,7 +3020,11 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         str(MAIN_WB_WAREHOUSES_PATH),
         MAIN_WB_WAREHOUSES_PATH.stat().st_mtime if MAIN_WB_WAREHOUSES_PATH.exists() else None,
     )
-    selected_snapshot_date = st.selectbox("Дата snapshot", options=available_dates, index=len(available_dates) - 1)
+    import zoneinfo
+    moscow_tz = zoneinfo.ZoneInfo("Europe/Moscow")
+    report_day = (datetime.now(moscow_tz) - timedelta(days=1)).date()
+    st.info(f"Дата отчета: **{report_day.isoformat()}** (вчера по московскому времени)")
+    selected_snapshot_date = report_day
 
     filter_cols = st.columns(4)
     show_only_tracked = filter_cols[0].checkbox("Показывать только отслеживаемые товары", value=True)
@@ -3112,6 +3184,66 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         width="stretch",
         hide_index=True,
     )
+    with st.expander("Диагностика поисковых запросов (Debug Check)"):
+        try:
+            with session_scope() as session:
+                diag_stmt1 = """
+                    select
+                      day,
+                      query_group,
+                      count(*) as rows_count,
+                      count(distinct nm_id) as nm_count,
+                      count(distinct query_text) as query_text_count,
+                      sum(coalesce(orders_current, 0)) as orders_sum,
+                      sum(coalesce(frequency_current, 0)) as raw_frequency_sum
+                    from fact_wb_search_query_text_day
+                    where day = :report_day
+                    group by day, query_group
+                    order by query_group;
+                """
+                res1 = session.execute(
+                    text(diag_stmt1),
+                    {"report_day": selected_snapshot_date}
+                ).all()
+                df1 = pd.DataFrame([dict(row._mapping) for row in res1])
+                st.markdown("**Общая статистика по группам:**")
+                if not df1.empty:
+                    st.dataframe(df1)
+                else:
+                    st.write("Нет данных.")
+
+                diag_stmt2 = """
+                    with dedup as (
+                      select
+                        day,
+                        query_group,
+                        query_text,
+                        max(frequency_current) as frequency
+                      from fact_wb_search_query_text_day
+                      where day = :report_day
+                      group by day, query_group, query_text
+                    )
+                    select
+                      day,
+                      query_group,
+                      sum(frequency) as search_queries
+                    from dedup
+                    group by day, query_group
+                    order by query_group;
+                """
+                res2 = session.execute(
+                    text(diag_stmt2),
+                    {"report_day": selected_snapshot_date}
+                ).all()
+                df2 = pd.DataFrame([dict(row._mapping) for row in res2])
+                st.markdown("**Dedupe-агрегат поисковых запросов:**")
+                if not df2.empty:
+                    st.dataframe(df2)
+                else:
+                    st.write("Нет данных.")
+        except Exception as e:
+            st.error(f"Ошибка при загрузке диагностики: {e}")
+
 
 def save_uploaded_file_to_temp(uploaded_file: Any) -> Path:
     suffix = Path(getattr(uploaded_file, "name", "upload.xlsx")).suffix or ".xlsx"
