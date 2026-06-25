@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
@@ -229,6 +230,58 @@ class SettingsReportColumns(Base, TimestampMixin):
     display_order: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SettingsLostProfitMarketArea(Base):
+    __tablename__ = "settings_lost_profit_market_areas"
+
+    market_area_code: Mapped[str] = mapped_column(Text, primary_key=True)
+    market_area_name: Mapped[str] = mapped_column(Text, nullable=False)
+    population_people: Mapped[int] = mapped_column(Integer, nullable=False)
+    population_share_pct: Mapped[Decimal] = mapped_column(Numeric(10, 3), nullable=False)
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approval_status: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="pending_ivan_review",
+        server_default="pending_ivan_review",
+    )
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class SettingsLostProfitWarehouseArea(Base):
+    __tablename__ = "settings_lost_profit_warehouse_areas"
+    __table_args__ = (
+        Index("idx_settings_lost_profit_warehouse_areas_market_area_code", "market_area_code"),
+    )
+
+    warehouse_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    market_area_code: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("settings_lost_profit_market_areas.market_area_code"),
+        nullable=False,
+    )
+    approval_status: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="pending_ivan_review",
+        server_default="pending_ivan_review",
+    )
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 class FactFunnelDay(Base, StatusMixin):

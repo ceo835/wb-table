@@ -31,6 +31,8 @@ from src.db.models import (
     FactVbroManual,
     MartTotalReport,
     RawApiResponse,
+    SettingsLostProfitMarketArea,
+    SettingsLostProfitWarehouseArea,
     SettingsProducts,
     SettingsReportColumns,
     ValidationWarning,
@@ -43,6 +45,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def test_db_models_import():
     assert RawApiResponse.__tablename__ == "raw_api_response"
     assert MartTotalReport.__tablename__ == "mart_total_report"
+    assert SettingsLostProfitMarketArea.__tablename__ == "settings_lost_profit_market_areas"
+    assert SettingsLostProfitWarehouseArea.__tablename__ == "settings_lost_profit_warehouse_areas"
 
 
 def test_db_metadata_contains_expected_tables():
@@ -55,6 +59,8 @@ def test_db_metadata_contains_expected_tables():
         "dim_date",
         "settings_products",
         "settings_report_columns",
+        "settings_lost_profit_market_areas",
+        "settings_lost_profit_warehouse_areas",
         "fact_funnel_day",
         "fact_ad_cost_event",
         "fact_ad_cost_day",
@@ -97,6 +103,8 @@ def test_metadata_includes_requested_dimension_and_fact_models():
         DimDate,
         SettingsProducts,
         SettingsReportColumns,
+        SettingsLostProfitMarketArea,
+        SettingsLostProfitWarehouseArea,
         FactAdCostDay,
         FactAdCampaignDay,
         FactAdCampaignNmDay,
