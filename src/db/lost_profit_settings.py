@@ -5,7 +5,11 @@ from typing import Any, Mapping, Sequence
 
 from sqlalchemy.orm import Session
 
-from src.db.models import SettingsLostProfitMarketArea, SettingsLostProfitWarehouseArea
+from src.db.models import (
+    SettingsLostProfitMarketArea,
+    SettingsLostProfitWarehouseArea,
+    SettingsLostProfitQueryGroupCoefficient,
+)
 from src.db.session import session_scope, upsert_rows
 
 
@@ -227,3 +231,54 @@ def seed_lost_profit_settings_to_db(*, apply: bool) -> dict[str, Any]:
         summary["rows_upserted_market_areas"] = upsert_market_area_rows(session, market_rows)
         summary["rows_upserted_warehouse_areas"] = upsert_warehouse_area_rows(session, warehouse_rows)
     return summary
+
+
+def prepare_query_group_coefficient_upsert_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        query_group = str(row.get("query_group") or "").strip()
+        if not query_group:
+            continue
+        conversion = row.get("search_to_order_conversion")
+        deduplicated[query_group] = {
+            "query_group": query_group,
+            "search_to_order_conversion": _normalize_decimal(conversion) if conversion not in (None, "") else None,
+            "approval_status": str(row.get("approval_status") or DEFAULT_APPROVAL_STATUS),
+            "comment": row.get("comment") or None,
+        }
+    return list(deduplicated.values())
+
+
+def upsert_query_group_coefficient_rows(session: Session, rows: Sequence[Mapping[str, Any]]) -> int:
+    prepared_rows = prepare_query_group_coefficient_upsert_rows(rows)
+    return upsert_rows(
+        session=session,
+        model=SettingsLostProfitQueryGroupCoefficient,
+        rows=prepared_rows,
+        conflict_columns=("query_group",),
+    )
+
+
+def seed_lost_profit_query_group_coefficients_to_db(*, apply: bool) -> dict[str, Any]:
+    initial_coefficients = [
+        {
+            "query_group": "women_underwear",
+            "search_to_order_conversion": Decimal("0.0025"),
+            "approval_status": "pending_ivan_review",
+            "comment": "Коэффициент из ТЗ Ивана",
+        }
+    ]
+    coefficient_rows = prepare_query_group_coefficient_upsert_rows(initial_coefficients)
+    summary = {
+        "apply": bool(apply),
+        "coefficients_count": len(coefficient_rows),
+        "query_groups": [row["query_group"] for row in coefficient_rows],
+        "rows_upserted_coefficients": 0,
+    }
+    if not apply:
+        return summary
+
+    with session_scope() as session:
+        summary["rows_upserted_coefficients"] = upsert_query_group_coefficient_rows(session, coefficient_rows)
+    return summary
+

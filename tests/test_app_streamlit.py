@@ -499,6 +499,107 @@ def test_build_stock_warehouse_product_table_adds_main_warehouse_aggregates_prob
     assert third_row["warehouses_with_stock"] == 2
 
 
+def test_build_stock_warehouse_product_table_lost_profit_calculation() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 197330807,
+                "chrt_id": 1,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 0,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-06-15",
+                "nm_id": 320893265,
+                "chrt_id": 2,
+                "warehouse_id": 10,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 0,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 197330807,
+                "tracked_label": "BlackWOM5",
+                "is_tracked": True,
+                "lifecycle_status": "active",
+                "query_group": "women_underwear",
+            },
+            {
+                "nm_id": 320893265,
+                "tracked_label": "коты 4 большие",
+                "is_tracked": True,
+                "lifecycle_status": "active",
+                "query_group": "unknown",
+            },
+        ]
+    )
+
+    search_queries_dict = {"women_underwear": 1000}
+    coefficients_dict = {"women_underwear": Decimal("0.0025")}
+    warehouse_areas_dict = {"Владимир WB": ("CFO", Decimal("5.5"))}
+    app_lookup = {
+        (datetime(2026, 6, 15).date(), 197330807): (12000.0, 10.0, 1000.0) # order_sum, order_count, price
+    }
+
+    result = build_stock_warehouse_product_table(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=datetime(2026, 6, 15).date(),
+        selected_warehouses=["Владимир WB"],
+        main_warehouses=["Владимир WB"],
+        show_only_tracked=True,
+        show_sellout=True,
+        search_queries_dict=search_queries_dict,
+        coefficients_dict=coefficients_dict,
+        warehouse_areas_dict=warehouse_areas_dict,
+        app_lookup=app_lookup,
+    )
+
+    row_197330807 = result.loc[result["nm_id"] == 197330807].iloc[0]
+    row_320893265 = result.loc[result["nm_id"] == 320893265].iloc[0]
+
+    # Проверяем поисковые запросы
+    assert row_197330807["search_queries"] == 1000
+    assert pd.isna(row_320893265["search_queries"])
+
+    # Проверяем расчет упущенной выгоды
+    # lost_impressions = 1000 * 5.5 / 100 = 55
+    # lost_orders = 55 * 0.0025 = 0.1375
+    # avg_order_value = 12000.0 / 10.0 = 1200.0
+    # lost_profit = 0.1375 * 1200.0 = 165.0
+    assert abs(row_197330807["lost_profit_rub"] - 165.0) < 1e-5
+    assert pd.isna(row_320893265["lost_profit_rub"])
+
+    app_lookup_fallback = {
+        (datetime(2026, 6, 15).date(), 197330807): (0.0, 0.0, 1000.0) # order_sum, order_count=0, price=1000.0
+    }
+    result_fallback = build_stock_warehouse_product_table(
+        snapshot_df,
+        tracked_df,
+        snapshot_date=datetime(2026, 6, 15).date(),
+        selected_warehouses=["Владимир WB"],
+        main_warehouses=["Владимир WB"],
+        show_only_tracked=True,
+        show_sellout=True,
+        search_queries_dict=search_queries_dict,
+        coefficients_dict=coefficients_dict,
+        warehouse_areas_dict=warehouse_areas_dict,
+        app_lookup=app_lookup_fallback,
+    )
+    row_fallback = result_fallback.loc[result_fallback["nm_id"] == 197330807].iloc[0]
+    # lost_profit = 0.1375 * 1000.0 = 137.5
+    assert abs(row_fallback["lost_profit_rub"] - 137.5) < 1e-5
+
+
 def test_prepare_stock_warehouse_table_for_display_keeps_missing_warehouses_numeric_safe() -> None:
     df = pd.DataFrame(
         [
@@ -566,6 +667,8 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
         "Статус товара",
         "Нулевые склады",
         "Склады без данных",
+        "Поисковые запросы",
+        "Упущенная выгода, ₽",
         "Проблема",
     ]
     assert problem_display.loc[0, "Проблема"] == "Есть нулевые остатки"
@@ -1624,10 +1727,10 @@ def test_build_chart_metrics_by_date_keeps_unified_business_metrics_with_source_
     assert "ad_atbs_total_manual_confirmed" in chart_df.columns
     assert "ad_atbs_total_api" in chart_df.columns
     assert "ad_atbs_total_manual" in chart_df.columns
-    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-03-20"), "ad_atbs_total_confirmed"].iloc[0]) == 15.0
-    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-05-10"), "ad_atbs_total_confirmed"].iloc[0]) == 9.0
-    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-03-20"), "ad_cart_cost"].iloc[0]) == 10.0
-    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-05-10"), "ad_cart_cost"].iloc[0]) == 10.0
+    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-03-20").date(), "ad_atbs_total_confirmed"].iloc[0]) == 15.0
+    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-05-10").date(), "ad_atbs_total_confirmed"].iloc[0]) == 9.0
+    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-03-20").date(), "ad_cart_cost"].iloc[0]) == 10.0
+    assert float(chart_df.loc[chart_df["report_date"] == pd.Timestamp("2026-05-10").date(), "ad_cart_cost"].iloc[0]) == 10.0
     first_row = chart_df.iloc[0]
     second_row = chart_df.iloc[1]
     assert float(first_row["ad_campaign_spend_total_manual"]) == 150.0

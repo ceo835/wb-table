@@ -35,6 +35,10 @@ from src.db.models import (
     FactWbSitePriceSnapshot,
     MartTotalReport,
     SettingsProducts,
+    FactWbSearchQueryTextDay,
+    SettingsLostProfitQueryGroupCoefficient,
+    SettingsLostProfitWarehouseArea,
+    SettingsLostProfitMarketArea,
 )
 from src.db.product_query_group_backfill import (
     QUERY_GROUP_VALUES as PRODUCT_QUERY_GROUP_VALUES,
@@ -1965,6 +1969,91 @@ def load_settings_product_query_groups_from_db(cache_buster: str | None = None) 
     )
 
 
+@st.cache_data(show_spinner=False)
+def load_search_queries_by_date_from_db(snapshot_date: date, cache_buster: str | None = None) -> dict[str, int]:
+    try:
+        with session_scope() as session:
+            subq = (
+                select(
+                    FactWbSearchQueryTextDay.day.label("day"),
+                    SettingsProducts.query_group.label("query_group"),
+                    FactWbSearchQueryTextDay.query_text.label("query_text"),
+                    func.max(FactWbSearchQueryTextDay.frequency_current).label("max_freq")
+                )
+                .join(SettingsProducts, FactWbSearchQueryTextDay.nm_id == SettingsProducts.nm_id)
+                .where(
+                    FactWbSearchQueryTextDay.day == snapshot_date,
+                    SettingsProducts.query_group.isnot(None),
+                    SettingsProducts.query_group != "unknown",
+                    SettingsProducts.query_group != "Не определена",
+                    SettingsProducts.query_group != ""
+                )
+                .group_by(
+                    FactWbSearchQueryTextDay.day,
+                    SettingsProducts.query_group,
+                    FactWbSearchQueryTextDay.query_text
+                )
+                .subquery()
+            )
+            
+            stmt = (
+                select(
+                    subq.c.query_group,
+                    func.sum(subq.c.max_freq).label("search_queries")
+                )
+                .group_by(subq.c.query_group)
+            )
+            
+            rows = session.execute(stmt).all()
+            return {row.query_group: int(row.search_queries) for row in rows if row.search_queries is not None}
+    except Exception:
+        logger.exception("Failed to load search queries aggregates from db for stock warehouse tab")
+        return {}
+
+
+@st.cache_data(show_spinner=False)
+def load_lost_profit_coefficients_from_db(cache_buster: str | None = None) -> dict[str, Decimal]:
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(
+                    SettingsLostProfitQueryGroupCoefficient.query_group,
+                    SettingsLostProfitQueryGroupCoefficient.search_to_order_conversion,
+                )
+            ).all()
+            return {
+                row.query_group: row.search_to_order_conversion
+                for row in rows
+                if row.search_to_order_conversion is not None
+            }
+    except Exception:
+        logger.exception("Failed to load lost profit coefficients from db for stock warehouse tab")
+        return {}
+
+
+@st.cache_data(show_spinner=False)
+def load_warehouse_market_areas_from_db(cache_buster: str | None = None) -> dict[str, tuple[str, Decimal]]:
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(
+                    SettingsLostProfitWarehouseArea.warehouse_name,
+                    SettingsLostProfitWarehouseArea.market_area_code,
+                    SettingsLostProfitMarketArea.population_share_pct,
+                ).join(
+                    SettingsLostProfitMarketArea,
+                    SettingsLostProfitWarehouseArea.market_area_code == SettingsLostProfitMarketArea.market_area_code,
+                )
+            ).all()
+            return {
+                row.warehouse_name: (row.market_area_code, row.population_share_pct)
+                for row in rows
+            }
+    except Exception:
+        logger.exception("Failed to load warehouse market areas from db for stock warehouse tab")
+        return {}
+
+
 def attach_stock_query_groups(
     tracked_df: pd.DataFrame,
     query_group_df: pd.DataFrame,
@@ -2413,6 +2502,10 @@ def build_stock_warehouse_product_table(
     main_warehouses: list[str] | None = None,
     show_only_tracked: bool,
     show_sellout: bool,
+    search_queries_dict: dict[str, int] | None = None,
+    coefficients_dict: dict[str, Decimal] | None = None,
+    warehouse_areas_dict: dict[str, tuple[str, Decimal]] | None = None,
+    app_lookup: dict[tuple[date, int], tuple[float, float, float]] | None = None,
 ) -> pd.DataFrame:
     warehouse_names = list(dict.fromkeys(selected_warehouses))
     main_warehouse_names = [warehouse for warehouse in dict.fromkeys(main_warehouses or warehouse_names) if warehouse]
@@ -2466,6 +2559,8 @@ def build_stock_warehouse_product_table(
                 "warehouses_with_stock",
                 "zero_warehouses_count",
                 "no_data_warehouses_count",
+                "search_queries",
+                "lost_profit_rub",
                 "zero_warehouses",
                 "no_data_warehouses",
                 "problem_warehouses",
@@ -2486,14 +2581,40 @@ def build_stock_warehouse_product_table(
         for _, row in current_snapshot.iterrows()
     }
 
+    if search_queries_dict is None:
+        search_queries_dict = load_search_queries_by_date_from_db(snapshot_date)
+    if coefficients_dict is None:
+        coefficients_dict = load_lost_profit_coefficients_from_db()
+    if warehouse_areas_dict is None:
+        warehouse_areas_dict = load_warehouse_market_areas_from_db()
+    if app_lookup is None:
+        app_lookup = {}
+        try:
+            app_df, _ = load_app_dataset()
+            if not app_df.empty:
+                app_df_copy = app_df.copy()
+                app_df_copy["report_date"] = pd.to_datetime(app_df_copy["report_date"], errors="coerce").dt.date
+                for _, row in app_df_copy.iterrows():
+                    rep_date = row["report_date"]
+                    nm = int(row["nm_id"]) if not pd.isna(row["nm_id"]) else None
+                    if rep_date and nm:
+                        app_lookup[(rep_date, nm)] = (
+                            row.get("order_sum"),
+                            row.get("order_count"),
+                            row.get("wb_buyer_price")
+                        )
+        except Exception:
+            logger.warning("Could not load app dataset for lost profit calculations, using empty lookup.")
+
     rows: list[dict[str, object]] = []
     for _, product_row in base_products.sort_values(["tracked_label", "nm_id"], na_position="last").iterrows():
         nm_id = int(product_row["nm_id"])
         has_any_snapshot = nm_id in any_snapshot_nm_ids_for_date
+        query_group = product_row.get("query_group")
         row: dict[str, object] = {
             "nm_id": nm_id,
             "tracked_label": product_row.get("tracked_label"),
-            "query_group": product_row.get("query_group"),
+            "query_group": query_group,
             "lifecycle_status": product_row.get("lifecycle_status") or "not_tracked",
         }
         zero_warehouses: list[str] = []
@@ -2535,6 +2656,46 @@ def build_stock_warehouse_product_table(
             zero_count=len(zero_warehouses),
             no_data_count=len(no_data_warehouses),
         )
+
+        search_val = pd.NA
+        if pd.notna(query_group) and query_group and query_group not in ("unknown", "Не определена"):
+            if query_group in search_queries_dict:
+                search_val = search_queries_dict[query_group]
+        row["search_queries"] = search_val
+
+        lost_profit_val = pd.NA
+        if pd.notna(query_group) and query_group and query_group not in ("unknown", "Не определена") and not pd.isna(search_val) and zero_warehouses:
+            coef = coefficients_dict.get(query_group)
+            if coef is not None:
+                avg_order_value = None
+                lookup_data = app_lookup.get((snapshot_date, nm_id))
+                if lookup_data is not None:
+                    order_sum, order_count, wb_buyer_price = lookup_data
+                    if order_count is not None and order_count > 0 and order_sum is not None:
+                        avg_order_value = float(order_sum) / float(order_count)
+                    elif wb_buyer_price is not None and not pd.isna(wb_buyer_price):
+                        avg_order_value = float(wb_buyer_price)
+                
+                if avg_order_value is not None:
+                    sum_share = 0.0
+                    missing_component = False
+                    for wh in zero_warehouses:
+                        wh_info = warehouse_areas_dict.get(wh)
+                        if wh_info is None:
+                            missing_component = True
+                            break
+                        market_area_code, pop_share = wh_info
+                        if pop_share is None or pd.isna(pop_share):
+                            missing_component = True
+                            break
+                        sum_share += float(pop_share)
+                    
+                    if not missing_component:
+                        lost_impressions = float(search_val) * sum_share / 100.0
+                        lost_orders = lost_impressions * float(coef)
+                        lost_profit_val = lost_orders * float(avg_order_value)
+        row["lost_profit_rub"] = lost_profit_val
+
         rows.append(row)
 
     result = pd.DataFrame(rows)
@@ -2616,12 +2777,12 @@ def render_compact_metric_css() -> None:
 def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataFrame:
     if product_table.empty:
         return pd.DataFrame(
-            columns=["nm_id", "tracked_label", "query_group", "lifecycle_status", "zero_warehouses", "no_data_warehouses", "problem_status"]
+            columns=["nm_id", "tracked_label", "query_group", "lifecycle_status", "zero_warehouses", "no_data_warehouses", "search_queries", "lost_profit_rub", "problem_status"]
         )
     status_column = "problem_status" if "problem_status" in product_table.columns else "stock_status"
     return product_table.loc[
         product_table[status_column].ne(STOCK_STATUS_OK),
-        ["nm_id", "tracked_label", "query_group", "lifecycle_status", "zero_warehouses", "no_data_warehouses", status_column],
+        ["nm_id", "tracked_label", "query_group", "lifecycle_status", "zero_warehouses", "no_data_warehouses", "search_queries", "lost_profit_rub", status_column],
     ].copy()
 
 
@@ -2672,6 +2833,8 @@ def build_stock_warehouse_display_dataframe(
                 "lifecycle_status": "Статус товара",
                 "zero_warehouses": "Нулевые склады",
                 "no_data_warehouses": "Склады без данных",
+                "search_queries": "Поисковые запросы",
+                "lost_profit_rub": "Упущенная выгода, ₽",
             }
         )
         return display_df.reindex(
@@ -2682,6 +2845,8 @@ def build_stock_warehouse_display_dataframe(
                 "Статус товара",
                 "Нулевые склады",
                 "Склады без данных",
+                "Поисковые запросы",
+                "Упущенная выгода, ₽",
                 "Проблема",
             ]
         )
@@ -2696,6 +2861,8 @@ def build_stock_warehouse_display_dataframe(
             "warehouses_with_stock": "Складов в наличии",
             "zero_warehouses_count": "Складов с нулём",
             "no_data_warehouses_count": "Складов без данных",
+            "search_queries": "Поисковые запросы",
+            "lost_profit_rub": "Упущенная выгода, ₽",
         }
     )
     return display_df.drop(
@@ -2755,6 +2922,8 @@ def prepare_stock_warehouse_table_for_display(
         "Складов в наличии",
         "Складов с нулём",
         "Складов без данных",
+        "Поисковые запросы",
+        "Упущенная выгода, ₽",
     }
     safe_df = sanitize_dataframe_for_streamlit_display(df, numeric_columns=numeric_columns)
     return style_stock_warehouse_table(safe_df, warehouse_columns)

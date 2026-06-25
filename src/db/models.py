@@ -284,6 +284,27 @@ class SettingsLostProfitWarehouseArea(Base):
     )
 
 
+class SettingsLostProfitQueryGroupCoefficient(Base):
+    __tablename__ = "settings_lost_profit_query_group_coefficients"
+
+    query_group: Mapped[str] = mapped_column(Text, primary_key=True)
+    search_to_order_conversion: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    approval_status: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="pending_ivan_review",
+        server_default="pending_ivan_review",
+    )
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class FactFunnelDay(Base, StatusMixin):
     __tablename__ = "fact_funnel_day"
     __table_args__ = (

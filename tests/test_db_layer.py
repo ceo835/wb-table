@@ -34,6 +34,7 @@ from src.db.models import (
     RawApiResponse,
     SettingsLostProfitMarketArea,
     SettingsLostProfitWarehouseArea,
+    SettingsLostProfitQueryGroupCoefficient,
     SettingsProducts,
     SettingsReportColumns,
     ValidationWarning,
@@ -48,6 +49,7 @@ def test_db_models_import():
     assert MartTotalReport.__tablename__ == "mart_total_report"
     assert SettingsLostProfitMarketArea.__tablename__ == "settings_lost_profit_market_areas"
     assert SettingsLostProfitWarehouseArea.__tablename__ == "settings_lost_profit_warehouse_areas"
+    assert SettingsLostProfitQueryGroupCoefficient.__tablename__ == "settings_lost_profit_query_group_coefficients"
 
 
 def test_db_metadata_contains_expected_tables():
@@ -62,6 +64,7 @@ def test_db_metadata_contains_expected_tables():
         "settings_report_columns",
         "settings_lost_profit_market_areas",
         "settings_lost_profit_warehouse_areas",
+        "settings_lost_profit_query_group_coefficients",
         "fact_funnel_day",
         "fact_ad_cost_event",
         "fact_ad_cost_day",
@@ -108,6 +111,7 @@ def test_metadata_includes_requested_dimension_and_fact_models():
         SettingsReportColumns,
         SettingsLostProfitMarketArea,
         SettingsLostProfitWarehouseArea,
+        SettingsLostProfitQueryGroupCoefficient,
         FactAdCostDay,
         FactAdCampaignDay,
         FactAdCampaignNmDay,
