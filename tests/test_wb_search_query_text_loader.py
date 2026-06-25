@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import pytest
 
 from src.db.wb_search_query_text_loader import (
     FACT_WB_SEARCH_QUERY_TEXT_DAY_CONFLICT_COLUMNS,
@@ -254,3 +255,178 @@ def test_load_search_text_rows_apply_writes_rows(monkeypatch) -> None:
     assert summary["write_executed"] is True
     assert summary["rows_loaded"] == 1
     assert calls["upserted"] == 1
+
+
+def test_fetch_search_texts_payload_raises_on_too_many_nm_ids() -> None:
+    from src.db.wb_search_query_text_loader import fetch_search_texts_payload
+    with pytest.raises(ValueError, match="nm_ids size cannot exceed 50"):
+        fetch_search_texts_payload(
+            target_day=date(2026, 6, 24),
+            nm_ids=list(range(51)),
+        )
+
+
+def test_fetch_search_texts_payload_no_fallback_on_nm_ids_error(monkeypatch) -> None:
+    from src.db.wb_search_query_text_loader import fetch_search_texts_payload
+    import requests
+
+    class FakeResponse:
+        status_code = 400
+        text = "nmIds (array: len 58 greater than maximum 50)"
+        def json(self):
+            return {"detail": self.text}
+
+    def fake_post(*args, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    monkeypatch.setattr("src.db.wb_search_query_text_loader._headers", lambda: {})
+
+    res = fetch_search_texts_payload(
+        target_day=date(2026, 6, 24),
+        nm_ids=[1, 2],
+    )
+
+    assert res["status"] == "400"
+    assert len(res["request_attempts"]) == 1 # No fallback limit attempts!
+
+
+def test_load_search_text_rows_batches_correctly(monkeypatch) -> None:
+    batch_calls = []
+
+    def fake_fetch(*, target_day, nm_ids, limit):
+        batch_calls.append(list(nm_ids))
+        return {
+            "status": "200",
+            "limit_used": limit,
+            "items": [{"nmId": nm, "text": "test_query"} for nm in nm_ids],
+            "fallback_used": False,
+        }
+
+    monkeypatch.setattr("src.db.wb_search_query_text_loader.fetch_search_texts_payload", fake_fetch)
+
+    # 58 products
+    products = [{"nm_id": i, "query_group": "women_underwear"} for i in range(1, 59)]
+    summary = load_search_text_rows(
+        target_day=date(2026, 6, 24),
+        products=products,
+        apply=False,
+        nm_batch_size=50,
+        request_sleep_seconds=0.0,
+    )
+
+    assert len(batch_calls) == 2
+    assert len(batch_calls[0]) == 50
+    assert len(batch_calls[1]) == 8
+    assert summary["batches_total"] == 2
+    assert summary["batches_succeeded"] == 2
+    assert summary["batches_failed"] == 0
+    assert summary["api_status_by_batch"] == ["200", "200"]
+    assert summary["rows_prepared"] == 58
+
+
+def test_load_search_text_rows_validates_batch_size() -> None:
+    with pytest.raises(ValueError, match="nm_batch_size cannot exceed 50"):
+        load_search_text_rows(
+            target_day=date(2026, 6, 24),
+            products=[],
+            nm_batch_size=51,
+        )
+
+
+def test_load_search_text_rows_aborts_on_429_and_prevents_write(monkeypatch) -> None:
+    batch_calls = []
+
+    def fake_fetch(*, target_day, nm_ids, limit):
+        batch_calls.append(list(nm_ids))
+        return {
+            "status": "429",
+            "limit_used": limit,
+            "items": [],
+            "fallback_used": False,
+            "error": "Too Many Requests",
+            "request_attempts": [{"status": "429", "limit": limit, "error": "Too Many Requests"}]
+        }
+
+    calls = {"upserted": 0}
+    def fake_upsert(session, rows):
+        calls["upserted"] += len(rows)
+        return len(rows)
+
+    @contextmanager
+    def _dummy_session_scope():
+        yield object()
+
+    monkeypatch.setattr("src.db.wb_search_query_text_loader.fetch_search_texts_payload", fake_fetch)
+    monkeypatch.setattr("src.db.wb_search_query_text_loader.upsert_fact_wb_search_query_text_day", fake_upsert)
+    monkeypatch.setattr("src.db.wb_search_query_text_loader.session_scope", _dummy_session_scope)
+
+    # 58 products -> batching should make 2 batches: 50 and 8
+    products = [{"nm_id": i, "query_group": "women_underwear"} for i in range(1, 59)]
+    summary = load_search_text_rows(
+        target_day=date(2026, 6, 24),
+        products=products,
+        apply=True,
+        nm_batch_size=50,
+        request_sleep_seconds=0.0,
+        max_retries=1, # 1 retry -> total 2 calls per batch
+    )
+
+    # Should fail on first batch and abort. First batch: 1 main call + 1 retry = 2 calls
+    assert len(batch_calls) == 2 # 2 calls for the first batch, none for the second
+    assert summary["batches_total"] == 2
+    assert summary["batches_succeeded"] == 0
+    assert summary["batches_failed"] == 1
+    assert summary["api_status_by_batch"] == ["429"]
+    assert summary["partial_write_prevented"] is True
+    assert summary["write_executed"] is False
+    assert summary["rows_loaded"] == 0
+    assert calls["upserted"] == 0
+
+
+def test_load_search_text_rows_all_or_nothing_apply(monkeypatch) -> None:
+    batch_idx = 0
+    def fake_fetch(*, target_day, nm_ids, limit):
+        nonlocal batch_idx
+        status = "200" if batch_idx == 0 else "500"
+        batch_idx += 1
+        return {
+            "status": status,
+            "limit_used": limit,
+            "items": [{"nmId": nm, "text": "query"} for nm in nm_ids] if status == "200" else [],
+            "fallback_used": False,
+            "error": "" if status == "200" else "Internal Error",
+            "request_attempts": [{"status": status, "limit": limit, "error": "" if status == "200" else "Internal Error"}]
+        }
+
+    calls = {"upserted": 0}
+    def fake_upsert(session, rows):
+        calls["upserted"] += len(rows)
+        return len(rows)
+
+    @contextmanager
+    def _dummy_session_scope():
+        yield object()
+
+    monkeypatch.setattr("src.db.wb_search_query_text_loader.fetch_search_texts_payload", fake_fetch)
+    monkeypatch.setattr("src.db.wb_search_query_text_loader.upsert_fact_wb_search_query_text_day", fake_upsert)
+    monkeypatch.setattr("src.db.wb_search_query_text_loader.session_scope", _dummy_session_scope)
+
+    products = [{"nm_id": i, "query_group": "women_underwear"} for i in range(1, 59)]
+    summary = load_search_text_rows(
+        target_day=date(2026, 6, 24),
+        products=products,
+        apply=True,
+        nm_batch_size=50,
+        request_sleep_seconds=0.0,
+    )
+
+    # First batch succeeded, second failed -> nothing written
+    assert summary["batches_total"] == 2
+    assert summary["batches_succeeded"] == 1
+    assert summary["batches_failed"] == 1
+    assert summary["api_status_by_batch"] == ["200", "500"]
+    assert summary["partial_write_prevented"] is True
+    assert summary["write_executed"] is False
+    assert summary["rows_loaded"] == 0
+    assert calls["upserted"] == 0

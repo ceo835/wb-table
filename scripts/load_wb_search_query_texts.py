@@ -30,6 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--problem-products", action="store_true", help="Use problem-products scope from latest warehouse snapshot.")
     parser.add_argument("--known-query-group-only", action="store_true", help="Exclude null/unknown query_group.")
     parser.add_argument("--limit", type=int, default=DEFAULT_SEARCH_TEXT_LIMIT, help="WB API limit. Default: 100.")
+    parser.add_argument("--nm-batch-size", type=int, default=50, help="Batch size for nmIds. Default: 50, maximum: 50.")
+    parser.add_argument("--request-sleep-seconds", type=float, default=2.0, help="Sleep duration between requests in seconds. Default: 2.0.")
+    parser.add_argument("--max-retries", type=int, default=1, help="Max retries for 429 errors. Default: 1.")
     parser.add_argument("--dry-run", action="store_true", help="Explicit dry-run mode.")
     parser.add_argument("--apply", action="store_true", help="Write rows to PostgreSQL.")
     return parser.parse_args()
@@ -37,6 +40,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.nm_batch_size > 50:
+        sys.stderr.write("Error: nm-batch-size cannot be greater than 50\n")
+        return 1
+
     apply = bool(args.apply and not args.dry_run)
     tracked_scope = bool(args.tracked_products or (not args.nm_ids and not args.problem_products))
 
@@ -62,6 +69,9 @@ def main() -> int:
         products=deduped_products,
         apply=apply,
         limit=int(args.limit),
+        nm_batch_size=args.nm_batch_size,
+        request_sleep_seconds=args.request_sleep_seconds,
+        max_retries=args.max_retries,
     )
     summary["scope_mode"] = (
         "nm_id"

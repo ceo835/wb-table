@@ -101,6 +101,9 @@ def fetch_search_texts_payload(
     limit: int = DEFAULT_SEARCH_TEXT_LIMIT,
     timeout_seconds: int = 60,
 ) -> dict[str, Any]:
+    if len(nm_ids) > 50:
+        raise ValueError("nm_ids size cannot exceed 50")
+
     request_attempts: list[dict[str, Any]] = []
     session = requests.Session()
     attempt_limits = [int(limit)]
@@ -140,6 +143,9 @@ def fetch_search_texts_payload(
                 "fallback_used": attempt_limit != int(limit),
                 "request_attempts": request_attempts,
             }
+
+        if "nmIds" in error_text or "greater than maximum" in error_text:
+            break
 
     last_attempt = request_attempts[-1]
     return {
@@ -356,7 +362,13 @@ def load_search_text_rows(
     apply: bool = False,
     limit: int = DEFAULT_SEARCH_TEXT_LIMIT,
     fetcher=None,
+    nm_batch_size: int = 50,
+    request_sleep_seconds: float = 2.0,
+    max_retries: int = 1,
 ) -> dict[str, Any]:
+    if nm_batch_size > 50:
+        raise ValueError("nm_batch_size cannot exceed 50")
+
     scoped_products = list(products)
     nm_ids = sorted(
         {
@@ -379,47 +391,114 @@ def load_search_text_rows(
             "request_attempts": [],
             "aggregated_query_group_rows": [],
             "top_queries": [],
+            "nm_batch_size": nm_batch_size,
+            "batches_total": 0,
+            "batches_succeeded": 0,
+            "batches_failed": 0,
+            "api_status_by_batch": [],
+            "partial_write_prevented": False,
         }
 
-    fetch_fn = fetcher or fetch_search_texts_payload
-    fetch_result = fetch_fn(target_day=target_day, nm_ids=nm_ids, limit=limit)
-    rows = normalize_search_text_day_rows(
-        payload={"data": {"items": fetch_result.get("items", [])}},
-        target_day=target_day,
-        query_group_by_nm={
-            int(product["nm_id"]): _text_or_none(product.get("query_group"))
-            for product in scoped_products
-            if product.get("nm_id") is not None
-        },
-    )
-    prepared_rows = prepare_fact_wb_search_query_text_day_upsert_rows(rows)
+    batches = [nm_ids[i : i + nm_batch_size] for i in range(0, len(nm_ids), nm_batch_size)]
 
+    import time
+    fetch_fn = fetcher or fetch_search_texts_payload
+
+    all_items = []
+    request_attempts = []
+    api_status_by_batch = []
+    batches_succeeded = 0
+    batches_failed = 0
+
+    last_fetch_result = None
+    first_failed_result = None
+
+    for idx, batch_nm_ids in enumerate(batches):
+        if idx > 0 and request_sleep_seconds > 0:
+            time.sleep(request_sleep_seconds)
+
+        attempt = 0
+        fetch_result = None
+        while attempt <= max_retries:
+            fetch_result = fetch_fn(target_day=target_day, nm_ids=batch_nm_ids, limit=limit)
+            status = fetch_result.get("status")
+            if status == "429":
+                attempt += 1
+                if attempt <= max_retries:
+                    if request_sleep_seconds > 0:
+                        time.sleep(request_sleep_seconds)
+                    continue
+            break
+
+        status = fetch_result.get("status")
+        api_status_by_batch.append(status)
+        request_attempts.extend(fetch_result.get("request_attempts", []))
+        last_fetch_result = fetch_result
+
+        if status == "200":
+            batches_succeeded += 1
+            all_items.extend(fetch_result.get("items", []))
+        else:
+            batches_failed += 1
+            first_failed_result = fetch_result
+            break
+
+    has_failed = batches_failed > 0
+    partial_write_prevented = False
+
+    rows = []
+    prepared_rows = []
     rows_loaded = 0
     rows_in_db = 0
-    if apply and prepared_rows:
-        with session_scope() as session:
-            rows_loaded = upsert_fact_wb_search_query_text_day(session, prepared_rows)
-            if hasattr(session, "execute"):
-                rows_in_db = count_loaded_search_text_rows(session, target_day, nm_ids)
-            else:
-                rows_in_db = rows_loaded
+    write_executed = False
+
+    if has_failed:
+        if apply:
+            partial_write_prevented = True
+    else:
+        rows = normalize_search_text_day_rows(
+            payload={"data": {"items": all_items}},
+            target_day=target_day,
+            query_group_by_nm={
+                int(product["nm_id"]): _text_or_none(product.get("query_group"))
+                for product in scoped_products
+                if product.get("nm_id") is not None
+            },
+        )
+        prepared_rows = prepare_fact_wb_search_query_text_day_upsert_rows(rows)
+        if apply and prepared_rows:
+            with session_scope() as session:
+                rows_loaded = upsert_fact_wb_search_query_text_day(session, prepared_rows)
+                if hasattr(session, "execute"):
+                    rows_in_db = count_loaded_search_text_rows(session, target_day, nm_ids)
+                else:
+                    rows_in_db = rows_loaded
+            write_executed = True
 
     aggregated_rows = aggregate_search_text_rows_by_query_group(prepared_rows)
+    final_result = first_failed_result if has_failed else last_fetch_result
+
     return {
         "target_day": target_day.isoformat(),
         "products_selected": len(scoped_products),
         "nm_ids": nm_ids,
-        "api_status": fetch_result.get("status"),
-        "api_error": fetch_result.get("error", ""),
+        "api_status": final_result.get("status"),
+        "api_error": final_result.get("error", ""),
         "limit_requested": int(limit),
-        "limit_used": int(fetch_result.get("limit_used", limit)),
-        "fallback_used": bool(fetch_result.get("fallback_used")),
-        "request_attempts": list(fetch_result.get("request_attempts", [])),
-        "rows_fetched": len(fetch_result.get("items", [])),
+        "limit_used": int(final_result.get("limit_used", limit)),
+        "fallback_used": bool(final_result.get("fallback_used")),
+        "request_attempts": request_attempts,
+        "rows_fetched": len(all_items),
         "rows_prepared": len(prepared_rows),
         "rows_loaded": rows_loaded,
         "rows_in_db": rows_in_db,
-        "write_executed": bool(apply and prepared_rows),
+        "write_executed": write_executed,
         "aggregated_query_group_rows": aggregated_rows,
         "top_queries": aggregated_rows[:20],
+        "nm_batch_size": nm_batch_size,
+        "batches_total": len(batches),
+        "batches_succeeded": batches_succeeded,
+        "batches_failed": batches_failed,
+        "api_status_by_batch": api_status_by_batch,
+        "partial_write_prevented": partial_write_prevented,
     }
