@@ -562,12 +562,14 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
     assert problem_display.columns.tolist() == [
         "Артикул WB",
         "Название",
+        "Товарная группа",
         "Статус товара",
         "Нулевые склады",
         "Склады без данных",
         "Проблема",
     ]
     assert problem_display.loc[0, "Проблема"] == "Есть нулевые остатки"
+    assert problem_display.loc[0, "Товарная группа"] == "Не определена"
 
 
 def test_attach_stock_query_groups_reads_query_group_from_settings_products() -> None:

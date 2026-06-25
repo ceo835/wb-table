@@ -2626,12 +2626,12 @@ def render_compact_metric_css() -> None:
 def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataFrame:
     if product_table.empty:
         return pd.DataFrame(
-            columns=["nm_id", "tracked_label", "lifecycle_status", "zero_warehouses", "no_data_warehouses", "problem_status"]
+            columns=["nm_id", "tracked_label", "query_group", "lifecycle_status", "zero_warehouses", "no_data_warehouses", "problem_status"]
         )
     status_column = "problem_status" if "problem_status" in product_table.columns else "stock_status"
     return product_table.loc[
         product_table[status_column].ne(STOCK_STATUS_OK),
-        ["nm_id", "tracked_label", "lifecycle_status", "zero_warehouses", "no_data_warehouses", status_column],
+        ["nm_id", "tracked_label", "query_group", "lifecycle_status", "zero_warehouses", "no_data_warehouses", status_column],
     ].copy()
 
 
@@ -2683,6 +2683,7 @@ def build_stock_warehouse_display_dataframe(
             columns={
                 "nm_id": "Артикул WB",
                 "tracked_label": "Название",
+                "query_group": "Товарная группа",
                 "lifecycle_status": "Статус товара",
                 "zero_warehouses": "Нулевые склады",
                 "no_data_warehouses": "Склады без данных",
@@ -2692,6 +2693,7 @@ def build_stock_warehouse_display_dataframe(
             columns=[
                 "Артикул WB",
                 "Название",
+                "Товарная группа",
                 "Статус товара",
                 "Нулевые склады",
                 "Склады без данных",
