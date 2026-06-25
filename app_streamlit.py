@@ -82,6 +82,17 @@ STOCK_HISTORY_ANOMALY_ALWAYS_IN_STOCK = "ALWAYS_IN_STOCK"
 STOCK_HISTORY_ANOMALY_MIXED_ZERO_AND_STOCK = "MIXED_ZERO_AND_STOCK"
 STOCK_HISTORY_ANOMALY_MIXED_NO_DATA_AND_STOCK = "MIXED_NO_DATA_AND_STOCK"
 STOCK_HISTORY_ANOMALY_UNSTABLE = "UNSTABLE"
+QUERY_GROUP_UNDEFINED_LABEL = "Не определена"
+QUERY_GROUP_ALLOWED_VALUES = (
+    "women_underwear",
+    "men_underwear",
+    "kids_underwear",
+    "women_tshirts",
+    "men_tshirts",
+    "longsleeves",
+    "gift_sets",
+    "unknown",
+)
 WB_SITE_PRICE_ALERT_OK = "OK"
 WB_SITE_PRICE_ALERT_CHANGED = "PRICE_CHANGED_50"
 WB_SITE_PRICE_ALERT_NO_DATA = "NO_PRICE_DATA"
@@ -1934,6 +1945,77 @@ def load_stock_warehouse_snapshot_from_db() -> pd.DataFrame:
     return pd.DataFrame(materialized_rows)
 
 
+@st.cache_data(show_spinner=False)
+def load_settings_product_query_groups_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(
+                    SettingsProducts.nm_id,
+                    SettingsProducts.query_group,
+                ).order_by(SettingsProducts.nm_id.asc())
+            ).all()
+    except Exception:
+        logger.exception("Failed to load query_group from settings_products for stock warehouse tab")
+        return pd.DataFrame(columns=["nm_id", "query_group"])
+    return pd.DataFrame(
+        [
+            {
+                "nm_id": row.nm_id,
+                "query_group": row.query_group,
+            }
+            for row in rows
+        ]
+    )
+
+
+def attach_stock_query_groups(
+    tracked_df: pd.DataFrame,
+    query_group_df: pd.DataFrame,
+) -> pd.DataFrame:
+    tracked_prepared = tracked_df.copy()
+    if "query_group" in tracked_prepared.columns:
+        tracked_prepared = tracked_prepared.drop(columns=["query_group"])
+    if "nm_id" not in tracked_prepared.columns:
+        tracked_prepared["query_group"] = pd.NA
+        return tracked_prepared
+
+    tracked_prepared["nm_id"] = pd.to_numeric(tracked_prepared["nm_id"], errors="coerce")
+    query_group_prepared = query_group_df.copy()
+    if query_group_prepared.empty:
+        tracked_prepared["query_group"] = pd.NA
+        return tracked_prepared
+
+    for column in ("nm_id", "query_group"):
+        if column not in query_group_prepared.columns:
+            query_group_prepared[column] = pd.NA
+    query_group_prepared["nm_id"] = pd.to_numeric(query_group_prepared["nm_id"], errors="coerce")
+    query_group_prepared = query_group_prepared.dropna(subset=["nm_id"]).copy()
+    if query_group_prepared.empty:
+        tracked_prepared["query_group"] = pd.NA
+        return tracked_prepared
+
+    query_group_prepared["nm_id"] = query_group_prepared["nm_id"].astype(int)
+    query_group_prepared["query_group"] = (
+        query_group_prepared["query_group"]
+        .where(query_group_prepared["query_group"].notna(), pd.NA)
+        .astype("string")
+        .str.strip()
+        .replace("", pd.NA)
+    )
+    query_group_prepared.loc[
+        ~query_group_prepared["query_group"].isin(QUERY_GROUP_ALLOWED_VALUES),
+        "query_group",
+    ] = pd.NA
+    query_group_prepared = query_group_prepared.drop_duplicates(subset=["nm_id"], keep="first")
+
+    return tracked_prepared.merge(
+        query_group_prepared[["nm_id", "query_group"]],
+        on="nm_id",
+        how="left",
+    )
+
+
 def prepare_stock_warehouse_snapshot_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     expected_columns = [
         "snapshot_date",
@@ -2348,7 +2430,7 @@ def build_stock_warehouse_product_table(
         main_warehouse_names = warehouse_names.copy()
     snapshot_prepared = prepare_stock_warehouse_snapshot_dataframe(snapshot_df)
     tracked_prepared = tracked_df.copy()
-    for column in ("nm_id", "tracked_label", "is_tracked", "lifecycle_status"):
+    for column in ("nm_id", "tracked_label", "is_tracked", "lifecycle_status", "query_group"):
         if column not in tracked_prepared.columns:
             tracked_prepared[column] = pd.NA
     if not tracked_prepared.empty:
@@ -2366,7 +2448,7 @@ def build_stock_warehouse_product_table(
         snapshot_prepared.loc[snapshot_prepared["snapshot_date"] == snapshot_date, "nm_id"].dropna().astype(int).tolist()
     )
 
-    tracked_columns = ["nm_id", "tracked_label", "is_tracked", "lifecycle_status"]
+    tracked_columns = ["nm_id", "tracked_label", "is_tracked", "lifecycle_status", "query_group"]
     if show_only_tracked:
         base_products = tracked_prepared.loc[tracked_prepared["is_tracked"], tracked_columns].copy()
     else:
@@ -2387,6 +2469,7 @@ def build_stock_warehouse_product_table(
             columns=[
                 "nm_id",
                 "tracked_label",
+                "query_group",
                 "lifecycle_status",
                 *warehouse_names,
                 "total_main_warehouses",
@@ -2420,6 +2503,7 @@ def build_stock_warehouse_product_table(
         row: dict[str, object] = {
             "nm_id": nm_id,
             "tracked_label": product_row.get("tracked_label"),
+            "query_group": product_row.get("query_group"),
             "lifecycle_status": product_row.get("lifecycle_status") or "not_tracked",
         }
         zero_warehouses: list[str] = []
@@ -2578,6 +2662,15 @@ def build_stock_warehouse_display_dataframe(
         safe_df["lifecycle_status"] = safe_df["lifecycle_status"].map(
             lambda value: lifecycle_label_map.get(str(value), value)
         )
+    if "query_group" in safe_df.columns:
+        safe_df["query_group"] = (
+            safe_df["query_group"]
+            .where(safe_df["query_group"].notna(), pd.NA)
+            .astype("string")
+            .str.strip()
+            .replace("", pd.NA)
+            .fillna(QUERY_GROUP_UNDEFINED_LABEL)
+        )
 
     status_column = "problem_status" if "problem_status" in safe_df.columns else "stock_status"
     if status_column in safe_df.columns:
@@ -2610,6 +2703,7 @@ def build_stock_warehouse_display_dataframe(
         columns={
             "nm_id": "Артикул WB",
             "tracked_label": "Название",
+            "query_group": "Товарная группа",
             "lifecycle_status": "Статус товара",
             "total_main_warehouses": "Итого по осн. складам",
             "warehouses_with_stock": "Складов в наличии",
@@ -2697,6 +2791,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         return
 
     tracked_df = load_tracked_products()
+    tracked_df = attach_stock_query_groups(tracked_df, load_settings_product_query_groups_from_db())
     main_warehouses = load_main_wb_warehouses(
         str(MAIN_WB_WAREHOUSES_PATH),
         MAIN_WB_WAREHOUSES_PATH.stat().st_mtime if MAIN_WB_WAREHOUSES_PATH.exists() else None,
@@ -2757,6 +2852,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
     display_columns = [
         "nm_id",
         "tracked_label",
+        "query_group",
         "lifecycle_status",
         *selected_warehouses,
         "total_main_warehouses",

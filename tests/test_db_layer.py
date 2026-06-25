@@ -154,6 +154,7 @@ def test_settings_products_contains_discovery_fields():
         "is_new",
         "report_mode",
         "group_name",
+        "query_group",
         "item_type",
         "source_list",
         "first_seen_at",

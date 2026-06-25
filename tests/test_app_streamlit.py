@@ -21,6 +21,7 @@ from app_streamlit import (
     apply_display_min_date_filter,
     apply_tracked_scope_filters,
     aggregate_ivan_manual_ads_for_charts,
+    attach_stock_query_groups,
     build_streamlit_display_min_date_caption,
     build_band_summary_table,
     build_category_summary_table,
@@ -325,12 +326,14 @@ def test_build_stock_warehouse_product_table_aggregates_chrt_rows_and_keeps_miss
                 "tracked_label": "BlackWOM5",
                 "is_tracked": True,
                 "lifecycle_status": "active",
+                "query_group": "women_underwear",
             },
             {
                 "nm_id": 320893265,
                 "tracked_label": "коты 4 большие",
                 "is_tracked": True,
                 "lifecycle_status": "active",
+                "query_group": pd.NA,
             },
         ]
     )
@@ -349,12 +352,14 @@ def test_build_stock_warehouse_product_table_aggregates_chrt_rows_and_keeps_miss
 
     assert product_row["Владимир WB"] == 12
     assert product_row["Тула"] == 0
+    assert product_row["query_group"] == "women_underwear"
     assert product_row["zero_warehouses_count"] == 1
     assert product_row["no_data_warehouses_count"] == 0
     assert product_row["stock_status"] == "ZERO_ON_WAREHOUSE"
 
     assert pd.isna(missing_row["Владимир WB"])
     assert pd.isna(missing_row["Тула"])
+    assert pd.isna(missing_row["query_group"])
     assert missing_row["no_data_warehouses_count"] == 2
     assert missing_row["stock_status"] == "NO_STOCK_DATA_FOR_PRODUCT"
 
@@ -519,6 +524,7 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
             {
                 "nm_id": 197330807,
                 "tracked_label": "BlackWOM5",
+                "query_group": pd.NA,
                 "lifecycle_status": "active",
                 "Владимир WB": "NO_DATA",
                 "Тула": 0,
@@ -539,6 +545,13 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
 
     assert "problem_status" not in main_display.columns
     assert "Проблема" in main_display.columns
+    assert main_display.columns[:4].tolist() == [
+        "Артикул WB",
+        "Название",
+        "Товарная группа",
+        "Статус товара",
+    ]
+    assert main_display.loc[0, "Товарная группа"] == "Не определена"
     assert main_display.loc[0, "Статус товара"] == "Основной"
     assert main_display.loc[0, "Проблема"] == "Есть нулевые остатки"
     assert main_display.loc[0, "Владимир WB"] == "—"
@@ -555,6 +568,27 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
         "Проблема",
     ]
     assert problem_display.loc[0, "Проблема"] == "Есть нулевые остатки"
+
+
+def test_attach_stock_query_groups_reads_query_group_from_settings_products() -> None:
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 1, "tracked_label": "A", "is_tracked": True, "lifecycle_status": "active"},
+            {"nm_id": 2, "tracked_label": "B", "is_tracked": True, "lifecycle_status": "active"},
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {"nm_id": 1, "query_group": "women_underwear"},
+            {"nm_id": 2, "query_group": ""},
+            {"nm_id": 3, "query_group": "unsupported_group"},
+        ]
+    )
+
+    result = attach_stock_query_groups(tracked_df, settings_df)
+
+    assert result.loc[result["nm_id"] == 1, "query_group"].iloc[0] == "women_underwear"
+    assert pd.isna(result.loc[result["nm_id"] == 2, "query_group"].iloc[0])
 
 
 def test_build_wb_site_price_monitor_dataframe_uses_russian_problem_labels() -> None:

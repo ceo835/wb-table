@@ -199,6 +199,7 @@ class SettingsProducts(Base, TimestampMixin):
     subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
     group_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    query_group: Mapped[str | None] = mapped_column(String(64), nullable=True)
     item_type: Mapped[str] = mapped_column(String(32), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_new: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
