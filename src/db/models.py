@@ -575,6 +575,36 @@ class FactSearchQueryMetric(Base, StatusMixin):
     max_discount_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
 
 
+class FactWbSearchQueryTextDay(Base, TimestampMixin):
+    __tablename__ = "fact_wb_search_query_text_day"
+    __table_args__ = (
+        UniqueConstraint("day", "nm_id", "query_text", name="uq_fact_wb_search_query_text_day_day_nm_query_text"),
+        Index("idx_fact_wb_search_query_text_day_day_nm", "day", "nm_id"),
+        Index("idx_fact_wb_search_query_text_day_query_group", "query_group", "day"),
+        Index("idx_fact_wb_search_query_text_day_source", "source", "day"),
+    )
+
+    fact_wb_search_query_text_day_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    query_text: Mapped[str] = mapped_column(Text, nullable=False)
+    query_group: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    frequency_current: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    week_frequency: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    orders_current: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    visibility_current: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    avg_position_current: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    open_card_current: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    add_to_cart_current: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="wb_search_texts_api",
+        server_default="wb_search_texts_api",
+    )
+    raw_payload: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+
+
 class FactStockSnapshot(Base, StatusMixin):
     __tablename__ = "fact_stock_snapshot"
     __table_args__ = (
