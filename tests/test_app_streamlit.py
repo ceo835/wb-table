@@ -589,8 +589,35 @@ def test_attach_stock_query_groups_reads_query_group_from_settings_products() ->
 
     result = attach_stock_query_groups(tracked_df, settings_df)
 
-    assert result.loc[result["nm_id"] == 1, "query_group"].iloc[0] == "women_underwear"
+    assert result.loc[result["nm_id"] == 1, "query_group"].iloc[0] == "трусы женские"
     assert pd.isna(result.loc[result["nm_id"] == 2, "query_group"].iloc[0])
+
+
+def test_build_stock_warehouse_display_dataframe_shows_russian_query_group_labels() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "nm_id": 197330807,
+                "tracked_label": "BlackWOM5",
+                "query_group": "men_tshirts",
+                "lifecycle_status": "active",
+                "Владимир WB": 1,
+                "Тула": 0,
+                "zero_warehouses_count": 1,
+                "no_data_warehouses_count": 0,
+                "problem_status": "ZERO_ON_MAIN_WAREHOUSES",
+                "zero_warehouses": "Тула",
+                "no_data_warehouses": "",
+                "problem_warehouses": "Тула",
+                "total_main_warehouses": 1,
+                "warehouses_with_stock": 1,
+            }
+        ]
+    )
+
+    main_display = build_stock_warehouse_display_dataframe(df, problem_table=False)
+
+    assert main_display.loc[0, "Товарная группа"] == "мужская футболка"
 
 
 def test_build_wb_site_price_monitor_dataframe_uses_russian_problem_labels() -> None:

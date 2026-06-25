@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from src.config.settings import settings
 from src.db.funnel_loader import _to_date_or_none, _to_datetime_or_none, _to_decimal_or_none
 from src.db.models import FactStockWarehouseSnapshot, FactWbSearchQueryTextDay, SettingsProducts
-from src.db.product_query_group_backfill import QUERY_GROUP_UNKNOWN, QUERY_GROUP_VALUES
+from src.db.product_query_group_backfill import QUERY_GROUP_UNKNOWN, QUERY_GROUP_VALUES, normalize_query_group_value
 from src.db.session import session_scope, upsert_rows
 from src.tracked_products import TRACKED_PRODUCTS_PATH, get_tracked_nm_ids
 
@@ -174,7 +174,7 @@ def normalize_search_text_day_rows(
                 "day": target_day,
                 "nm_id": nm_id,
                 "query_text": query_text,
-                "query_group": _text_or_none(query_group_map.get(nm_id)),
+                "query_group": normalize_query_group_value(query_group_map.get(nm_id)),
                 "frequency_current": _to_int_or_none(_nested_current_value(item, "frequency")),
                 "week_frequency": _to_int_or_none(item.get("weekFrequency")),
                 "orders_current": _to_int_or_none(_nested_current_value(item, "orders")),
@@ -197,7 +197,7 @@ def prepare_fact_wb_search_query_text_day_upsert_rows(rows: Sequence[Mapping[str
             "day": _to_date_or_none(row.get("day")),
             "nm_id": _to_int_or_none(row.get("nm_id")),
             "query_text": _text_or_none(row.get("query_text")),
-            "query_group": _text_or_none(row.get("query_group")),
+            "query_group": normalize_query_group_value(row.get("query_group")),
             "frequency_current": _to_int_or_none(row.get("frequency_current")),
             "week_frequency": _to_int_or_none(row.get("week_frequency")),
             "orders_current": _to_int_or_none(row.get("orders_current")),
@@ -235,7 +235,7 @@ def filter_products_with_known_query_group(products: Sequence[Mapping[str, Any]]
     filtered: list[dict[str, Any]] = []
     for product in products:
         nm_id = _to_int_or_none(product.get("nm_id"))
-        query_group = _text_or_none(product.get("query_group"))
+        query_group = normalize_query_group_value(product.get("query_group"))
         if nm_id is None or query_group not in allowed_values:
             continue
         filtered.append({**product, "nm_id": nm_id, "query_group": query_group})

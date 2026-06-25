@@ -17,7 +17,7 @@ def test_classify_product_query_group_detects_women_underwear() -> None:
         }
     )
 
-    assert result == "women_underwear"
+    assert result == "трусы женские"
 
 
 def test_classify_product_query_group_detects_men_underwear() -> None:
@@ -30,7 +30,21 @@ def test_classify_product_query_group_detects_men_underwear() -> None:
         }
     )
 
-    assert result == "men_underwear"
+    assert result == "трусы мужские"
+
+
+def test_classify_product_query_group_uses_manual_override_for_specific_unknown_nm_id() -> None:
+    result = classify_product_query_group(
+        {
+            "nm_id": 593190228,
+            "supplier_article": "MYSTERY-TSHIRT",
+            "title": "Неочевидное название",
+            "subject": "",
+            "brand": "PALEY",
+        }
+    )
+
+    assert result == "мужская футболка"
 
 
 def test_classify_product_query_group_detects_unknown_for_unclear_product() -> None:
@@ -55,7 +69,7 @@ def test_build_product_query_group_backfill_plan_does_not_override_existing_with
                 "title": "Трусы мужские боксеры набор",
                 "subject": "Трусы",
                 "brand": "PALEY",
-                "query_group": "women_underwear",
+                "query_group": "трусы женские",
             }
         ],
         force=False,
@@ -92,6 +106,6 @@ def test_build_product_query_group_backfill_plan_replaces_unknown_and_counts_unk
     assert summary["query_group_updated_count"] == 2
     assert summary["unknown_count"] == 1
     assert summary["breakdown_by_query_group"]["unknown"] == 1
-    assert summary["breakdown_by_query_group"]["women_underwear"] == 1
+    assert summary["breakdown_by_query_group"]["трусы женские"] == 1
     assert summary["examples_unknown"][0]["nm_id"] == 1
-    assert summary["update_rows"][1]["query_group"] == "women_underwear"
+    assert summary["update_rows"][1]["query_group"] == "трусы женские"

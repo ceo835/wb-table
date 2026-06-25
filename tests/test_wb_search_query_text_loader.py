@@ -79,7 +79,7 @@ def test_normalize_search_text_day_rows_maps_metrics_and_query_group() -> None:
     assert rows[0]["day"] == date(2026, 6, 24)
     assert rows[0]["nm_id"] == 197330807
     assert rows[0]["query_text"] == "трусы женские"
-    assert rows[0]["query_group"] == "women_underwear"
+    assert rows[0]["query_group"] == "трусы женские"
     assert rows[0]["frequency_current"] == 120
     assert rows[0]["week_frequency"] == 840
     assert rows[0]["orders_current"] == 14

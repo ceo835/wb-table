@@ -36,6 +36,11 @@ from src.db.models import (
     MartTotalReport,
     SettingsProducts,
 )
+from src.db.product_query_group_backfill import (
+    QUERY_GROUP_VALUES as PRODUCT_QUERY_GROUP_VALUES,
+    format_query_group_label,
+    normalize_query_group_value,
+)
 from src.db.session import session_scope
 from src.importers.entry_points_importer import import_entry_points_xlsx
 from src.importers.orders_geography_importer import import_orders_geography_xlsx
@@ -83,16 +88,7 @@ STOCK_HISTORY_ANOMALY_MIXED_ZERO_AND_STOCK = "MIXED_ZERO_AND_STOCK"
 STOCK_HISTORY_ANOMALY_MIXED_NO_DATA_AND_STOCK = "MIXED_NO_DATA_AND_STOCK"
 STOCK_HISTORY_ANOMALY_UNSTABLE = "UNSTABLE"
 QUERY_GROUP_UNDEFINED_LABEL = "Не определена"
-QUERY_GROUP_ALLOWED_VALUES = (
-    "women_underwear",
-    "men_underwear",
-    "kids_underwear",
-    "women_tshirts",
-    "men_tshirts",
-    "longsleeves",
-    "gift_sets",
-    "unknown",
-)
+QUERY_GROUP_ALLOWED_VALUES = PRODUCT_QUERY_GROUP_VALUES
 WB_SITE_PRICE_ALERT_OK = "OK"
 WB_SITE_PRICE_ALERT_CHANGED = "PRICE_CHANGED_50"
 WB_SITE_PRICE_ALERT_NO_DATA = "NO_PRICE_DATA"
@@ -1996,17 +1992,11 @@ def attach_stock_query_groups(
         return tracked_prepared
 
     query_group_prepared["nm_id"] = query_group_prepared["nm_id"].astype(int)
-    query_group_prepared["query_group"] = (
-        query_group_prepared["query_group"]
-        .where(query_group_prepared["query_group"].notna(), pd.NA)
-        .astype("string")
-        .str.strip()
-        .replace("", pd.NA)
+    query_group_prepared["query_group"] = query_group_prepared["query_group"].map(normalize_query_group_value)
+    query_group_prepared["query_group"] = query_group_prepared["query_group"].where(
+        query_group_prepared["query_group"].notna(),
+        pd.NA,
     )
-    query_group_prepared.loc[
-        ~query_group_prepared["query_group"].isin(QUERY_GROUP_ALLOWED_VALUES),
-        "query_group",
-    ] = pd.NA
     query_group_prepared = query_group_prepared.drop_duplicates(subset=["nm_id"], keep="first")
 
     return tracked_prepared.merge(
@@ -2663,13 +2653,8 @@ def build_stock_warehouse_display_dataframe(
             lambda value: lifecycle_label_map.get(str(value), value)
         )
     if "query_group" in safe_df.columns:
-        safe_df["query_group"] = (
-            safe_df["query_group"]
-            .where(safe_df["query_group"].notna(), pd.NA)
-            .astype("string")
-            .str.strip()
-            .replace("", pd.NA)
-            .fillna(QUERY_GROUP_UNDEFINED_LABEL)
+        safe_df["query_group"] = safe_df["query_group"].map(
+            lambda value: format_query_group_label(value, undefined_label=QUERY_GROUP_UNDEFINED_LABEL)
         )
 
     status_column = "problem_status" if "problem_status" in safe_df.columns else "stock_status"
