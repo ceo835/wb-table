@@ -46,6 +46,7 @@ from src.db.product_query_group_backfill import (
     normalize_query_group_value,
 )
 from src.db.session import session_scope
+from src.config.settings import settings
 from src.importers.entry_points_importer import import_entry_points_xlsx
 from src.importers.orders_geography_importer import import_orders_geography_xlsx
 from src.scheduler.daily_refresh_scheduler import start_daily_refresh_scheduler_once
@@ -2624,7 +2625,7 @@ def build_stock_warehouse_product_table(
                 "search_queries",
                 "zone_share_pct",
                 "conversion_pct",
-                "avg_order_value",
+                "profit_per_order",
                 "lost_orders",
                 "lost_profit_rub",
                 "zero_warehouses",
@@ -2733,9 +2734,11 @@ def build_stock_warehouse_product_table(
 
         zone_share_pct = pd.NA
         conversion_pct = pd.NA
-        avg_order_value_val = pd.NA
         lost_orders_val = pd.NA
         lost_profit_val = pd.NA
+
+        # Fixed profit per order setting for all rows
+        profit_per_order_val = settings.profit_per_order_rub
 
         if pd.notna(query_group) and query_group and query_group not in ("unknown", "Не определена") and not pd.isna(search_val):
             coef = None
@@ -2745,14 +2748,6 @@ def build_stock_warehouse_product_table(
                 coef = coefficients_dict.get(query_group)
             if coef is not None:
                 conversion_pct = float(coef) * 100.0
-
-            lookup_data = app_lookup.get((snapshot_date, nm_id))
-            if lookup_data is not None:
-                order_sum, order_count, wb_buyer_price = lookup_data
-                if order_count is not None and order_count > 0 and order_sum is not None:
-                    avg_order_value_val = float(order_sum) / float(order_count)
-                elif wb_buyer_price is not None and not pd.isna(wb_buyer_price):
-                    avg_order_value_val = float(wb_buyer_price)
 
             if zero_warehouses:
                 sum_share = 0.0
@@ -2774,13 +2769,11 @@ def build_stock_warehouse_product_table(
             if pd.notna(zone_share_pct) and pd.notna(conversion_pct):
                 lost_impressions = float(search_val) * float(zone_share_pct) / 100.0
                 lost_orders_val = lost_impressions * float(coef)
-                
-                if pd.notna(avg_order_value_val):
-                    lost_profit_val = lost_orders_val * float(avg_order_value_val)
+                lost_profit_val = lost_orders_val * float(profit_per_order_val)
 
         row["zone_share_pct"] = zone_share_pct
         row["conversion_pct"] = conversion_pct
-        row["avg_order_value"] = avg_order_value_val
+        row["profit_per_order"] = profit_per_order_val
         row["lost_orders"] = lost_orders_val
         row["lost_profit_rub"] = lost_profit_val
 
@@ -2869,7 +2862,7 @@ def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataF
                 "nm_id", "tracked_label", "query_group", "lifecycle_status",
                 "zero_warehouses", "no_data_warehouses",
                 "search_queries", "zone_share_pct", "conversion_pct",
-                "avg_order_value", "lost_orders", "lost_profit_rub",
+                "profit_per_order", "lost_orders", "lost_profit_rub",
                 "problem_status"
             ]
         )
@@ -2880,7 +2873,7 @@ def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataF
             "nm_id", "tracked_label", "query_group", "lifecycle_status",
             "zero_warehouses", "no_data_warehouses",
             "search_queries", "zone_share_pct", "conversion_pct",
-            "avg_order_value", "lost_orders", "lost_profit_rub",
+            "profit_per_order", "lost_orders", "lost_profit_rub",
             status_column
         ],
     ].copy()
@@ -2936,9 +2929,9 @@ def build_stock_warehouse_display_dataframe(
                 "search_queries": "Поисковые запросы",
                 "zone_share_pct": "Доля зоны, %",
                 "conversion_pct": "Конв. поиск→заказ, %",
-                "avg_order_value": "Средний чек, ₽",
+                "profit_per_order": "Прибыль/заказ, ₽",
                 "lost_orders": "Упущ. заказы",
-                "lost_profit_rub": "Потенц. выручка, ₽",
+                "lost_profit_rub": "Потенц. прибыль, ₽",
             }
         )
         return display_df.reindex(
@@ -2952,9 +2945,9 @@ def build_stock_warehouse_display_dataframe(
                 "Поисковые запросы",
                 "Доля зоны, %",
                 "Конв. поиск→заказ, %",
-                "Средний чек, ₽",
+                "Прибыль/заказ, ₽",
                 "Упущ. заказы",
-                "Потенц. выручка, ₽",
+                "Потенц. прибыль, ₽",
                 "Проблема",
             ]
         )
@@ -2970,7 +2963,7 @@ def build_stock_warehouse_display_dataframe(
             "zero_warehouses_count": "Складов с нулём",
             "no_data_warehouses_count": "Складов без данных",
             "search_queries": "Поисковые запросы",
-            "lost_profit_rub": "Потенц. выручка, ₽",
+            "lost_profit_rub": "Потенц. прибыль, ₽",
         }
     )
     return display_df.drop(
@@ -3035,7 +3028,7 @@ def style_stock_warehouse_table(
         except (ValueError, TypeError):
             return str(x)
 
-    def format_avg_order_value(x):
+    def format_profit_per_order(x):
         if pd.isna(x) or x in ("—", "NO_DATA", ""):
             return "—"
         try:
@@ -3054,7 +3047,7 @@ def style_stock_warehouse_table(
         except (ValueError, TypeError):
             return str(x)
 
-    def format_potential_revenue(x):
+    def format_potential_profit(x):
         if pd.isna(x) or x in ("—", "NO_DATA", ""):
             return "—"
         try:
@@ -3069,12 +3062,12 @@ def style_stock_warehouse_table(
         format_dict["Доля зоны, %"] = format_zone_share
     if "Конв. поиск→заказ, %" in df.columns:
         format_dict["Конв. поиск→заказ, %"] = format_pct_3_4
-    if "Средний чек, ₽" in df.columns:
-        format_dict["Средний чек, ₽"] = format_avg_order_value
+    if "Прибыль/заказ, ₽" in df.columns:
+        format_dict["Прибыль/заказ, ₽"] = format_profit_per_order
     if "Упущ. заказы" in df.columns:
         format_dict["Упущ. заказы"] = format_lost_orders
-    if "Потенц. выручка, ₽" in df.columns:
-        format_dict["Потенц. выручка, ₽"] = format_potential_revenue
+    if "Потенц. прибыль, ₽" in df.columns:
+        format_dict["Потенц. прибыль, ₽"] = format_potential_profit
 
     styler = df.style
     if warehouse_columns:
@@ -3101,9 +3094,9 @@ def prepare_stock_warehouse_table_for_display(
         "Поисковые запросы",
         "Доля зоны, %",
         "Конв. поиск→заказ, %",
-        "Средний чек, ₽",
+        "Прибыль/заказ, ₽",
         "Упущ. заказы",
-        "Потенц. выручка, ₽",
+        "Потенц. прибыль, ₽",
     }
     safe_df = sanitize_dataframe_for_streamlit_display(df, numeric_columns=numeric_columns)
     return style_stock_warehouse_table(safe_df, warehouse_columns)

@@ -10,6 +10,7 @@ import scripts.load_stock_warehouse_snapshot as stock_snapshot_script
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+import pytest
 
 from scripts.run_daily_dashboard_refresh import (
     DEFAULT_DASHBOARD_START_DATE,
@@ -27,6 +28,111 @@ from src.scheduler.daily_refresh_scheduler import (
     should_run_startup_catchup,
     _scheduler_loop,
 )
+
+
+@pytest.fixture(autouse=True)
+def mock_search_query_loader(monkeypatch):
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_search_scope_products",
+        lambda **kwargs: [{"nm_id": 100, "query_group": "test"}],
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_search_text_rows",
+        lambda **kwargs: {
+            "api_status": "200",
+            "rows_loaded": 10,
+            "rows_in_db": 10,
+        },
+    )
+
+
+def test_run_daily_dashboard_refresh_search_queries_success_and_failure(monkeypatch, tmp_path: Path) -> None:
+    run_date = date(2026, 6, 18)
+    monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", False, raising=False)
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
+        lambda **kwargs: {
+            "snapshot_date": kwargs["snapshot_date"].isoformat(),
+            "api_status": "200",
+            "rows_in_db_for_snapshot": 100,
+            "unique_nm_ids": 10,
+            "unique_chrt_ids": 10,
+            "unique_warehouses": 2,
+            "request_attempts": [{"status": "200"}],
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.build_mart_total_report",
+        lambda date_from, date_to, version="v2": {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "rows_built": 10,
+            "rows_in_db": 10,
+            "version": version,
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.export_streamlit_v1_dataset",
+        lambda date_from, date_to: {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "total_rows": 10,
+            "output_path": "data/processed/streamlit_v1_dataset.csv",
+        },
+    )
+
+    # 1. Test success scenario
+    captured_args = {}
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_search_text_rows",
+        lambda **kwargs: captured_args.update(kwargs) or {
+            "api_status": "200",
+            "rows_loaded": 15,
+            "rows_in_db": 15,
+        },
+    )
+
+    summary = run_daily_dashboard_refresh(
+        run_date=run_date,
+        date_from=DEFAULT_DASHBOARD_START_DATE,
+        output_dir=tmp_path,
+        include_core_refresh=False,
+    )
+
+    assert summary["success"] is True
+    assert summary["failed_steps"] == []
+    assert summary["search_queries_rows_loaded"] == 15
+    assert summary["api_statuses"]["search_queries"] == "200"
+    assert captured_args == {
+        "target_day": run_date,
+        "products": [{"nm_id": 100, "query_group": "test"}],
+        "apply": True,
+        "nm_batch_size": 50,
+        "request_sleep_seconds": 5.0,
+        "max_retries": 2,
+    }
+
+    # 2. Test failure scenario (e.g. 429 error)
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_search_text_rows",
+        lambda **kwargs: {
+            "api_status": "429",
+            "api_error": "Too Many Requests",
+            "rows_loaded": 0,
+            "rows_in_db": 0,
+        },
+    )
+
+    summary_fail = run_daily_dashboard_refresh(
+        run_date=run_date,
+        date_from=DEFAULT_DASHBOARD_START_DATE,
+        output_dir=tmp_path,
+        include_core_refresh=False,
+    )
+
+    assert summary_fail["success"] is False
+    assert summary_fail["failed_steps"] == ["search_queries"]
+    assert "Too Many Requests" in summary_fail["error_message"]
 
 
 def test_load_stock_warehouse_default_snapshot_date_uses_yesterday_in_project_timezone(monkeypatch) -> None:
@@ -110,7 +216,11 @@ def test_run_daily_dashboard_refresh_writes_summary_files(monkeypatch, tmp_path:
 
     saved_summary = json.loads(json_path.read_text(encoding="utf-8"))
     assert saved_summary["success"] is True
-    assert saved_summary["api_statuses"] == {"wb_site_price_monitor": "success", "warehouse_snapshot": "200"}
+    assert saved_summary["api_statuses"] == {
+        "wb_site_price_monitor": "success",
+        "warehouse_snapshot": "200",
+        "search_queries": "200",
+    }
     assert "warehouse_snapshot" in md_path.read_text(encoding="utf-8")
 
 

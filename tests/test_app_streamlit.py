@@ -571,13 +571,15 @@ def test_build_stock_warehouse_product_table_lost_profit_calculation() -> None:
     assert row_197330807["search_queries"] == 1000
     assert pd.isna(row_320893265["search_queries"])
 
-    # Проверяем расчет упущенной выгоды
+    # Проверяем расчет упущенной выгоды с фиксированной прибылью 100 руб
     # lost_impressions = 1000 * 5.5 / 100 = 55
     # lost_orders = 55 * 0.0025 = 0.1375
-    # avg_order_value = 12000.0 / 10.0 = 1200.0
-    # lost_profit = 0.1375 * 1200.0 = 165.0
-    assert abs(row_197330807["lost_profit_rub"] - 165.0) < 1e-5
+    # profit_per_order = 100
+    # lost_profit = 0.1375 * 100.0 = 13.75
+    assert abs(row_197330807["lost_profit_rub"] - 13.75) < 1e-5
+    assert row_197330807["profit_per_order"] == 100.0
     assert pd.isna(row_320893265["lost_profit_rub"])
+    assert row_320893265["profit_per_order"] == 100.0
 
     app_lookup_fallback = {
         (datetime(2026, 6, 15).date(), 197330807): (0.0, 0.0, 1000.0) # order_sum, order_count=0, price=1000.0
@@ -596,8 +598,9 @@ def test_build_stock_warehouse_product_table_lost_profit_calculation() -> None:
         app_lookup=app_lookup_fallback,
     )
     row_fallback = result_fallback.loc[result_fallback["nm_id"] == 197330807].iloc[0]
-    # lost_profit = 0.1375 * 1000.0 = 137.5
-    assert abs(row_fallback["lost_profit_rub"] - 137.5) < 1e-5
+    # Упущенная прибыль должна по-прежнему считаться с фиксированной ставкой 100 руб, игнорируя app_lookup_fallback
+    assert abs(row_fallback["lost_profit_rub"] - 13.75) < 1e-5
+    assert row_fallback["profit_per_order"] == 100.0
 
 
 def test_build_stock_warehouse_product_table_calculated_conversions_and_display() -> None:
@@ -668,22 +671,22 @@ def test_build_stock_warehouse_product_table_calculated_conversions_and_display(
     # Проверка промежуточных колонок
     assert abs(row_kids["zone_share_pct"] - 10.0) < 1e-5
     assert abs(row_kids["conversion_pct"] - 0.2) < 1e-5
-    assert abs(row_kids["avg_order_value"] - 2000.0) < 1e-5
+    assert row_kids["profit_per_order"] == 100.0
     assert abs(row_kids["lost_orders"] - 0.1) < 1e-5
 
     assert abs(row_tshirts["zone_share_pct"] - 10.0) < 1e-5
     assert abs(row_tshirts["conversion_pct"] - 0.1) < 1e-5
-    assert abs(row_tshirts["avg_order_value"] - 1500.0) < 1e-5
+    assert row_tshirts["profit_per_order"] == 100.0
     assert abs(row_tshirts["lost_orders"] - 0.08) < 1e-5
 
-    # Упущенная выгода (потенциальная выручка):
-    assert abs(row_kids["lost_profit_rub"] - 200.0) < 1e-5
+    # Упущенная выгода (потенциальная прибыль):
+    assert abs(row_kids["lost_profit_rub"] - 10.0) < 1e-5
     # 2. Для women_tshirts (calculated нет, fallback на manual coef 0.001):
     # lost_impressions = 800 * 10 / 100 = 80
     # lost_orders = 80 * 0.001 = 0.08
-    # avg_order_val = 1500.0
-    # lost_profit = 0.08 * 1500 = 120.0
-    assert abs(row_tshirts["lost_profit_rub"] - 120.0) < 1e-5
+    # profit_per_order = 100.0
+    # lost_profit = 0.08 * 100 = 8.0
+    assert abs(row_tshirts["lost_profit_rub"] - 8.0) < 1e-5
 
 
 def test_build_stock_warehouse_product_table_no_conversion_keeps_queries_but_hides_profit() -> None:
@@ -846,9 +849,9 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
         "Поисковые запросы",
         "Доля зоны, %",
         "Конв. поиск→заказ, %",
-        "Средний чек, ₽",
+        "Прибыль/заказ, ₽",
         "Упущ. заказы",
-        "Потенц. выручка, ₽",
+        "Потенц. прибыль, ₽",
         "Проблема",
     ]
     assert problem_display.loc[0, "Проблема"] == "Есть нулевые остатки"
@@ -864,9 +867,9 @@ def test_prepare_stock_warehouse_table_for_display_formats_new_lost_profit_colum
                 "Поисковые запросы": 5000,
                 "Доля зоны, %": 10.5,
                 "Конв. поиск→заказ, %": 0.2005,
-                "Средний чек, ₽": 2000,
+                "Прибыль/заказ, ₽": 100,
                 "Упущ. заказы": 10.53,
-                "Потенц. выручка, ₽": 21060,
+                "Потенц. прибыль, ₽": 1053,
                 "Владимир WB": 0,
             },
             {
@@ -874,9 +877,9 @@ def test_prepare_stock_warehouse_table_for_display_formats_new_lost_profit_colum
                 "Поисковые запросы": pd.NA,
                 "Доля зоны, %": pd.NA,
                 "Конв. поиск→заказ, %": pd.NA,
-                "Средний чек, ₽": 1500.5,
+                "Прибыль/заказ, ₽": 100,
                 "Упущ. заказы": pd.NA,
-                "Потенц. выручка, ₽": pd.NA,
+                "Потенц. прибыль, ₽": pd.NA,
                 "Владимир WB": pd.NA,
             }
         ]
@@ -889,12 +892,11 @@ def test_prepare_stock_warehouse_table_for_display_formats_new_lost_profit_colum
     assert "5 000" in html
     assert "10.50%" in html
     assert "0.2005%" in html
-    assert "2 000" in html
+    assert "100" in html
     assert "10.53" in html
-    assert "21 060" in html
+    assert "1 053" in html
 
-    # Проверяем форматирование для второй строки (дробный средний чек, отсутствующие значения)
-    assert "1 500.50" in html
+    # Проверяем форматирование для второй строки (фиксированная прибыль 100 руб, отсутствующие значения)
     # Должен быть прочерк на месте отсутствующих значений
     assert (html.count("—") + html.count("вЂ”")) >= 5
 

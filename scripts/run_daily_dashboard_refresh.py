@@ -26,6 +26,7 @@ from src.config.settings import settings
 from src.db.models import FactStockWarehouseSnapshot
 from src.db.mart_total_report_builder import build_mart_total_report
 from src.db.session import session_scope
+from src.db.wb_search_query_text_loader import load_search_scope_products, load_search_text_rows
 from src.db.stock_warehouse_loader import TRACKED_PRODUCTS_PATH, get_tracked_nm_ids, load_stock_warehouse_snapshot
 
 
@@ -73,6 +74,7 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
         f"- WB site price success count: {summary.get('wb_site_price_success_count', '')}",
         f"- WB site price failed count: {summary.get('wb_site_price_failed_count', '')}",
         f"- WB site price alerts count: {summary.get('wb_site_price_alerts_count', '')}",
+        f"- WB search query rows loaded: {summary.get('search_queries_rows_loaded', '')}",
         f"- Missing tracked nm_id: {', '.join(str(item) for item in summary.get('missing_tracked_nm_id', [])) or 'none'}",
         f"- Mart rows: {summary.get('mart_total_report_rows', '')}",
         f"- Streamlit dataset rows: {summary.get('streamlit_dataset_rows', '')}",
@@ -134,6 +136,7 @@ def run_daily_dashboard_refresh(
         "wb_site_price_success_count": None,
         "wb_site_price_failed_count": None,
         "wb_site_price_alerts_count": None,
+        "search_queries_rows_loaded": None,
         "missing_tracked_nm_id": [],
         "mart_total_report_rows": None,
         "streamlit_dataset_rows": None,
@@ -200,6 +203,30 @@ def run_daily_dashboard_refresh(
         if requested > actual:
             present_nm_ids = load_present_snapshot_nm_ids(resolved_run_date)
             summary["missing_tracked_nm_id"] = sorted(nm_id for nm_id in tracked_nm_ids if nm_id not in present_nm_ids)
+        summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
+
+        current_step = "search_queries"
+        search_products = load_search_scope_products(
+            tracked_products=True,
+            known_query_group_only=True,
+        )
+        search_summary = load_search_text_rows(
+            target_day=resolved_run_date,
+            products=search_products,
+            apply=True,
+            nm_batch_size=50,
+            request_sleep_seconds=5.0,
+            max_retries=2,
+        )
+        summary["search_queries"] = search_summary
+        summary["search_queries_rows_loaded"] = search_summary.get("rows_loaded")
+        summary["api_statuses"]["search_queries"] = search_summary.get("api_status")
+
+        if search_summary.get("api_status") not in {"200", "SKIPPED"}:
+            raise RuntimeError(
+                search_summary.get("api_error")
+                or f"search queries loader API status {search_summary.get('api_status')}"
+            )
         summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
 
         if include_core_refresh:

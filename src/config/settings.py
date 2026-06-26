@@ -47,6 +47,7 @@ WB_SITE_PRICE_MONITOR_ENABLED = get_env_variable("WB_SITE_PRICE_MONITOR_ENABLED"
 ENV = get_env_variable("ENV", required=False, default="dev")
 DATABASE_URL = get_env_variable("DATABASE_URL", required=False)
 ALLOW_PROD_DB = get_env_variable("ALLOW_PROD_DB", required=False, default="false")
+PROFIT_PER_ORDER_RUB = int(get_env_variable("PROFIT_PER_ORDER_RUB", required=False, default="100"))
 
 # Google Sheets (поддержка разных имен переменных)
 # Приоритет: GOOGLE_APPLICATION_CREDENTIALS, затем GOOGLE_CREDENTIALS_FILE
@@ -85,6 +86,7 @@ class Settings:
         self.google_sheet_id = GOOGLE_SHEET_ID
         self.data_raw_dir = DATA_RAW_DIR
         self.data_processed_dir = DATA_PROCESSED_DIR
+        self.profit_per_order_rub = PROFIT_PER_ORDER_RUB
 
 
 settings = Settings()
