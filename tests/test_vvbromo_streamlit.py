@@ -282,4 +282,10 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
     # Assertions on values in display_df (missing values must remain null/NaN)
     assert display_df.loc[0, "vvbromo_operating_profit"] == 20622.0
     assert pd.isna(display_df.loc[1, "vvbromo_operating_profit"])
+    assert pytest.approx(display_df.loc[0, "crm_common_calc"], 0.0001) == 20622.0 / 90.0
+
+    # Assertions on export_df (renamed columns and string fallback)
+    assert "CRM по общим заказам" in export_df.columns
+    assert pytest.approx(float(export_df.loc[0, "CRM по общим заказам"]), 0.0001) == 20622.0 / 90.0
+    assert export_df.loc[1, "CRM по общим заказам"] == "—"
 

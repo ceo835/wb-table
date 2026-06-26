@@ -902,7 +902,21 @@ def get_db_dataset_cache_buster() -> str:
                 func.count(),
             )
         ).one()
-    return "|".join("" if value is None else str(value) for value in (*mart_state, *price_state, *alert_state))
+        try:
+            from src.db.models import FactVvbromoProductDay
+            vvbromo_state = session.execute(
+                select(
+                    func.max(FactVvbromoProductDay.day),
+                    func.max(FactVvbromoProductDay.loaded_at),
+                    func.count(),
+                )
+            ).one()
+        except Exception:
+            vvbromo_state = (None, None, 0)
+    return "|".join(
+        "" if value is None else str(value) 
+        for value in (*mart_state, *price_state, *alert_state, *vvbromo_state)
+    )
 
 
 def resolve_db_dataset_cache_buster() -> str | None:
