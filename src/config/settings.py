@@ -61,6 +61,14 @@ GOOGLE_SHEET_ID = (
     or get_env_variable("GOOGLE_SPREADSHEET_ID", required=False)
 )
 
+# VVBromo Google Sheet
+GOOGLE_SERVICE_ACCOUNT_JSON = get_env_variable("GOOGLE_SERVICE_ACCOUNT_JSON", required=False)
+VVBROMO_GOOGLE_SHEET_ID = get_env_variable("VVBROMO_GOOGLE_SHEET_ID", required=False)
+VVBROMO_GOOGLE_SHEET_GID = get_env_variable("VVBROMO_GOOGLE_SHEET_GID", required=False)
+VVBROMO_GOOGLE_SHEET_NAME = get_env_variable("VVBROMO_GOOGLE_SHEET_NAME", required=False)
+VVBROMO_GOOGLE_SHEET_RANGE = get_env_variable("VVBROMO_GOOGLE_SHEET_RANGE", required=False, default="A:Z")
+VVBROMO_GOOGLE_SHEET_ENABLED = get_env_variable("VVBROMO_GOOGLE_SHEET_ENABLED", required=False, default="true")
+
 # Пути
 DATA_RAW_DIR = BASE_DIR / "data" / "raw"
 DATA_PROCESSED_DIR = BASE_DIR / "data" / "processed"
@@ -87,6 +95,14 @@ class Settings:
         self.data_raw_dir = DATA_RAW_DIR
         self.data_processed_dir = DATA_PROCESSED_DIR
         self.profit_per_order_rub = PROFIT_PER_ORDER_RUB
+        
+        # VVBromo Settings
+        self.google_service_account_json = GOOGLE_SERVICE_ACCOUNT_JSON
+        self.vvbromo_google_sheet_id = VVBROMO_GOOGLE_SHEET_ID
+        self.vvbromo_google_sheet_gid = VVBROMO_GOOGLE_SHEET_GID
+        self.vvbromo_google_sheet_name = VVBROMO_GOOGLE_SHEET_NAME
+        self.vvbromo_google_sheet_range = VVBROMO_GOOGLE_SHEET_RANGE
+        self.vvbromo_google_sheet_enabled = VVBROMO_GOOGLE_SHEET_ENABLED.lower() in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

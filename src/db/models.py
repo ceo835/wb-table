@@ -999,3 +999,22 @@ class MartTotalReport(Base, StatusMixin):
     card_comparison_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
     organic_cart_share_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
     export_context_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class FactVvbromoProductDay(Base, TimestampMixin):
+    __tablename__ = "fact_vvbromo_product_day"
+    __table_args__ = (
+        UniqueConstraint("day", "nm_id", name="uq_fact_vvbromo_product_day_day_nm_id"),
+        Index("idx_fact_vvbromo_product_day_day_nm", "day", "nm_id"),
+    )
+
+    fact_vvbromo_product_day_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    vendor_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    organic_sales: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    operating_profit: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    operating_profit_per_unit: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="vvbromo", server_default="vvbromo")
+    raw_row: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+
