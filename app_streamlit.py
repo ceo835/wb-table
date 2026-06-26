@@ -2639,14 +2639,22 @@ def build_stock_warehouse_product_table(
     if not show_sellout:
         base_products = base_products[base_products["lifecycle_status"].fillna("not_tracked").ne("sellout")].copy()
 
-    current_snapshot = current_snapshot.groupby(["nm_id", "warehouse_name"], as_index=False)[
+    current_snapshot_unfiltered = snapshot_prepared[snapshot_prepared["snapshot_date"] == snapshot_date].copy()
+    current_snapshot_unfiltered = current_snapshot_unfiltered.groupby(["nm_id", "warehouse_name"], as_index=False)[
         ["stock_qty", "in_way_to_client", "in_way_from_client"]
     ].sum(min_count=1)
 
-    stock_lookup = {
+    unfiltered_stock_lookup = {
         (int(row["nm_id"]), str(row["warehouse_name"])): row["stock_qty"]
-        for _, row in current_snapshot.iterrows()
+        for _, row in current_snapshot_unfiltered.iterrows()
     }
+
+    # Заранее соберем нулевые склады для каждого nm_id по всем складам из snapshot
+    zero_warehouses_by_nm: dict[int, list[str]] = {}
+    for (nm_id_key, wh_name), qty in unfiltered_stock_lookup.items():
+        display_val = _normalize_stock_display_value(qty)
+        if not pd.isna(display_val) and float(display_val) == 0:
+            zero_warehouses_by_nm.setdefault(nm_id_key, []).append(wh_name)
 
     if search_queries_dict is None:
         search_queries_dict = load_search_queries_by_date_from_db(snapshot_date)
@@ -2686,13 +2694,13 @@ def build_stock_warehouse_product_table(
             "query_group": query_group,
             "lifecycle_status": product_row.get("lifecycle_status") or "not_tracked",
         }
-        zero_warehouses: list[str] = []
+        zero_warehouses = sorted(zero_warehouses_by_nm.get(nm_id, []))
         no_data_warehouses: list[str] = []
         total_main_warehouses = 0.0
         warehouses_with_stock = 0
 
         for warehouse_name in warehouse_names:
-            quantity = stock_lookup.get((nm_id, warehouse_name), pd.NA)
+            quantity = unfiltered_stock_lookup.get((nm_id, warehouse_name), pd.NA)
             display_value = _normalize_stock_display_value(quantity)
             row[warehouse_name] = display_value
             if warehouse_name not in main_warehouse_names:
@@ -2702,9 +2710,7 @@ def build_stock_warehouse_product_table(
                 continue
             numeric_value = float(display_value)
             total_main_warehouses += numeric_value
-            if numeric_value == 0:
-                zero_warehouses.append(warehouse_name)
-            elif numeric_value > 0:
+            if numeric_value > 0:
                 warehouses_with_stock += 1
 
         row["total_main_warehouses"] = int(total_main_warehouses) if total_main_warehouses.is_integer() else round(total_main_warehouses, 2)
