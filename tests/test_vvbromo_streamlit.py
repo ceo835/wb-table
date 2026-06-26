@@ -104,10 +104,10 @@ def test_attach_vvbromo_to_df_database_down(monkeypatch) -> None:
 
 
 def test_aggregate_vvbromo_for_period() -> None:
-    # 1. Period with valid sales
+    # 1. Period with valid sales and orders
     df = pd.DataFrame([
-        {"nm_id": 11111, "vvbromo_organic_sales": 10, "vvbromo_operating_profit": 1000.0, "vvbromo_operating_profit_per_unit": 100.0},
-        {"nm_id": 11111, "vvbromo_organic_sales": 20, "vvbromo_operating_profit": 3000.0, "vvbromo_operating_profit_per_unit": 150.0},
+        {"nm_id": 11111, "vvbromo_organic_sales": 10, "vvbromo_operating_profit": 1000.0, "vvbromo_operating_profit_per_unit": 100.0, "order_count": 5.0, "crm_common_calc": 200.0},
+        {"nm_id": 11111, "vvbromo_organic_sales": 20, "vvbromo_operating_profit": 3000.0, "vvbromo_operating_profit_per_unit": 150.0, "order_count": 15.0, "crm_common_calc": 200.0},
     ])
 
     aggregated = aggregate_vvbromo_for_period(df, ["nm_id"])
@@ -119,24 +119,29 @@ def test_aggregate_vvbromo_for_period() -> None:
     assert aggregated.loc[0, "vvbromo_operating_profit"] == 4000.0
     # operating_profit_per_unit: 4000 / 30 = 133.333...
     assert pytest.approx(aggregated.loc[0, "vvbromo_operating_profit_per_unit"], 0.0001) == 4000.0 / 30.0
+    # sum of order_count: 5 + 15 = 20
+    assert aggregated.loc[0, "order_count"] == 20.0
+    # crm_common_calc: 4000 / 20 = 200.0
+    assert pytest.approx(aggregated.loc[0, "crm_common_calc"], 0.0001) == 200.0
 
-    # 2. Period with 0 sales (division by zero handling)
+    # 2. Period with 0 orders (division by zero handling)
     df_zero = pd.DataFrame([
-        {"nm_id": 22222, "vvbromo_organic_sales": 0, "vvbromo_operating_profit": 100.0, "vvbromo_operating_profit_per_unit": None},
+        {"nm_id": 22222, "vvbromo_organic_sales": 5, "vvbromo_operating_profit": 100.0, "vvbromo_operating_profit_per_unit": 20.0, "order_count": 0.0, "crm_common_calc": None},
     ])
     agg_zero = aggregate_vvbromo_for_period(df_zero, ["nm_id"])
-    assert agg_zero.loc[0, "vvbromo_organic_sales"] == 0
+    assert agg_zero.loc[0, "vvbromo_organic_sales"] == 5
     assert agg_zero.loc[0, "vvbromo_operating_profit"] == 100.0
-    assert agg_zero.loc[0, "vvbromo_operating_profit_per_unit"] is None
+    assert agg_zero.loc[0, "order_count"] == 0.0
+    assert agg_zero.loc[0, "crm_common_calc"] is None
 
-    # 3. Period with empty/NaN sales
+    # 3. Period with empty/NaN orders
     df_nan = pd.DataFrame([
-        {"nm_id": 33333, "vvbromo_organic_sales": None, "vvbromo_operating_profit": 100.0, "vvbromo_operating_profit_per_unit": None},
+        {"nm_id": 33333, "vvbromo_organic_sales": 5, "vvbromo_operating_profit": 100.0, "vvbromo_operating_profit_per_unit": 20.0, "order_count": None, "crm_common_calc": None},
     ])
     agg_nan = aggregate_vvbromo_for_period(df_nan, ["nm_id"])
-    assert pd.isna(agg_nan.loc[0, "vvbromo_organic_sales"])
     assert agg_nan.loc[0, "vvbromo_operating_profit"] == 100.0
-    assert agg_nan.loc[0, "vvbromo_operating_profit_per_unit"] is None
+    assert pd.isna(agg_nan.loc[0, "order_count"])
+    assert agg_nan.loc[0, "crm_common_calc"] is None
 
 
 def test_sync_button_calls_loader_and_returns_summary(monkeypatch) -> None:
@@ -178,7 +183,7 @@ def test_sync_button_calls_loader_and_returns_summary(monkeypatch) -> None:
 def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) -> None:
     # 1. Mock DB call inside attach_vvbromo_to_df
     db_records = [
-        DummyVvbromoRecord(datetime.date(2026, 6, 19), 11111, 10, Decimal("1000.00"), Decimal("100.00")),
+        DummyVvbromoRecord(datetime.date(2026, 6, 19), 11111, 10, Decimal("20622.00"), Decimal("2062.20")),
     ]
 
     class DummyResult:
@@ -205,18 +210,18 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
             "report_date": "2026-06-19",
             "nm_id": 11111,
             "supplier_article": "Art1",
-            "order_count": 10,
-            "has_entry_points": True,
-            "has_localization": True,
+            "order_count": 90,
+            "has_entry_points": False,
+            "has_localization": False,
             "vbro_status": "MANUAL_PENDING",
-        },  # data in DB, should compute CRM and change status
+        },  # data in DB, should compute CRM and change status (even with False flags)
         {
             "report_date": "2026-06-19",
             "nm_id": 22222,
             "supplier_article": "Art2",
             "order_count": 5,
-            "has_entry_points": True,
-            "has_localization": True,
+            "has_entry_points": False,
+            "has_localization": False,
             "vbro_status": "MANUAL_PENDING",
         },  # no VVBromo data, should remain MANUAL_PENDING / "Не внесено"
         {
@@ -224,10 +229,19 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
             "nm_id": 11111,
             "supplier_article": "Art1",
             "order_count": 0,
-            "has_entry_points": True,
-            "has_localization": True,
+            "has_entry_points": False,
+            "has_localization": False,
             "vbro_status": "MANUAL_PENDING",
         },  # order_count = 0, should keep CRM as None/NaN
+        {
+            "report_date": "2026-06-19",
+            "nm_id": 11111,
+            "supplier_article": "Art1",
+            "order_count": None,
+            "has_entry_points": False,
+            "has_localization": False,
+            "vbro_status": "MANUAL_PENDING",
+        },  # order_count = None, should keep CRM as None/NaN
     ])
 
     # 3. Prepare DataFrame
@@ -236,10 +250,10 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
 
     # Check that in prepared dataframe missing values remain null/NaN (not 0)
     # Row 0 (nm_id 11111) has data
-    assert prepared.loc[0, "vvbromo_operating_profit"] == 1000.0
+    assert prepared.loc[0, "vvbromo_operating_profit"] == 20622.0
     assert prepared.loc[0, "vvbromo_organic_sales"] == 10
-    assert prepared.loc[0, "vvbromo_operating_profit_per_unit"] == 100.0
-    assert prepared.loc[0, "crm_common_calc"] == 1000.0 / 10.0
+    assert prepared.loc[0, "vvbromo_operating_profit_per_unit"] == 2062.20
+    assert pytest.approx(prepared.loc[0, "crm_common_calc"], 0.0001) == 20622.0 / 90.0
     assert prepared.loc[0, "vbro_status_label"] == "Файл загружен"
 
     # Row 1 (nm_id 22222) has no data
@@ -252,6 +266,9 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
     # Row 2 (order_count = 0)
     assert pd.isna(prepared.loc[2, "crm_common_calc"])
 
+    # Row 3 (order_count = None)
+    assert pd.isna(prepared.loc[3, "crm_common_calc"])
+
     # 4. Build overview display dataframe
     table_df = build_grouped_by_date_dataset(prepared)
     display_df, export_df = build_overview_export_tables(table_df, show_empty_rows=True)
@@ -263,6 +280,6 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
     assert "crm_common_calc" in display_df.columns
 
     # Assertions on values in display_df (missing values must remain null/NaN)
-    assert display_df.loc[0, "vvbromo_operating_profit"] == 1000.0
+    assert display_df.loc[0, "vvbromo_operating_profit"] == 20622.0
     assert pd.isna(display_df.loc[1, "vvbromo_operating_profit"])
 

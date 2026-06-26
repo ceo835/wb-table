@@ -539,23 +539,10 @@ def enrich_streamlit_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
     profit = enriched.get("vvbromo_operating_profit")
     orders = enriched.get("order_count")
-    has_ep = (
-        _to_bool_extended(enriched.get("has_entry_points"))
-        or not _is_missing(enriched.get("entry_impressions_total"))
-        or not _is_missing(enriched.get("entry_card_clicks_total"))
-        or enriched.get("entry_point_status") == "CSV_EXPORT"
-    )
-    has_loc = (
-        _to_bool_extended(enriched.get("has_localization"))
-        or _to_bool_extended(enriched.get("has_localization_partial"))
-        or enriched.get("orders_geography_status") == "CSV_EXPORT"
-    )
     if (
         profit is not None and not _is_missing(profit)
         and orders is not None and not _is_missing(orders)
         and float(orders) > 0
-        and has_ep
-        and has_loc
     ):
         enriched["crm_common_calc"] = float(profit) / float(orders)
     else:
@@ -634,7 +621,7 @@ def aggregate_vvbromo_for_period(df: pd.DataFrame, groupby_cols: list[str]) -> p
             continue
         if col in ("vvbromo_organic_sales", "vvbromo_operating_profit"):
             agg_dict[col] = lambda s: s.sum(min_count=1)
-        elif col == "vvbromo_operating_profit_per_unit":
+        elif col in ("vvbromo_operating_profit_per_unit", "crm_common_calc"):
             continue
         else:
             if df[col].dtype in ("int64", "float64"):
@@ -655,5 +642,15 @@ def aggregate_vvbromo_for_period(df: pd.DataFrame, groupby_cols: list[str]) -> p
             return float(profit) / float(sales)
 
         grouped["vvbromo_operating_profit_per_unit"] = grouped.apply(calc_per_unit, axis=1)
+
+    if "vvbromo_operating_profit" in grouped.columns and "order_count" in grouped.columns:
+        def calc_crm(row):
+            profit = row.get("vvbromo_operating_profit")
+            orders = row.get("order_count")
+            if pd.isna(profit) or pd.isna(orders) or orders == 0:
+                return None
+            return float(profit) / float(orders)
+
+        grouped["crm_common_calc"] = grouped.apply(calc_crm, axis=1)
 
     return grouped
