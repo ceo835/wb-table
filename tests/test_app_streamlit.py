@@ -3267,7 +3267,6 @@ def test_display_columns_by_date_keep_only_business_columns() -> None:
         "add_to_cart_conversion_calc",
         "cart_to_order_conversion_calc",
         "order_sum",
-        "legacy_cpm_common_calc",
         "legacy_cost_per_card_click_calc",
         "legacy_cost_per_all_carts_calc",
         "legacy_cost_per_order_calc",
@@ -3330,7 +3329,6 @@ def test_display_columns_by_date_places_legacy_block_before_api_ad_block() -> No
 
     expected_legacy_block = [
         "ad_campaign_spend_total",
-        "legacy_cpm_common_calc",
         "legacy_cost_per_card_click_calc",
         "legacy_cost_per_all_carts_calc",
         "legacy_cost_per_order_calc",
@@ -3409,7 +3407,7 @@ def test_build_export_dataframe_for_by_date_view_omits_technical_columns() -> No
     assert "Среднее время доставки" in export_df.columns
     assert "Сумма остатков" in export_df.columns
     assert "Сумма кампании" in export_df.columns
-    assert "CPM по общим показам" in export_df.columns
+    assert "CPM по общим показам" not in export_df.columns
     assert "Цена перехода по общим переходам" in export_df.columns
     assert "Расход на все корзины" in export_df.columns
     assert "Расход на все заказы" in export_df.columns
