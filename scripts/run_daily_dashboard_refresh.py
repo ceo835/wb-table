@@ -78,7 +78,7 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
         f"- Missing tracked nm_id: {', '.join(str(item) for item in summary.get('missing_tracked_nm_id', [])) or 'none'}",
         f"- Mart rows: {summary.get('mart_total_report_rows', '')}",
         f"- Streamlit dataset rows: {summary.get('streamlit_dataset_rows', '')}",
-        f"- API statuses: {json.dumps(summary.get('api_statuses', {}), ensure_ascii=False)}",
+        f"- API statuses: {json.dumps(summary.get('api_statuses', {}), cls=CustomJsonEncoder, ensure_ascii=False)}",
         f"- Failed steps: {', '.join(summary.get('failed_steps', [])) or 'none'}",
     ]
     if summary.get("error_message"):
@@ -88,10 +88,21 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+import decimal
+
+class CustomJsonEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (date, datetime)):
+            return obj.isoformat()
+        if isinstance(obj, decimal.Decimal):
+            return str(obj)
+        return super().default(obj)
+
+
 def persist_run_summary(output_dir: Path, run_date: date, summary: dict[str, Any]) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = build_summary_paths(output_dir, run_date)
-    paths["json_path"].write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    paths["json_path"].write_text(json.dumps(summary, cls=CustomJsonEncoder, ensure_ascii=False, indent=2), encoding="utf-8")
     paths["md_path"].write_text(build_markdown_summary(summary), encoding="utf-8")
     return {name: str(path) for name, path in paths.items()}
 
@@ -309,7 +320,7 @@ def main() -> int:
         include_core_refresh=bool(args.include_core_refresh) and not bool(args.skip_core_refresh),
         mart_version=args.version,
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(json.dumps(summary, cls=CustomJsonEncoder, ensure_ascii=False, indent=2))
     return 0 if summary.get("success") else 1
 
 
