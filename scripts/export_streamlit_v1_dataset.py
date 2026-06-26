@@ -23,7 +23,7 @@ from sqlalchemy import func
 
 from src.db.models import FactWbSitePriceSnapshot, MartTotalReport
 from src.db.session import session_scope
-from src.streamlit_dataset import STREAMLIT_V1_COLUMNS, attach_wb_price_snapshot_fields, enrich_streamlit_row
+from src.streamlit_dataset import STREAMLIT_V1_COLUMNS, attach_wb_price_snapshot_fields, enrich_streamlit_row, attach_vvbromo_fields
 
 
 PROCESSED_DIR = ROOT_DIR / "data" / "processed"
@@ -97,6 +97,7 @@ def export_streamlit_v1_dataset(date_from: date, date_to: date) -> dict[str, Any
             for row in wb_price_snapshot_rows
         ]
     rows = attach_wb_price_snapshot_fields(rows, snapshot_rows)
+    rows = attach_vvbromo_fields(rows)
     rows = [enrich_streamlit_row(row) for row in rows]
 
     projected_rows = [{column: row.get(column) for column in STREAMLIT_V1_COLUMNS} for row in rows]

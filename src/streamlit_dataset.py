@@ -91,6 +91,9 @@ STREAMLIT_V1_COLUMNS = [
     "localization_data_note",
     "entry_point_data_note",
     "vbro_data_note",
+    "vvbromo_organic_sales",
+    "vvbromo_operating_profit",
+    "vvbromo_operating_profit_per_unit",
 ]
 
 SOURCE_FLAG_FIELDS = [
@@ -523,3 +526,98 @@ def enrich_streamlit_row(row: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     return enriched
+
+
+def attach_vvbromo_fields(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    import pandas as pd
+    nm_ids = {int(r["nm_id"]) for r in rows if not _is_missing(r.get("nm_id"))}
+    dates = {_normalize_date(r.get("report_date")) for r in rows if r.get("report_date") is not None}
+    dates = {d for d in dates if d is not None}
+
+    vvbromo_lookup = {}
+    if nm_ids and dates:
+        try:
+            from src.db.session import session_scope
+            from src.db.models import FactVvbromoProductDay
+            from sqlalchemy import select
+            with session_scope() as session:
+                db_rows = session.execute(
+                    select(FactVvbromoProductDay).where(
+                        FactVvbromoProductDay.nm_id.in_(list(nm_ids)),
+                        FactVvbromoProductDay.day.in_(list(dates))
+                    )
+                ).scalars().all()
+                for r in db_rows:
+                    r_date = _normalize_date(r.day)
+                    if r_date is not None:
+                        vvbromo_lookup[(r_date, int(r.nm_id))] = {
+                            "vvbromo_organic_sales": r.organic_sales,
+                            "vvbromo_operating_profit": float(r.operating_profit) if r.operating_profit is not None else None,
+                            "vvbromo_operating_profit_per_unit": float(r.operating_profit_per_unit) if r.operating_profit_per_unit is not None else None,
+                        }
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to load VVBromo data from DB: {e}")
+
+    attached_rows: list[dict[str, Any]] = []
+    for row in rows:
+        attached_row = dict(row)
+        report_date = _normalize_date(row.get("report_date"))
+        lookup_key = None
+        if report_date is not None and not _is_missing(row.get("nm_id")):
+            try:
+                lookup_key = (report_date, int(row.get("nm_id")))
+            except (TypeError, ValueError):
+                lookup_key = None
+
+        attached_row["vvbromo_organic_sales"] = None
+        attached_row["vvbromo_operating_profit"] = None
+        attached_row["vvbromo_operating_profit_per_unit"] = None
+
+        if lookup_key is not None and lookup_key in vvbromo_lookup:
+            payload = vvbromo_lookup[lookup_key]
+            attached_row["vvbromo_organic_sales"] = payload["vvbromo_organic_sales"]
+            attached_row["vvbromo_operating_profit"] = payload["vvbromo_operating_profit"]
+            attached_row["vvbromo_operating_profit_per_unit"] = payload["vvbromo_operating_profit_per_unit"]
+
+        attached_rows.append(attached_row)
+    return attached_rows
+
+
+def aggregate_vvbromo_for_period(df: pd.DataFrame, groupby_cols: list[str]) -> pd.DataFrame:
+    import pandas as pd
+    if df.empty:
+        return df.copy()
+
+    # Agg dict with dynamic types
+    agg_dict = {}
+    for col in df.columns:
+        if col in groupby_cols:
+            continue
+        if col in ("vvbromo_organic_sales", "vvbromo_operating_profit"):
+            agg_dict[col] = lambda s: s.sum(min_count=1)
+        elif col == "vvbromo_operating_profit_per_unit":
+            continue
+        else:
+            if df[col].dtype in ("int64", "float64"):
+                agg_dict[col] = lambda s: s.sum(min_count=1)
+            else:
+                agg_dict[col] = "first"
+
+    grouped = df.groupby(groupby_cols, as_index=False).agg(agg_dict)
+
+    if "vvbromo_organic_sales" in grouped.columns and "vvbromo_operating_profit" in grouped.columns:
+        def calc_per_unit(row):
+            sales = row.get("vvbromo_organic_sales")
+            profit = row.get("vvbromo_operating_profit")
+            if pd.isna(sales) or sales == 0:
+                return None
+            if pd.isna(profit):
+                return None
+            return float(profit) / float(sales)
+
+        grouped["vvbromo_operating_profit_per_unit"] = grouped.apply(calc_per_unit, axis=1)
+
+    return grouped

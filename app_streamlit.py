@@ -188,6 +188,9 @@ DISPLAY_COLUMNS_BY_DATE = [
     "ad_cpo_calc",
     "organic_cart_count",
     "organic_cart_share_calc",
+    "vvbromo_organic_sales",
+    "vvbromo_operating_profit",
+    "vvbromo_operating_profit_per_unit",
     "current_stock_qty",
     "current_stock_sum",
     "search_queries_count",
@@ -282,6 +285,9 @@ PRODUCT_TIMELINE_COLUMNS = [
     "search_queries_count",
     "current_stock_qty",
     "data_quality_status",
+    "vvbromo_organic_sales",
+    "vvbromo_operating_profit",
+    "vvbromo_operating_profit_per_unit",
 ]
 
 AD_CAMPAIGN_PRODUCT_NUMERIC_COLUMNS = [
@@ -385,6 +391,9 @@ NUMERIC_COLUMNS = [
     "organic_cart_count",
     "organic_cart_share_calc",
     "ad_cost_per_all_carts_calc",
+    "vvbromo_organic_sales",
+    "vvbromo_operating_profit",
+    "vvbromo_operating_profit_per_unit",
 ]
 
 SOURCE_FLAG_COLUMNS = [
@@ -411,6 +420,9 @@ PERIOD_DATA_METRIC_COLUMNS = [
     "current_stock_sum",
     "search_queries_count",
     "local_orders_percent",
+    "vvbromo_organic_sales",
+    "vvbromo_operating_profit",
+    "vvbromo_operating_profit_per_unit",
 ]
 
 SUMMARY_KPI_CONFIG = [
@@ -543,6 +555,9 @@ EXPORT_COLUMN_LABELS.update(
         "orders_geography_source_label": "Источник географии",
         "vbro_status_label": "ВБро",
         "organic_formula_status_label": "Статус формулы органики",
+        "vvbromo_organic_sales": "Продажи органические VVBromo",
+        "vvbromo_operating_profit": "Операционная прибыль VVBromo",
+        "vvbromo_operating_profit_per_unit": "Опер. прибыль/ед. VVBromo",
     }
 )
 
@@ -942,10 +957,111 @@ def render_password_gate() -> None:
     st.stop()
 
 
+def attach_vvbromo_to_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    if "nm_id" not in df.columns or "report_date" not in df.columns:
+        # Убедимся, что колонки есть
+        for col in ("vvbromo_organic_sales", "vvbromo_operating_profit", "vvbromo_operating_profit_per_unit"):
+            if col not in df.columns:
+                df[col] = pd.NA
+        return df
+
+    # Извлечем уникальные nm_id и даты из DataFrame для оптимизации запроса к БД
+    nm_ids = df["nm_id"].dropna().unique().tolist()
+    # Приведем report_date к датам на случай, если они еще строки/Timestamp
+    dates = pd.to_datetime(df["report_date"], errors="coerce").dt.date.dropna().unique().tolist()
+
+    if not nm_ids or not dates:
+        # Убедимся, что колонки есть
+        for col in ("vvbromo_organic_sales", "vvbromo_operating_profit", "vvbromo_operating_profit_per_unit"):
+            if col not in df.columns:
+                df[col] = pd.NA
+        return df
+
+    vv_df = pd.DataFrame()
+    try:
+        from src.db.session import session_scope
+        from src.db.models import FactVvbromoProductDay
+        from sqlalchemy import select
+        with session_scope() as session:
+            db_rows = session.execute(
+                select(FactVvbromoProductDay).where(
+                    FactVvbromoProductDay.nm_id.in_(nm_ids),
+                    FactVvbromoProductDay.day.in_(dates)
+                )
+            ).scalars().all()
+            if db_rows:
+                vv_df = pd.DataFrame([{
+                    "vv_report_date": r.day,
+                    "vv_nm_id": int(r.nm_id),
+                    "vv_sales": r.organic_sales,
+                    "vv_profit": float(r.operating_profit) if r.operating_profit is not None else None,
+                    "vv_profit_per_unit": float(r.operating_profit_per_unit) if r.operating_profit_per_unit is not None else None
+                } for r in db_rows])
+    except Exception as e:
+        logger.warning(f"Database connection failed while loading VVBromo: {e}. Falling back to CSV data or NULL.")
+        # Если БД недоступна, просто возвращаем df (если колонок нет, добавим пустые)
+        for col in ("vvbromo_organic_sales", "vvbromo_operating_profit", "vvbromo_operating_profit_per_unit"):
+            if col not in df.columns:
+                df[col] = pd.NA
+        return df
+
+    if vv_df.empty:
+        # В БД нет данных по этим товарам/датам. Убедимся, что колонки есть, и вернем df
+        for col in ("vvbromo_organic_sales", "vvbromo_operating_profit", "vvbromo_operating_profit_per_unit"):
+            if col not in df.columns:
+                df[col] = pd.NA
+        return df
+
+    # Преобразуем типы в vv_df для точного merge
+    vv_df["vv_report_date"] = pd.to_datetime(vv_df["vv_report_date"]).dt.date
+    vv_df["vv_nm_id"] = pd.to_numeric(vv_df["vv_nm_id"], errors="coerce")
+
+    # Сделаем merge
+    # Чтобы не дублировать колонки, удалим их из df перед merge
+    df_clean = df.copy()
+    for col in ("vvbromo_organic_sales", "vvbromo_operating_profit", "vvbromo_operating_profit_per_unit"):
+        if col in df_clean.columns:
+            df_clean = df_clean.drop(columns=[col])
+
+    df_clean["report_date_temp"] = pd.to_datetime(df_clean["report_date"], errors="coerce").dt.date
+    df_clean["nm_id_temp"] = pd.to_numeric(df_clean["nm_id"], errors="coerce")
+
+    merged = df_clean.merge(
+        vv_df,
+        left_on=["report_date_temp", "nm_id_temp"],
+        right_on=["vv_report_date", "vv_nm_id"],
+        how="left"
+    )
+
+    merged["vvbromo_organic_sales"] = merged["vv_sales"]
+    merged["vvbromo_operating_profit"] = merged["vv_profit"]
+    merged["vvbromo_operating_profit_per_unit"] = merged["vv_profit_per_unit"]
+
+    # Удалим временные колонки
+    merged = merged.drop(
+        columns=[
+            "report_date_temp",
+            "nm_id_temp",
+            "vv_report_date",
+            "vv_nm_id",
+            "vv_sales",
+            "vv_profit",
+            "vv_profit_per_unit"
+        ],
+        errors="ignore"
+    )
+
+    return merged
+
+
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     prepared = df.copy()
     if "report_date" in prepared.columns:
         prepared["report_date"] = pd.to_datetime(prepared["report_date"], errors="coerce").dt.date
+    prepared = attach_vvbromo_to_df(prepared)
     for column in NUMERIC_COLUMNS:
         if column in prepared.columns:
             prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
@@ -4149,6 +4265,9 @@ def render_overview_tab(
             "associated_atbs_percent_calc": st.column_config.NumberColumn("Ассоциированные корзины, %", format="%.2f"),
             "organic_cart_count": st.column_config.NumberColumn("Органические корзины", format="%.0f"),
             "organic_cart_share_calc": st.column_config.NumberColumn("Процент органики от рекламных корзин", format="%.2f"),
+            "vvbromo_organic_sales": st.column_config.NumberColumn("Продажи органические VVBromo", format="%.0f"),
+            "vvbromo_operating_profit": st.column_config.NumberColumn("Операционная прибыль VVBromo", format="%.2f"),
+            "vvbromo_operating_profit_per_unit": st.column_config.NumberColumn("Опер. прибыль/ед. VVBromo", format="%.2f"),
             "ad_cost_per_all_carts_calc": st.column_config.NumberColumn("Тех: расход на все корзины (с assoc.)", format="%.2f"),
             "avg_delivery_time": st.column_config.NumberColumn("Среднее время доставки", format="%.2f"),
             "organic_cart_share_status": st.column_config.TextColumn("Статус формулы органики", width="medium"),
@@ -6333,6 +6452,81 @@ def render_upload_tab() -> None:
                 state_key=str(section["state_key"]),
                 accepted_extensions=[str(ext) for ext in section.get("accepted_extensions", ["xlsx"])],
             )
+
+    st.divider()
+    st.subheader("VVBromo / данные Ивана")
+
+    # 1. Получим последнюю дату и кол-во строк в БД (с обработкой ошибок БД)
+    latest_date_str = "нет данных"
+    total_rows = 0
+    try:
+        from src.db.session import session_scope
+        from src.db.models import FactVvbromoProductDay
+        from sqlalchemy import select, func
+        with session_scope() as session:
+            result = session.execute(
+                select(
+                    func.max(FactVvbromoProductDay.day),
+                    func.count()
+                )
+            ).one()
+            if result[0] is not None:
+                latest_date_str = result[0].strftime("%Y-%m-%d")
+            total_rows = result[1]
+    except Exception as e:
+        logger.warning(f"Failed to query VVBromo metadata from DB: {e}")
+        st.warning("База данных временно недоступна для запроса статуса VVBromo.")
+
+    st.markdown(f"**VVBromo: последняя дата в БД — {latest_date_str}, строк — {total_rows}**")
+
+    # 2. Выбор года для загрузки (не хардкодить 2026, брать текущий по умолчанию с возможностью выбора)
+    from datetime import datetime
+    import pytz
+    try:
+        moscow_tz = pytz.timezone("Europe/Moscow")
+        now_moscow = datetime.now(moscow_tz)
+    except Exception:
+        now_moscow = datetime.now()
+    current_year = now_moscow.year
+    
+    selected_year = st.selectbox(
+        "Год для загрузки VVBromo",
+        options=[2024, 2025, 2026, 2027, 2028],
+        index=[2024, 2025, 2026, 2027, 2028].index(current_year) if current_year in [2024, 2025, 2026, 2027, 2028] else 2
+    )
+
+    # 3. Кнопка запуска синхронизации
+    if st.button("Обновить VVBromo из Google Sheets", width="content"):
+        with st.spinner("Загрузка данных VVBromo из Google Sheets..."):
+            try:
+                from scripts.parse_vvbromo_sheet import run_loader
+                summary = run_loader(year=selected_year, apply=True, dry_run=False)
+                st.success("Синхронизация VVBromo успешно завершена!")
+                
+                # Показываем summary
+                st.write("**Результаты загрузки:**")
+                st.write(f"- Прочитано строк (rows_parsed): `{summary['rows_parsed']}`")
+                st.write(f"- Записано/обновлено в БД (rows_upserted): `{summary['rows_upserted']}`")
+                st.write(f"- Минимальная дата (date_min): `{summary['date_min']}`")
+                st.write(f"- Максимальная дата (date_max): `{summary['date_max']}`")
+                st.write(f"- Уникальных nm_id (distinct_nm_id): `{summary['distinct_nm_id']}`")
+                st.write(f"- Ошибок парсинга (errors): `{summary['errors']}`")
+
+                # Очищаем кэши
+                clear_streamlit_data_caches()
+                
+                # Если data_source CSV, то перегенерируем CSV
+                data_source = resolve_data_source()
+                if data_source == "csv":
+                    try:
+                        refresh_streamlit_dataset()
+                        st.info("CSV датасет успешно пересобран.")
+                    except Exception as csv_err:
+                        st.warning(f"Не удалось обновить CSV файл: {csv_err}. Данные в БД сохранены.")
+
+                st.rerun()
+            except Exception as sync_err:
+                st.error(f"Ошибка при синхронизации VVBromo: {sync_err}")
 
 
 def render_ad_campaign_product_tab(df: pd.DataFrame, data_source: str, error_text: str | None = None) -> None:
