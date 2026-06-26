@@ -189,6 +189,7 @@ DISPLAY_COLUMNS_BY_DATE = [
     "organic_cart_count",
     "organic_cart_share_calc",
     "vvbromo_operating_profit",
+    "crm_common_calc",
     "current_stock_qty",
     "current_stock_sum",
     "search_queries_count",
@@ -392,6 +393,7 @@ NUMERIC_COLUMNS = [
     "vvbromo_organic_sales",
     "vvbromo_operating_profit",
     "vvbromo_operating_profit_per_unit",
+    "crm_common_calc",
 ]
 
 SOURCE_FLAG_COLUMNS = [
@@ -421,6 +423,7 @@ PERIOD_DATA_METRIC_COLUMNS = [
     "vvbromo_organic_sales",
     "vvbromo_operating_profit",
     "vvbromo_operating_profit_per_unit",
+    "crm_common_calc",
 ]
 
 SUMMARY_KPI_CONFIG = [
@@ -556,6 +559,7 @@ EXPORT_COLUMN_LABELS.update(
         "vvbromo_organic_sales": "Продажи органические VVBromo",
         "vvbromo_operating_profit": "Операционная прибыль VVBromo",
         "vvbromo_operating_profit_per_unit": "Опер. прибыль/ед. VVBromo",
+        "crm_common_calc": "CRM по общим заказам",
     }
 )
 
@@ -1103,10 +1107,13 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         ),
         axis=1,
     )
-    enriched["vbro_status_label"] = enriched.apply(
-        lambda row: build_vbro_status_label(row.get("vbro_status")),
-        axis=1,
-    )
+    def get_vbro_label(row):
+        profit = row.get("vvbromo_operating_profit")
+        if pd.notna(profit) and profit is not None:
+            return "Файл загружен"
+        return build_vbro_status_label(row.get("vbro_status"))
+
+    enriched["vbro_status_label"] = enriched.apply(get_vbro_label, axis=1)
     enriched["organic_formula_status_label"] = enriched.apply(
         lambda row: build_organic_formula_status_label(row.get("organic_cart_share_status")),
         axis=1,
@@ -4266,6 +4273,7 @@ def render_overview_tab(
             "vvbromo_organic_sales": st.column_config.NumberColumn("Продажи органические VVBromo", format="%.0f"),
             "vvbromo_operating_profit": st.column_config.NumberColumn("Операционная прибыль VVBromo", format="%.2f"),
             "vvbromo_operating_profit_per_unit": st.column_config.NumberColumn("Опер. прибыль/ед. VVBromo", format="%.2f"),
+            "crm_common_calc": st.column_config.NumberColumn("CRM по общим заказам", format="%.2f"),
             "ad_cost_per_all_carts_calc": st.column_config.NumberColumn("Тех: расход на все корзины (с assoc.)", format="%.2f"),
             "avg_delivery_time": st.column_config.NumberColumn("Среднее время доставки", format="%.2f"),
             "organic_cart_share_status": st.column_config.TextColumn("Статус формулы органики", width="medium"),

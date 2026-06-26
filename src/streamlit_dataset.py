@@ -94,6 +94,7 @@ STREAMLIT_V1_COLUMNS = [
     "vvbromo_organic_sales",
     "vvbromo_operating_profit",
     "vvbromo_operating_profit_per_unit",
+    "crm_common_calc",
 ]
 
 SOURCE_FLAG_FIELDS = [
@@ -278,6 +279,17 @@ def _to_bool(value: Any) -> bool:
     if _is_missing(value):
         return False
     return str(value).strip().lower() == "true"
+
+
+def _to_bool_extended(value: Any) -> bool:
+    if _is_missing(value):
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    return s in ("true", "1", "yes", "y", "t", "on")
 
 
 def _to_decimal_or_none(value: Any) -> Decimal | None:
@@ -524,6 +536,30 @@ def enrich_streamlit_row(row: Mapping[str, Any]) -> dict[str, Any]:
             enriched.get("ad_campaign_spend_total"),
             denominator,
         )
+
+    profit = enriched.get("vvbromo_operating_profit")
+    orders = enriched.get("order_count")
+    has_ep = (
+        _to_bool_extended(enriched.get("has_entry_points"))
+        or not _is_missing(enriched.get("entry_impressions_total"))
+        or not _is_missing(enriched.get("entry_card_clicks_total"))
+        or enriched.get("entry_point_status") == "CSV_EXPORT"
+    )
+    has_loc = (
+        _to_bool_extended(enriched.get("has_localization"))
+        or _to_bool_extended(enriched.get("has_localization_partial"))
+        or enriched.get("orders_geography_status") == "CSV_EXPORT"
+    )
+    if (
+        profit is not None and not _is_missing(profit)
+        and orders is not None and not _is_missing(orders)
+        and float(orders) > 0
+        and has_ep
+        and has_loc
+    ):
+        enriched["crm_common_calc"] = float(profit) / float(orders)
+    else:
+        enriched["crm_common_calc"] = None
 
     return enriched
 

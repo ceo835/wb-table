@@ -201,8 +201,33 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
 
     # 2. Input DataFrame to prepare
     df = pd.DataFrame([
-        {"report_date": "2026-06-19", "nm_id": 11111, "supplier_article": "Art1"},  # data in DB
-        {"report_date": "2026-06-19", "nm_id": 22222, "supplier_article": "Art2"},  # no data in DB
+        {
+            "report_date": "2026-06-19",
+            "nm_id": 11111,
+            "supplier_article": "Art1",
+            "order_count": 10,
+            "has_entry_points": True,
+            "has_localization": True,
+            "vbro_status": "MANUAL_PENDING",
+        },  # data in DB, should compute CRM and change status
+        {
+            "report_date": "2026-06-19",
+            "nm_id": 22222,
+            "supplier_article": "Art2",
+            "order_count": 5,
+            "has_entry_points": True,
+            "has_localization": True,
+            "vbro_status": "MANUAL_PENDING",
+        },  # no VVBromo data, should remain MANUAL_PENDING / "Не внесено"
+        {
+            "report_date": "2026-06-19",
+            "nm_id": 11111,
+            "supplier_article": "Art1",
+            "order_count": 0,
+            "has_entry_points": True,
+            "has_localization": True,
+            "vbro_status": "MANUAL_PENDING",
+        },  # order_count = 0, should keep CRM as None/NaN
     ])
 
     # 3. Prepare DataFrame
@@ -214,11 +239,18 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
     assert prepared.loc[0, "vvbromo_operating_profit"] == 1000.0
     assert prepared.loc[0, "vvbromo_organic_sales"] == 10
     assert prepared.loc[0, "vvbromo_operating_profit_per_unit"] == 100.0
+    assert prepared.loc[0, "crm_common_calc"] == 1000.0 / 10.0
+    assert prepared.loc[0, "vbro_status_label"] == "Файл загружен"
 
     # Row 1 (nm_id 22222) has no data
     assert pd.isna(prepared.loc[1, "vvbromo_operating_profit"])
     assert pd.isna(prepared.loc[1, "vvbromo_organic_sales"])
     assert pd.isna(prepared.loc[1, "vvbromo_operating_profit_per_unit"])
+    assert pd.isna(prepared.loc[1, "crm_common_calc"])
+    assert prepared.loc[1, "vbro_status_label"] == "Не внесено"
+
+    # Row 2 (order_count = 0)
+    assert pd.isna(prepared.loc[2, "crm_common_calc"])
 
     # 4. Build overview display dataframe
     table_df = build_grouped_by_date_dataset(prepared)
@@ -228,6 +260,7 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
     assert "vvbromo_operating_profit" in display_df.columns
     assert "vvbromo_organic_sales" not in display_df.columns
     assert "vvbromo_operating_profit_per_unit" not in display_df.columns
+    assert "crm_common_calc" in display_df.columns
 
     # Assertions on values in display_df (missing values must remain null/NaN)
     assert display_df.loc[0, "vvbromo_operating_profit"] == 1000.0
