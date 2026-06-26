@@ -173,3 +173,63 @@ def test_sync_button_calls_loader_and_returns_summary(monkeypatch) -> None:
     assert summary["date_max"] == "2026-06-22"
     assert summary["distinct_nm_id"] == 62
     assert summary["errors"] == 0
+
+
+def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) -> None:
+    # 1. Mock DB call inside attach_vvbromo_to_df
+    db_records = [
+        DummyVvbromoRecord(datetime.date(2026, 6, 19), 11111, 10, Decimal("1000.00"), Decimal("100.00")),
+    ]
+
+    class DummyResult:
+        def scalars(self):
+            return self
+        def all(self):
+            return db_records
+
+    class DummySession:
+        def execute(self, query):
+            return DummyResult()
+
+    class DummySessionScope:
+        def __enter__(self):
+            return DummySession()
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    monkeypatch.setattr("src.db.session.session_scope", lambda: DummySessionScope())
+
+    # 2. Input DataFrame to prepare
+    df = pd.DataFrame([
+        {"report_date": "2026-06-19", "nm_id": 11111, "supplier_article": "Art1"},  # data in DB
+        {"report_date": "2026-06-19", "nm_id": 22222, "supplier_article": "Art2"},  # no data in DB
+    ])
+
+    # 3. Prepare DataFrame
+    from app_streamlit import prepare_dataframe, build_overview_export_tables, build_grouped_by_date_dataset
+    prepared = prepare_dataframe(df)
+
+    # Check that in prepared dataframe missing values remain null/NaN (not 0)
+    # Row 0 (nm_id 11111) has data
+    assert prepared.loc[0, "vvbromo_operating_profit"] == 1000.0
+    assert prepared.loc[0, "vvbromo_organic_sales"] == 10
+    assert prepared.loc[0, "vvbromo_operating_profit_per_unit"] == 100.0
+
+    # Row 1 (nm_id 22222) has no data
+    assert pd.isna(prepared.loc[1, "vvbromo_operating_profit"])
+    assert pd.isna(prepared.loc[1, "vvbromo_organic_sales"])
+    assert pd.isna(prepared.loc[1, "vvbromo_operating_profit_per_unit"])
+
+    # 4. Build overview display dataframe
+    table_df = build_grouped_by_date_dataset(prepared)
+    display_df, export_df = build_overview_export_tables(table_df, show_empty_rows=True)
+
+    # 5. Assertions on visible columns
+    assert "vvbromo_operating_profit" in display_df.columns
+    assert "vvbromo_organic_sales" not in display_df.columns
+    assert "vvbromo_operating_profit_per_unit" not in display_df.columns
+
+    # Assertions on values in display_df (missing values must remain null/NaN)
+    assert display_df.loc[0, "vvbromo_operating_profit"] == 1000.0
+    assert pd.isna(display_df.loc[1, "vvbromo_operating_profit"])
+

@@ -188,9 +188,7 @@ DISPLAY_COLUMNS_BY_DATE = [
     "ad_cpo_calc",
     "organic_cart_count",
     "organic_cart_share_calc",
-    "vvbromo_organic_sales",
     "vvbromo_operating_profit",
-    "vvbromo_operating_profit_per_unit",
     "current_stock_qty",
     "current_stock_sum",
     "search_queries_count",
@@ -969,7 +967,7 @@ def attach_vvbromo_to_df(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     # Извлечем уникальные nm_id и даты из DataFrame для оптимизации запроса к БД
-    nm_ids = df["nm_id"].dropna().unique().tolist()
+    nm_ids = [int(x) for x in df["nm_id"].dropna().unique().tolist()]
     # Приведем report_date к датам на случай, если они еще строки/Timestamp
     dates = pd.to_datetime(df["report_date"], errors="coerce").dt.date.dropna().unique().tolist()
 
@@ -6481,9 +6479,9 @@ def render_upload_tab() -> None:
 
     # 2. Выбор года для загрузки (не хардкодить 2026, брать текущий по умолчанию с возможностью выбора)
     from datetime import datetime
-    import pytz
     try:
-        moscow_tz = pytz.timezone("Europe/Moscow")
+        from zoneinfo import ZoneInfo
+        moscow_tz = ZoneInfo("Europe/Moscow")
         now_moscow = datetime.now(moscow_tz)
     except Exception:
         now_moscow = datetime.now()
