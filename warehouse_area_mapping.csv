@@ -1,0 +1,86 @@
+warehouse_id;warehouse_name;market_area_code;market_area_name;population;population_share_pct;country;include_in_lost_profit;comment
+301981;Владимир WB;vladimir_area;Владимир / городского округ;344242;0.236;RU;True;existing_mapping
+50045246;Склад СПБ Шушары Московское;spb;Санкт-Петербург;5653000;3.871;RU;True;existing_mapping
+300571;Екатеринбург - Перспективная 14;ekaterinburg;Екатеринбург;1548000;1.06;RU;True;existing_mapping
+130744;Краснодар;krasnodar;Краснодар;1155000;0.791;RU;True;existing_mapping
+117986;Казань;kazan;Казань;1330000;0.911;RU;True;existing_mapping
+301987;Сарапул WB;izhevsk_udmurt_area;Ижевская агломерация / Удмуртская зона;1000000;0.685;RU;True;existing_mapping
+301983;Волгоград;volgograd;Волгоград;1012000;0.693;RU;True;existing_mapping
+206348;Тула;tula_novomoskovsk_agglomeration;Тульско-Новомосковская агломерация;1001700;0.686;RU;True;existing_mapping
+301805;Новосемейкино;samara_tolyatti_area;Самарско-Тольяттинская агломерация;2500000;1.712;RU;True;broader Samara Tolyatti WB zone
+208277;Невинномысск;stavropol_krai_area;Ставропольский край / Ставропольская зона;2907593;1.991;RU;True;regional_zone
+120762;Электросталь;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+301809;Котовск;tambov_oblast_area;Тамбовская область;982991;0.673;RU;True;regional_zone
+507;Коледино;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+301808;Воронеж WB;voronezh_agglomeration;Воронежская агломерация;1300000;0.89;RU;True;agglomeration_zone
+50045809;Пенза WB;penza_oblast_area;Пензенская область;1266348;0.867;RU;True;regional_zone
+301760;Рязань (Тюшевское);ryazan_oblast_area;Рязанская область;1102810;0.755;RU;True;regional_zone
+131643;склад продавца Иркутск;irkutsk_oblast_area;Иркутская область;2370102;1.623;RU;True;regional_zone
+218644;СЦ Хабаровск;khabarovsk_krai_area;Хабаровский край;1276000;0.874;RU;True;regional_zone
+302737;СЦ Барнаул;altai_krai_area;Алтайский край;2163693;1.482;RU;True;regional_zone
+324108;Астана Карагандинское шоссе;astana_area;Астана;1612512;7.944;KZ;True;foreign_denominator_kazakhstan
+50150595;СК Ереван;yerevan_area;Ереван;1143300;37.108;AM;True;foreign_denominator_armenia
+312259;СЦ Шушары;spb;Санкт-Петербург;5653000;3.871;RU;True;same_as_spb_zone
+210127;Внуково;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+168458;Омск;omsk_oblast_area;Омская область;1858798;1.273;RU;True;regional_zone
+218225;Челябинск;chelyabinsk_oblast_area;Челябинская область;3431224;2.35;RU;True;regional_zone
+333530;Симферополь, Молодежненское;crimea_sevastopol_area;Крым + Севастополь;2482450;1.7;RU;True;crimea_sevastopol_zone
+210515;Вёшки;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+301806;СК Тверь Эммаусское WB;tver_oblast_area;Тверская область;1230171;0.842;RU;True;regional_zone
+218674;Чита;zabaykalsky_krai_area;Забайкальский край;1004125;0.688;RU;True;regional_zone
+338827;Ярославль Громова СЦ WB;yaroslavl_oblast_area;Ярославская область;1209811;0.828;RU;True;regional_zone
+207743;Пушкино;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+300862;Абакан 2;khakassia_area;Республика Хакасия;532403;0.365;RU;True;regional_zone
+332491;Владивосток WB;primorsky_krai_area;Приморский край;1845165;1.264;RU;True;regional_zone
+300219;СЦ Вологда 2;vologda_oblast_area;Вологодская область;1142827;0.783;RU;True;regional_zone
+140302;Курск;kursk_oblast_area;Курская область;1082458;0.741;RU;True;regional_zone
+300168;Радумля 1;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+316879;Актобе;aktobe_region_area;Актюбинская область / Aktobe Region;909673;4.438;KZ;True;foreign_denominator_kazakhstan
+217081;Брянск Сталелитейная;bryansk_oblast_area;Брянская область;1169161;0.801;RU;True;regional_zone
+214951;Артём;primorsky_krai_area;Приморский край;1845165;1.264;RU;True;same_as_primorsky_zone
+204615;Томск;tomsk_oblast_area;Томская область;1047500;0.717;RU;True;regional_zone
+205228;Белая дача;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+315199;Оренбург Центральная;orenburg_oblast_area;Оренбургская область;1862767;1.276;RU;True;regional_zone
+50144199;СЦ Нижний Новгород Ларина;nizhny_novgorod_oblast_area;Нижегородская область;3119115;2.136;RU;True;regional_zone
+218628;СЦ Ижевск;izhevsk_udmurt_area;Ижевская агломерация / Удмуртская зона;1000000;0.685;RU;True;same_as_izhevsk_udmurt_area
+213849;Кемерово;kemerovo_oblast_area;Кемеровская область Кузбасс;2600923;1.781;RU;True;regional_zone
+300461;Гомель 2;gomel_region_area;Гомельская область;1338617;14.695;BY;True;foreign_denominator_belarus
+161003;Сургут;khmao_yugra_area;ХМАО — Югра;1730000;1.185;RU;True;regional_zone
+301920;Пятигорск, Этока;stavropol_krai_area;Ставропольский край;2907593;1.991;RU;True;same_as_stavropol_zone
+361670;Махачкала Сепараторная;dagestan_area;Республика Дагестан;3182000;2.179;RU;True;regional_zone
+206844;Калининград;kaliningrad_oblast_area;Калининградская область;1027678;0.704;RU;True;regional_zone
+206708;Новокузнецк WB;kemerovo_oblast_area;Кемеровская область Кузбасс;2600923;1.781;RU;True;same_as_kemerovo_zone
+210557;Белогорск;amur_oblast_area;Амурская область;772525;0.529;RU;True;regional_zone
+318294;Софьино;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+302769;Архангельск Ленина;arkhangelsk_oblast_area;Архангельская область;978873;0.67;RU;True;regional_zone
+209208;Сыктывкар;komi_republic_area;Республика Коми;737853;0.505;RU;True;regional_zone
+314137;СЦ Гродно;grodno_region_area;Гродненская область;992556;10.896;BY;True;foreign_denominator_belarus
+205985;Крыловская;krasnodar_krai_area;Краснодарский край;5837504;3.998;RU;True;regional_zone_not_only_stanitsa
+302335;СЦ Кузнецк;penza_oblast_area;Пензенская область;1266348;0.867;RU;True;same_as_penza_zone
+300363;СЦ Брест;brest_region_area;Брестская область;1308569;14.365;BY;True;foreign_denominator_belarus
+302988;Астрахань, Солянка;astrakhan_oblast_area;Астраханская область;960142;0.658;RU;True;regional_zone
+117819;Тюмень;tyumen_oblast_area;Тюменская область без ХМАО и ЯНАО;1600000;1.096;RU;True;separate_from_surgut_khmao
+300987;Смоленск 2;smolensk_oblast_area;Смоленская область;888421;0.608;RU;True;regional_zone
+387234;Истра WB;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+160030;Липецк;lipetsk_oblast_area;Липецкая область;1143224;0.783;RU;True;regional_zone
+205349;Мурманск;murmansk_oblast_area;Мурманская область;667744;0.457;RU;True;regional_zone
+303219;Киров Корчагина;kirov_oblast_area;Кировская область;1153680;0.79;RU;True;regional_zone
+50047765;Нижний Тагил Восточное WB;nizhny_tagil_area;Нижний Тагил / север Свердловской области;338966;0.232;RU;True;local_nizhny_tagil_zone
+149445;Уфа;bashkortostan_area;Республика Башкортостан;4091763;2.802;RU;True;regional_zone
+218987;Атакент;almaty_area;Алматы;2292055;11.183;KZ;True;foreign_denominator_kazakhstan
+387235;Ташкент 1 WB;tashkent_area;Ташкент;3164030;8.259;UZ;True;foreign_denominator_uzbekistan
+387236;Ташкент 2 WB;tashkent_area;Ташкент;3164030;8.259;UZ;True;same_as_tashkent_1
+216566;Пермь 2;perm_krai_area;Permian region;2532405;1.734;RU;True;regional_zone
+1733;Екатеринбург - Испытателей 14г;ekaterinburg;Екатеринбург;1548000;1.06;RU;True;same_as_existing_ekaterinburg
+218616;Ростов, Гайдара;rostov_oblast_area;Ростовская область;4200729;2.877;RU;True;regional_zone
+211622;Минск;minsk_area;Минск;1995091;21.902;BY;True;foreign_denominator_belarus
+218210;Обухово;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+209209;Псков;pskov_oblast_area;Псковская область;599084;0.41;RU;True;regional_zone
+50064725;СЦ Шымкент Асар WB;shymkent_area;Шымкент;1200000;5.855;KZ;True;foreign_denominator_kazakhstan
+302571;СЦ Ереван Арташисян 106;yerevan_area;Ереван;1143300;37.107;AM;True;same_as_yerevan
+117501;Подольск;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+117866;Тамбов WB;tambov_oblast_area;Тамбовская область;982991;0.673;RU;True;same_as_kotovsk_zone
+169872;Астрахань;astrakhan_oblast_area;Астраханская область;960142;0.658;RU;True;same_as_astrakhan_solyanka
+218623;Подольск 3;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+206236;Белые Столбы;moscow_metropolitan_area;Московская агломерация;21534777;14.747;RU;True;moscow_zone
+50131583;СЦ Душанбе WB;dushanbe_area;Душанбе;1228400;11.388;TJ;True;foreign_denominator_tajikistan
