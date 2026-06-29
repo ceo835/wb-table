@@ -76,10 +76,13 @@ from app_streamlit import (
     build_stock_warehouse_history_summary_metrics,
     build_stock_warehouse_history_table,
     build_stock_warehouse_product_table,
+    build_stock_warehouse_problem_profit_total,
     should_render_stock_warehouse_history_pivot,
     build_stock_warehouse_summary_card_html,
     build_stock_warehouse_display_dataframe,
     build_stock_warehouse_summary_metrics,
+    format_summary_rub,
+    resolve_stock_warehouse_default_snapshot_date,
     resolve_effective_import_date,
     resolve_export_range,
     summarize_available_dates,
@@ -1311,6 +1314,32 @@ def test_build_stock_warehouse_summary_metrics_counts_ok_zero_and_no_data_rows()
         "no_data_products": 2,
         "total_zero_warehouses": 2,
     }
+
+
+def test_build_stock_warehouse_problem_profit_total_sums_problem_table_profit() -> None:
+    problem_table = pd.DataFrame(
+        [
+            {"nm_id": 1, "lost_profit_rub": 100.4},
+            {"nm_id": 2, "lost_profit_rub": 200},
+            {"nm_id": 3, "lost_profit_rub": pd.NA},
+        ]
+    )
+
+    total = build_stock_warehouse_problem_profit_total(problem_table)
+
+    assert abs(total - 300.4) < 1e-9
+    assert format_summary_rub(total) == "300 ₽"
+
+
+def test_resolve_stock_warehouse_default_snapshot_date_prefers_report_day_and_falls_back_to_latest() -> None:
+    available_dates = [
+        datetime(2026, 6, 27).date(),
+        datetime(2026, 6, 28).date(),
+        datetime(2026, 6, 29).date(),
+    ]
+
+    assert resolve_stock_warehouse_default_snapshot_date(available_dates, datetime(2026, 6, 28).date()) == datetime(2026, 6, 28).date()
+    assert resolve_stock_warehouse_default_snapshot_date(available_dates, datetime(2026, 6, 30).date()) == datetime(2026, 6, 29).date()
 
 
 def test_load_stock_warehouse_snapshot_from_db_materializes_rows_before_session_close(monkeypatch) -> None:

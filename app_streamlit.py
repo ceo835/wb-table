@@ -3003,6 +3003,12 @@ def build_stock_warehouse_summary_metrics(product_table: pd.DataFrame) -> dict[s
     }
 
 
+def build_stock_warehouse_problem_profit_total(problem_table: pd.DataFrame) -> float:
+    if problem_table.empty or "lost_profit_rub" not in problem_table.columns:
+        return 0.0
+    return float(pd.to_numeric(problem_table["lost_profit_rub"], errors="coerce").fillna(0).sum())
+
+
 def build_stock_warehouse_summary_card_html(label: str, value: object, *, compact: bool = True) -> str:
     value_font_size = "1.35rem" if compact else "1.8rem"
     label_font_size = "0.72rem" if compact else "0.82rem"
@@ -3014,6 +3020,21 @@ def build_stock_warehouse_summary_card_html(label: str, value: object, *, compac
         f'<div style="font-size:{value_font_size};line-height:1.1;font-weight:700;color:#111827;">{escape(str(value))}</div>'
         f"</div>"
     )
+
+
+def format_summary_rub(value: float) -> str:
+    return f"{value:,.0f} ₽".replace(",", " ")
+
+
+def resolve_stock_warehouse_default_snapshot_date(
+    available_dates: list[date],
+    report_day: date,
+) -> date:
+    if not available_dates:
+        return report_day
+    if report_day in available_dates:
+        return report_day
+    return available_dates[-1]
 
 
 def build_dashboard_summary_card_html(label: str, value: object) -> str:
@@ -3315,8 +3336,14 @@ def render_stock_warehouse_tab(data_source: str) -> None:
     import zoneinfo
     moscow_tz = zoneinfo.ZoneInfo("Europe/Moscow")
     report_day = (datetime.now(moscow_tz) - timedelta(days=1)).date()
-    st.info(f"Дата отчета: **{report_day.isoformat()}** (вчера по московскому времени)")
-    selected_snapshot_date = report_day
+    default_snapshot_date = resolve_stock_warehouse_default_snapshot_date(available_dates, report_day)
+    selected_snapshot_date = st.date_input(
+        "Дата отчёта",
+        value=default_snapshot_date,
+        min_value=available_dates[0],
+        max_value=available_dates[-1],
+        key="stock_warehouse_snapshot_date",
+    )
 
     filter_cols = st.columns(4)
     show_only_tracked = filter_cols[0].checkbox("Показывать только отслеживаемые товары", value=True)
@@ -3342,11 +3369,12 @@ def render_stock_warehouse_tab(data_source: str) -> None:
     )
     summary_metrics = build_stock_warehouse_summary_metrics(product_table)
     problem_table = build_stock_warehouse_problem_table(product_table)
+    problem_profit_total = build_stock_warehouse_problem_profit_total(problem_table)
 
     summary_items = [
         ("Дата snapshot", selected_snapshot_date.isoformat()),
         ("Всего tracked товаров", f"{summary_metrics['total_products']:,}".replace(",", " ")),
-        ("Товаров в наличии", f"{summary_metrics['ok_products']:,}".replace(",", " ")),
+        ("Потенц. прибыль", format_summary_rub(problem_profit_total)),
         ("Товаров с нулём на складах", f"{summary_metrics['zero_products']:,}".replace(",", " ")),
         ("Товаров без данных", f"{summary_metrics['no_data_products']:,}".replace(",", " ")),
         ("Всего нулевых складов", f"{summary_metrics['total_zero_warehouses']:,}".replace(",", " ")),
