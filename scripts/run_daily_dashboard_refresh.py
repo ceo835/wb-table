@@ -20,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from scripts.export_streamlit_v1_dataset import export_streamlit_v1_dataset
 from scripts.load_wb_site_price_snapshot import load_wb_site_price_snapshot
+from scripts.load_wb_seller_price_snapshot import load_wb_seller_price_snapshot
 from scripts.load_missing_core_dates import run_missing_core_dates_load
 from sqlalchemy import select
 from src.config.settings import settings
@@ -191,6 +192,22 @@ def run_daily_dashboard_refresh(
             summary["api_statuses"]["wb_site_price_monitor"] = "skipped_disabled"
         summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
 
+        current_step = "wb_seller_price"
+        try:
+            seller_price_summary = load_wb_seller_price_snapshot(
+                snapshot_date=resolved_run_date,
+                write_db=True,
+            )
+            summary["wb_seller_price_summary"] = seller_price_summary
+            if seller_price_summary.get("success"):
+                summary["api_statuses"]["wb_seller_price"] = "success"
+            else:
+                summary["api_statuses"]["wb_seller_price"] = "failed_optional"
+        except Exception as exc:
+            summary["api_statuses"]["wb_seller_price"] = "failed_optional"
+            summary["wb_seller_price_error"] = str(exc)
+        summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
+
         current_step = "warehouse_snapshot"
         warehouse_summary = load_stock_warehouse_snapshot(
             snapshot_date=resolved_run_date,
@@ -320,7 +337,10 @@ def main() -> int:
         include_core_refresh=bool(args.include_core_refresh) and not bool(args.skip_core_refresh),
         mart_version=args.version,
     )
-    print(json.dumps(summary, cls=CustomJsonEncoder, ensure_ascii=False, indent=2))
+    try:
+        print(json.dumps(summary, cls=CustomJsonEncoder, ensure_ascii=False, indent=2))
+    except UnicodeEncodeError:
+        print(json.dumps(summary, cls=CustomJsonEncoder, ensure_ascii=True, indent=2))
     return 0 if summary.get("success") else 1
 
 

@@ -13,6 +13,9 @@ STREAMLIT_V1_COLUMNS = [
     "brand",
     "subject",
     "wb_buyer_price",
+    "wb_seller_price",
+    "spp_rub",
+    "spp_pct",
     "display_impressions",
     "display_ctr_calc",
     "impressions_source_note",
@@ -267,6 +270,67 @@ def attach_wb_price_snapshot_fields(
         attached_row["wb_price_alert"] = bool(price_payload.get("wb_price_alert", False))
         attached_rows.append(attached_row)
     return attached_rows
+
+
+def attach_wb_seller_price_fields(
+    rows: Sequence[Mapping[str, Any]],
+    seller_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    # Build a lookup of available prices grouped by nm_id
+    # nm_id -> list of (snapshot_date, seller_price) sorted by date
+    prices_by_nm: dict[int, list[tuple[date, Decimal]]] = {}
+    for row in seller_rows:
+        snapshot_date = _normalize_date(row.get("snapshot_date"))
+        if snapshot_date is None or _is_missing(row.get("nm_id")):
+            continue
+        try:
+            nm_id = int(row.get("nm_id"))
+        except (TypeError, ValueError):
+            continue
+        seller_price = _to_decimal_or_none(row.get("wb_seller_price"))
+        if seller_price is not None:
+            if nm_id not in prices_by_nm:
+                prices_by_nm[nm_id] = []
+            prices_by_nm[nm_id].append((snapshot_date, seller_price))
+            
+    # Sort the lists by snapshot_date
+    for nm_id in prices_by_nm:
+        prices_by_nm[nm_id].sort(key=lambda x: x[0])
+        
+    attached_rows: list[dict[str, Any]] = []
+    for row in rows:
+        attached_row = dict(row)
+        report_date = _normalize_date(row.get("report_date"))
+        
+        seller_price = None
+        if report_date is not None and not _is_missing(row.get("nm_id")):
+            try:
+                nm_id = int(row.get("nm_id"))
+            except (TypeError, ValueError):
+                nm_id = None
+                
+            if nm_id is not None and nm_id in prices_by_nm:
+                # Find the latest snapshot_date <= report_date
+                for snap_date, price in reversed(prices_by_nm[nm_id]):
+                    if snap_date <= report_date:
+                        seller_price = price
+                        break
+                        
+        attached_row["wb_seller_price"] = seller_price
+        
+        buyer_price = _to_decimal_or_none(attached_row.get("wb_buyer_price"))
+        if seller_price and buyer_price and seller_price > 0:
+            spp_rub = seller_price - buyer_price
+            spp_pct = (spp_rub / seller_price) * 100
+            attached_row["spp_rub"] = spp_rub
+            attached_row["spp_pct"] = spp_pct
+        else:
+            attached_row["spp_rub"] = None
+            attached_row["spp_pct"] = None
+            
+        attached_rows.append(attached_row)
+    return attached_rows
+
 
 
 def _is_missing(value: Any) -> bool:

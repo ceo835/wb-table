@@ -21,9 +21,9 @@ if str(ROOT_DIR) not in sys.path:
 from sqlalchemy import select
 from sqlalchemy import func
 
-from src.db.models import FactWbSitePriceSnapshot, MartTotalReport
+from src.db.models import FactWbSitePriceSnapshot, FactWbSellerPriceSnapshot, MartTotalReport
 from src.db.session import session_scope
-from src.streamlit_dataset import STREAMLIT_V1_COLUMNS, attach_wb_price_snapshot_fields, enrich_streamlit_row, attach_vvbromo_fields
+from src.streamlit_dataset import STREAMLIT_V1_COLUMNS, attach_wb_price_snapshot_fields, attach_wb_seller_price_fields, enrich_streamlit_row, attach_vvbromo_fields
 
 
 PROCESSED_DIR = ROOT_DIR / "data" / "processed"
@@ -85,6 +85,16 @@ def export_streamlit_v1_dataset(date_from: date, date_to: date) -> dict[str, Any
                 FactWbSitePriceSnapshot.nm_id.asc(),
             )
         ).scalars().all()
+        wb_seller_price_rows = session.execute(
+            select(
+                FactWbSellerPriceSnapshot.snapshot_date,
+                FactWbSellerPriceSnapshot.nm_id,
+                func.min(FactWbSellerPriceSnapshot.seller_price).label("wb_seller_price")
+            )
+            .where(FactWbSellerPriceSnapshot.seller_price > 0)
+            .group_by(FactWbSellerPriceSnapshot.snapshot_date, FactWbSellerPriceSnapshot.nm_id)
+            .order_by(FactWbSellerPriceSnapshot.snapshot_date.asc(), FactWbSellerPriceSnapshot.nm_id.asc())
+        ).all()
         rows = [row_to_dict(row) for row in mart_rows]
         snapshot_rows = [
             {
@@ -96,7 +106,16 @@ def export_streamlit_v1_dataset(date_from: date, date_to: date) -> dict[str, Any
             }
             for row in wb_price_snapshot_rows
         ]
+        seller_rows = [
+            {
+                "snapshot_date": row.snapshot_date,
+                "nm_id": row.nm_id,
+                "wb_seller_price": row.wb_seller_price,
+            }
+            for row in wb_seller_price_rows
+        ]
     rows = attach_wb_price_snapshot_fields(rows, snapshot_rows)
+    rows = attach_wb_seller_price_fields(rows, seller_rows)
     rows = attach_vvbromo_fields(rows)
     rows = [enrich_streamlit_row(row) for row in rows]
 

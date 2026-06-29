@@ -1018,3 +1018,22 @@ class FactVvbromoProductDay(Base, TimestampMixin):
     source: Mapped[str] = mapped_column(Text, nullable=False, default="vvbromo", server_default="vvbromo")
     raw_row: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
 
+
+class FactWbSellerPriceSnapshot(Base):
+    __tablename__ = "fact_wb_seller_price_snapshot"
+    __table_args__ = (
+        UniqueConstraint("snapshot_date", "nm_id", "chrt_id", name="uq_fact_wb_seller_price_snapshot_date_nm_chrt"),
+        Index("idx_fact_wb_seller_price_snapshot_date_nm_chrt", "snapshot_date", "nm_id", "chrt_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chrt_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    tech_size: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    discount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    seller_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
