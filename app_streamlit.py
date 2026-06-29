@@ -33,6 +33,7 @@ from src.db.models import (
     FactIvanAdsWideDay,
     FactWbSitePriceAlert,
     FactWbSitePriceSnapshot,
+    FactWbSellerPriceSnapshot,
     MartTotalReport,
     SettingsProducts,
     FactWbSearchQueryTextDay,
@@ -55,6 +56,7 @@ from src.streamlit_dataset import (
     FUNNEL_ZERO_FILL_FIELDS,
     NOTE_COLUMNS,
     attach_wb_price_snapshot_fields,
+    attach_wb_seller_price_fields,
     build_data_quality_label as shared_build_data_quality_label,
     enrich_streamlit_row as shared_enrich_streamlit_row,
 )
@@ -164,6 +166,9 @@ DISPLAY_COLUMNS_BY_DATE = [
     "brand",
     "subject",
     "wb_buyer_price",
+    "wb_seller_price",
+    "spp_rub",
+    "spp_pct",
     "impressions",
     "card_clicks",
     "cart_count",
@@ -245,6 +250,9 @@ DISPLAY_COLUMNS_LATEST = [
     "subject",
     "report_date",
     "wb_buyer_price",
+    "wb_seller_price",
+    "spp_rub",
+    "spp_pct",
     "comparison_date",
     "impressions",
     "impressions_delta",
@@ -272,6 +280,9 @@ DISPLAY_COLUMNS_LATEST = [
 PRODUCT_TIMELINE_COLUMNS = [
     "report_date",
     "wb_buyer_price",
+    "wb_seller_price",
+    "spp_rub",
+    "spp_pct",
     "impressions",
     "cart_count",
     "order_count",
@@ -452,6 +463,9 @@ EXPORT_COLUMN_LABELS = {
     "brand": "Бренд",
     "subject": "Предмет",
     "wb_buyer_price": "Цена WB",
+    "wb_seller_price": "Цена продавца ЛК",
+    "spp_rub": "СПП, ₽",
+    "spp_pct": "СПП, %",
     "impressions": "Показы общие",
     "card_clicks": "Переходы в карточку",
     "ctr_calc": "CTR общий",
@@ -873,6 +887,9 @@ def load_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
     wb_price_snapshot_df = load_wb_site_price_snapshot_from_db(cache_buster)
     if not wb_price_snapshot_df.empty:
         rows = attach_wb_price_snapshot_fields(rows, wb_price_snapshot_df.to_dict(orient="records"))
+    wb_seller_price_df = load_wb_seller_price_snapshot_from_db(cache_buster)
+    if not wb_seller_price_df.empty:
+        rows = attach_wb_seller_price_fields(rows, wb_seller_price_df.to_dict(orient="records"))
     return pd.DataFrame(rows)
 
 
@@ -889,6 +906,13 @@ def get_db_dataset_cache_buster() -> str:
             select(
                 func.max(FactWbSitePriceSnapshot.snapshot_date),
                 func.max(FactWbSitePriceSnapshot.created_at),
+                func.count(),
+            )
+        ).one()
+        seller_price_state = session.execute(
+            select(
+                func.max(FactWbSellerPriceSnapshot.snapshot_date),
+                func.max(FactWbSellerPriceSnapshot.created_at),
                 func.count(),
             )
         ).one()
@@ -912,7 +936,7 @@ def get_db_dataset_cache_buster() -> str:
             vvbromo_state = (None, None, 0)
     return "|".join(
         "" if value is None else str(value) 
-        for value in (*mart_state, *price_state, *alert_state, *vvbromo_state)
+        for value in (*mart_state, *price_state, *seller_price_state, *alert_state, *vvbromo_state)
     )
 
 
@@ -1466,6 +1490,31 @@ def load_wb_site_price_snapshot_from_db(cache_buster: str | None = None) -> pd.D
             for row in rows
         ]
     return pd.DataFrame(materialized_rows)
+
+
+@st.cache_data(show_spinner=False)
+def load_wb_seller_price_snapshot_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                FactWbSellerPriceSnapshot.snapshot_date,
+                FactWbSellerPriceSnapshot.nm_id,
+                func.min(FactWbSellerPriceSnapshot.seller_price).label("wb_seller_price")
+            )
+            .where(FactWbSellerPriceSnapshot.seller_price > 0)
+            .group_by(FactWbSellerPriceSnapshot.snapshot_date, FactWbSellerPriceSnapshot.nm_id)
+            .order_by(FactWbSellerPriceSnapshot.snapshot_date.asc(), FactWbSellerPriceSnapshot.nm_id.asc())
+        ).all()
+        materialized_rows = [
+            {
+                "snapshot_date": row.snapshot_date,
+                "nm_id": row.nm_id,
+                "wb_seller_price": row.wb_seller_price,
+            }
+            for row in rows
+        ]
+    return pd.DataFrame(materialized_rows)
+
 
 
 @st.cache_data(show_spinner=False)
@@ -4238,6 +4287,9 @@ def render_overview_tab(
             "brand": st.column_config.TextColumn("Бренд"),
             "subject": st.column_config.TextColumn("Предмет"),
             "wb_buyer_price": st.column_config.NumberColumn("Цена WB", format="%.2f"),
+            "wb_seller_price": st.column_config.NumberColumn("Цена продавца ЛК", format="%.2f"),
+            "spp_rub": st.column_config.NumberColumn("СПП, ₽", format="%.2f"),
+            "spp_pct": st.column_config.NumberColumn("СПП, %", format="%.2f"),
             "impressions": st.column_config.NumberColumn("Показы общие", format="%.0f"),
             "card_clicks": st.column_config.NumberColumn("Переходы в карточку", format="%.0f"),
             "ctr_calc": st.column_config.NumberColumn("CTR общий", format="%.2f"),
@@ -4568,6 +4620,9 @@ def render_product_timeline_table(product_rows: pd.DataFrame) -> None:
             column_config={
             "report_date": st.column_config.DateColumn("Дата"),
             "wb_buyer_price": st.column_config.NumberColumn("Цена WB", format="%.2f"),
+            "wb_seller_price": st.column_config.NumberColumn("Цена продавца ЛК", format="%.2f"),
+            "spp_rub": st.column_config.NumberColumn("СПП, ₽", format="%.2f"),
+            "spp_pct": st.column_config.NumberColumn("СПП, %", format="%.2f"),
             "impressions": st.column_config.NumberColumn("Показы", format="%.0f"),
             "cart_count": st.column_config.NumberColumn("Корзины", format="%.0f"),
             "order_count": st.column_config.NumberColumn("Заказы", format="%.0f"),
@@ -4673,6 +4728,9 @@ def render_product_tab(product_rows: pd.DataFrame, selected_product_date: object
         "Поиск и остатки за дату",
         [
             ("Цена WB", detail_row.get("wb_buyer_price"), 2),
+            ("Цена продавца ЛК", detail_row.get("wb_seller_price"), 2),
+            ("СПП, ₽", detail_row.get("spp_rub"), 2),
+            ("СПП, %", detail_row.get("spp_pct"), 2),
             ("Количество поисковых запросов", detail_row.get("search_queries_count"), 0),
             ("Текущий остаток", detail_row.get("current_stock_qty"), 0),
         ],

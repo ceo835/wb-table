@@ -94,6 +94,21 @@ def test_build_stock_warehouse_summary_card_html_uses_compact_sizes() -> None:
     assert "2026-06-16" in html
 
 
+def test_spp_columns_are_exposed_in_main_streamlit_views() -> None:
+    assert "wb_seller_price" in DISPLAY_COLUMNS_BY_DATE
+    assert "spp_rub" in DISPLAY_COLUMNS_BY_DATE
+    assert "spp_pct" in DISPLAY_COLUMNS_BY_DATE
+    assert "wb_seller_price" in app_streamlit.DISPLAY_COLUMNS_LATEST
+    assert "spp_rub" in app_streamlit.DISPLAY_COLUMNS_LATEST
+    assert "spp_pct" in app_streamlit.DISPLAY_COLUMNS_LATEST
+    assert "wb_seller_price" in app_streamlit.PRODUCT_TIMELINE_COLUMNS
+    assert "spp_rub" in app_streamlit.PRODUCT_TIMELINE_COLUMNS
+    assert "spp_pct" in app_streamlit.PRODUCT_TIMELINE_COLUMNS
+    assert app_streamlit.EXPORT_COLUMN_LABELS["wb_seller_price"] == "Цена продавца ЛК"
+    assert app_streamlit.EXPORT_COLUMN_LABELS["spp_rub"] == "СПП, ₽"
+    assert app_streamlit.EXPORT_COLUMN_LABELS["spp_pct"] == "СПП, %"
+
+
 def test_apply_display_min_date_filter_hides_dates_before_cutoff_and_preserves_attrs(monkeypatch) -> None:
     monkeypatch.setenv("STREAMLIT_DISPLAY_MIN_DATE", "2026-06-07")
     df = pd.DataFrame(
@@ -261,6 +276,43 @@ def test_resolve_db_dataset_cache_buster_returns_none_on_failure(monkeypatch) ->
 
     assert app_streamlit.resolve_db_dataset_cache_buster() is None
     assert logged == ["Failed to build DB dataset cache-buster"]
+
+
+def test_get_db_dataset_cache_buster_includes_seller_price_state(monkeypatch) -> None:
+    class _FakeResult:
+        def __init__(self, row: tuple[object, ...]) -> None:
+            self._row = row
+
+        def one(self) -> tuple[object, ...]:
+            return self._row
+
+    rows = iter(
+        [
+            ("2026-06-29", "2026-06-29T10:00:00+00:00", 100),
+            ("2026-06-29", "2026-06-29T10:05:00+00:00", 59),
+            ("2026-06-29", "2026-06-29T10:10:00+00:00", 354),
+            ("2026-06-29", "2026-06-29T10:15:00+00:00", 3),
+            ("2026-06-29", "2026-06-29T10:20:00+00:00", 12),
+        ]
+    )
+
+    class _FakeSession:
+        def execute(self, _statement):
+            return _FakeResult(next(rows))
+
+    class _FakeScope:
+        def __enter__(self):
+            return _FakeSession()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(app_streamlit, "session_scope", lambda: _FakeScope())
+
+    cache_buster = app_streamlit.get_db_dataset_cache_buster()
+
+    assert "2026-06-29T10:10:00+00:00" in cache_buster
+    assert "|354|" in f"|{cache_buster}|"
 
 
 def test_load_app_dataset_db_falls_back_when_cache_buster_raises(monkeypatch) -> None:
