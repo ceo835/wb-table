@@ -4176,6 +4176,27 @@ def get_product_options(filtered: pd.DataFrame) -> tuple[list[str], dict[str, di
     return options, option_map
 
 
+OVERVIEW_ALL_PRODUCTS_LABEL = "Все товары"
+
+
+def filter_rows_by_selected_product_label(
+    rows: pd.DataFrame,
+    selected_label: str | None,
+    option_map: dict[str, dict[str, object]],
+) -> pd.DataFrame:
+    if rows.empty or not selected_label or selected_label == OVERVIEW_ALL_PRODUCTS_LABEL:
+        return rows.copy()
+    if "nm_id" not in rows.columns:
+        return rows.copy()
+
+    selected_nm_id = option_map.get(selected_label, {}).get("nm_id")
+    if selected_nm_id is None:
+        return rows.copy()
+
+    nm_id_series = pd.to_numeric(rows["nm_id"], errors="coerce")
+    return rows.loc[nm_id_series == int(selected_nm_id)].copy()
+
+
 def get_selected_product_rows(
     filtered: pd.DataFrame,
     selected_label: str,
@@ -4259,6 +4280,20 @@ def render_overview_tab(
         export_columns = DISPLAY_COLUMNS_BY_DATE
         status_column = "data_quality_label"
         download_label = "Скачать расширенный ИТОГО CSV"
+
+    overview_product_options, overview_product_option_map = get_product_options(filtered)
+    overview_product_filter_options = [OVERVIEW_ALL_PRODUCTS_LABEL, *overview_product_options]
+    selected_overview_product_label = st.selectbox(
+        "Выбрать товар",
+        options=overview_product_filter_options,
+        index=0,
+        key="overview_selected_product_label",
+    )
+    table_df = filter_rows_by_selected_product_label(
+        table_df,
+        selected_overview_product_label,
+        overview_product_option_map,
+    )
 
     if view_mode == LATEST_MODE_LABEL:
         table_display_df = table_df.reindex(columns=display_columns).copy()

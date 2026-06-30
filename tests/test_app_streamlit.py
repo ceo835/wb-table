@@ -57,6 +57,7 @@ from app_streamlit import (
     build_warnings,
     build_wb_site_price_monitor_visibility_summary,
     can_apply_import_summary,
+    filter_rows_by_selected_product_label,
     format_delta,
     get_app_password,
     get_latest_product_context,
@@ -3798,6 +3799,42 @@ def test_build_overview_export_tables_hide_stock_columns_and_empty_rows() -> Non
     assert "Остаток WB" not in export_df.columns
     assert "Сумма остатков" not in export_df.columns
     assert export_df["Артикул WB"].tolist() == [202]
+
+
+def test_filter_rows_by_selected_product_label_returns_all_rows_for_all_products() -> None:
+    rows = pd.DataFrame(
+        [
+            {"report_date": "2026-06-18", "nm_id": 101, "supplier_article": "alpha"},
+            {"report_date": "2026-06-19", "nm_id": 202, "supplier_article": "beta"},
+        ]
+    )
+
+    result = filter_rows_by_selected_product_label(
+        rows,
+        app_streamlit.OVERVIEW_ALL_PRODUCTS_LABEL,
+        {"alpha | 101 | Product A": {"nm_id": 101}},
+    )
+
+    assert result.to_dict(orient="records") == rows.to_dict(orient="records")
+
+
+def test_filter_rows_by_selected_product_label_filters_overview_by_nm_id() -> None:
+    rows = pd.DataFrame(
+        [
+            {"report_date": "2026-06-18", "nm_id": 101, "supplier_article": "alpha"},
+            {"report_date": "2026-06-19", "nm_id": 101, "supplier_article": "alpha"},
+            {"report_date": "2026-06-18", "nm_id": 202, "supplier_article": "beta"},
+        ]
+    )
+    option_map = {
+        "alpha | 101 | Product A": {"nm_id": 101},
+        "beta | 202 | Product B": {"nm_id": 202},
+    }
+
+    result = filter_rows_by_selected_product_label(rows, "beta | 202 | Product B", option_map)
+
+    assert result["nm_id"].tolist() == [202]
+    assert result["supplier_article"].tolist() == ["beta"]
 
 
 def test_build_excel_export_bytes_creates_xlsx_from_current_table() -> None:
