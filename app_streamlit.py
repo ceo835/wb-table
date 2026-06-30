@@ -6676,13 +6676,6 @@ def build_upload_tab_sections() -> list[dict[str, object]]:
             "implemented": True,
             "importer_func": import_orders_geography_xlsx,
         },
-        {
-            "title": "Загрузить ВБро",
-            "report_name": "ВБро",
-            "state_key": VBRO_UPLOAD_KEY,
-            "implemented": False,
-            "accepted_extensions": ["xlsx", "xlsm"],
-        },
     ]
 
 
@@ -6729,80 +6722,7 @@ def render_upload_tab() -> None:
                 accepted_extensions=[str(ext) for ext in section.get("accepted_extensions", ["xlsx"])],
             )
 
-    st.divider()
-    st.subheader("VVBromo / данные Ивана")
 
-    # 1. Получим последнюю дату и кол-во строк в БД (с обработкой ошибок БД)
-    latest_date_str = "нет данных"
-    total_rows = 0
-    try:
-        from src.db.session import session_scope
-        from src.db.models import FactVvbromoProductDay
-        from sqlalchemy import select, func
-        with session_scope() as session:
-            result = session.execute(
-                select(
-                    func.max(FactVvbromoProductDay.day),
-                    func.count()
-                )
-            ).one()
-            if result[0] is not None:
-                latest_date_str = result[0].strftime("%Y-%m-%d")
-            total_rows = result[1]
-    except Exception as e:
-        logger.warning(f"Failed to query VVBromo metadata from DB: {e}")
-        st.warning("База данных временно недоступна для запроса статуса VVBromo.")
-
-    st.markdown(f"**VVBromo: последняя дата в БД — {latest_date_str}, строк — {total_rows}**")
-
-    # 2. Выбор года для загрузки (не хардкодить 2026, брать текущий по умолчанию с возможностью выбора)
-    from datetime import datetime
-    try:
-        from zoneinfo import ZoneInfo
-        moscow_tz = ZoneInfo("Europe/Moscow")
-        now_moscow = datetime.now(moscow_tz)
-    except Exception:
-        now_moscow = datetime.now()
-    current_year = now_moscow.year
-    
-    selected_year = st.selectbox(
-        "Год для загрузки VVBromo",
-        options=[2024, 2025, 2026, 2027, 2028],
-        index=[2024, 2025, 2026, 2027, 2028].index(current_year) if current_year in [2024, 2025, 2026, 2027, 2028] else 2
-    )
-
-    # 3. Кнопка запуска синхронизации
-    if st.button("Обновить VVBromo из Google Sheets", width="content"):
-        with st.spinner("Загрузка данных VVBromo из Google Sheets..."):
-            try:
-                from scripts.parse_vvbromo_sheet import run_loader
-                summary = run_loader(year=selected_year, apply=True, dry_run=False)
-                st.success("Синхронизация VVBromo успешно завершена!")
-                
-                # Показываем summary
-                st.write("**Результаты загрузки:**")
-                st.write(f"- Прочитано строк (rows_parsed): `{summary['rows_parsed']}`")
-                st.write(f"- Записано/обновлено в БД (rows_upserted): `{summary['rows_upserted']}`")
-                st.write(f"- Минимальная дата (date_min): `{summary['date_min']}`")
-                st.write(f"- Максимальная дата (date_max): `{summary['date_max']}`")
-                st.write(f"- Уникальных nm_id (distinct_nm_id): `{summary['distinct_nm_id']}`")
-                st.write(f"- Ошибок парсинга (errors): `{summary['errors']}`")
-
-                # Очищаем кэши
-                clear_streamlit_data_caches()
-                
-                # Если data_source CSV, то перегенерируем CSV
-                data_source = resolve_data_source()
-                if data_source == "csv":
-                    try:
-                        refresh_streamlit_dataset()
-                        st.info("CSV датасет успешно пересобран.")
-                    except Exception as csv_err:
-                        st.warning(f"Не удалось обновить CSV файл: {csv_err}. Данные в БД сохранены.")
-
-                st.rerun()
-            except Exception as sync_err:
-                st.error(f"Ошибка при синхронизации VVBromo: {sync_err}")
 
 
 def render_ad_campaign_product_tab(df: pd.DataFrame, data_source: str, error_text: str | None = None) -> None:
