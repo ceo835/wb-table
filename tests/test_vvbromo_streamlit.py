@@ -289,3 +289,106 @@ def test_vvbromo_streamlit_display_columns_and_null_preservation(monkeypatch) ->
     assert pytest.approx(float(export_df.loc[0, "CRM по общим заказам"]), 0.0001) == 20622.0 / 90.0
     assert export_df.loc[1, "CRM по общим заказам"] == "—"
 
+
+def test_vvbromo_charts_calculations(monkeypatch) -> None:
+    # Mock apply_product_bands to just return the df as is
+    monkeypatch.setattr("app_streamlit.apply_product_bands", lambda df: df)
+    
+    # Mock st.altair_chart and st.info, st.markdown, st.caption
+    charts = []
+    def mock_altair_chart(chart, width):
+        charts.append(chart)
+    
+    monkeypatch.setattr("streamlit.altair_chart", mock_altair_chart)
+    monkeypatch.setattr("streamlit.info", lambda msg: None)
+    monkeypatch.setattr("streamlit.markdown", lambda msg: None)
+    monkeypatch.setattr("streamlit.caption", lambda msg: None)
+    
+    # Test Case 1 & 2: weighted calculation and total profit
+    df = pd.DataFrame([
+        {
+            "report_date": datetime.date(2026, 6, 19),
+            "nm_id": 11111,
+            "band_name": "Band A",
+            "vvbromo_operating_profit": 17114.0,
+            "vvbromo_organic_sales": 90.0,
+        },
+        {
+            "report_date": datetime.date(2026, 6, 19),
+            "nm_id": 22222,
+            "band_name": "Band A",
+            "vvbromo_operating_profit": 8171.0,
+            "vvbromo_organic_sales": 59.0,
+        }
+    ])
+    
+    from app_streamlit import render_vvbromo_charts
+    
+    render_vvbromo_charts(df)
+    
+    assert len(charts) == 2
+    c1, c2 = charts[0], charts[1]
+    
+    import altair as alt
+    def get_chart_data(chart):
+        if chart.data is not alt.Undefined and chart.data is not None:
+            return chart.data
+        if hasattr(chart, "layer"):
+            for layer in chart.layer:
+                if layer.data is not alt.Undefined and layer.data is not None:
+                    # Make sure it's the main dataset (not threshold label DataFrame)
+                    if isinstance(layer.data, pd.DataFrame) and "report_date" in layer.data.columns:
+                        return layer.data
+        return None
+
+    c1_df = get_chart_data(c1)
+    c2_df = get_chart_data(c2)
+    
+    assert len(c1_df) == 1
+    assert c1_df.loc[0, "vvbromo_operating_profit"] == 17114.0 + 8171.0
+    assert c1_df.loc[0, "vvbromo_organic_sales"] == 90.0 + 59.0
+    
+    expected_weighted_profit = (17114.0 + 8171.0) / (90.0 + 59.0)
+    assert pytest.approx(c1_df.loc[0, "profit_per_unit"], 0.0001) == expected_weighted_profit
+    
+    assert len(c2_df) == 1
+    assert c2_df.loc[0, "vvbromo_operating_profit"] == 17114.0 + 8171.0
+    
+    # Test Case 3: Target line only on profit per unit chart
+    def has_rule_mark(chart):
+        if not hasattr(chart, "layer"):
+            return getattr(chart.mark, "type", chart.mark) == "rule"
+        for layer in chart.layer:
+            mark_type = getattr(layer.mark, "type", layer.mark)
+            if mark_type == "rule":
+                return True
+        return False
+    
+    assert has_rule_mark(c1) is True
+    assert has_rule_mark(c2) is False
+
+    # Test Case 4: null sales does not division by zero
+    df_null = pd.DataFrame([
+        {
+            "report_date": datetime.date(2026, 6, 19),
+            "nm_id": 11111,
+            "band_name": "Band A",
+            "vvbromo_operating_profit": 100.0,
+            "vvbromo_organic_sales": 0.0,
+        },
+        {
+            "report_date": datetime.date(2026, 6, 20),
+            "nm_id": 11111,
+            "band_name": "Band A",
+            "vvbromo_operating_profit": 100.0,
+            "vvbromo_organic_sales": None,
+        }
+    ])
+    charts.clear()
+    render_vvbromo_charts(df_null)
+    assert len(charts) == 1
+    c2_only = charts[0]
+    c2_only_df = get_chart_data(c2_only)
+    assert len(c2_only_df) == 2
+
+

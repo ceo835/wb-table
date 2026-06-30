@@ -6365,6 +6365,130 @@ def render_charts_tab(
             },
         )
 
+    st.divider()
+    render_vvbromo_charts(filtered)
+
+
+def build_vvbromo_chart(
+    *,
+    chart_df: pd.DataFrame,
+    value_column: str,
+    y_title: str,
+    tooltip_value_title: str,
+    value_format: str,
+    threshold: float | None = None,
+    threshold_label: str | None = None,
+) -> alt.Chart | None:
+    if chart_df.empty:
+        return None
+
+    unique_dates_count = len(chart_df["report_date"].unique())
+    base = alt.Chart(chart_df).encode(
+        x=alt.X(
+            "report_date:T",
+            title="Дата",
+            axis=alt.Axis(format="%d.%m", labelAngle=0, tickCount=min(max(unique_dates_count, 2), 10)),
+        ),
+        y=alt.Y(
+            f"{value_column}:Q",
+            title=y_title,
+            axis=alt.Axis(format=value_format),
+            scale=alt.Scale(zero=True, nice=True),
+        ),
+        color=alt.Color(
+            "band_name:N",
+            title="Банда",
+        ),
+        tooltip=[
+            alt.Tooltip("report_date:T", title="Дата", format="%d.%m.%Y"),
+            alt.Tooltip("band_name:N", title="Банда"),
+            alt.Tooltip(f"{value_column}:Q", title=tooltip_value_title, format=value_format),
+        ],
+    )
+
+    layers: list[alt.Chart] = [
+        base.mark_line(strokeWidth=3),
+        base.mark_circle(size=55),
+    ]
+
+    if threshold is not None and threshold_label:
+        threshold_df = pd.DataFrame({"threshold": [threshold], "label": [threshold_label]})
+        layers.append(
+            alt.Chart(threshold_df).mark_rule(color="#dc2626", strokeDash=[6, 4]).encode(y="threshold:Q")
+        )
+        layers.append(
+            alt.Chart(threshold_df)
+            .mark_text(color="#dc2626", align="left", dx=8, dy=-6, fontSize=12)
+            .encode(x=alt.value(8), y="threshold:Q", text="label:N")
+        )
+
+    return alt.layer(*layers).resolve_scale(color="shared").properties(height=320)
+
+
+def render_vvbromo_charts(filtered: pd.DataFrame) -> None:
+    st.markdown("### VVBromo: опер. прибыль/ед., ₽")
+    st.caption("Отношение операционной прибыли VVBromo к органическим продажам VVBromo по бандам.")
+
+    df_bands = apply_product_bands(filtered)
+    if "band_name" not in df_bands.columns or df_bands.dropna(subset=["band_name"]).empty:
+        st.info("Нет товаров с привязкой к бандам за выбранный период.")
+        return
+
+    df_bands = df_bands.dropna(subset=["band_name"])
+
+    # Агрегируем по датам и бандам
+    agg_df = df_bands.groupby(["report_date", "band_name"], as_index=False).agg({
+        "vvbromo_operating_profit": lambda x: x.sum(min_count=1),
+        "vvbromo_organic_sales": lambda x: x.sum(min_count=1),
+    })
+
+    # Расчет операционной прибыли на единицу
+    def calc_profit_per_unit(row):
+        profit = row.get("vvbromo_operating_profit")
+        sales = row.get("vvbromo_organic_sales")
+        if pd.isna(sales) or sales == 0:
+            return None
+        if pd.isna(profit):
+            return None
+        return float(profit) / float(sales)
+
+    agg_df["profit_per_unit"] = agg_df.apply(calc_profit_per_unit, axis=1)
+
+    # Первый график
+    g1_data = agg_df.dropna(subset=["profit_per_unit"]).copy()
+    g1_data["report_date"] = pd.to_datetime(g1_data["report_date"])
+    g1_chart = build_vvbromo_chart(
+        chart_df=g1_data,
+        value_column="profit_per_unit",
+        y_title="Опер. прибыль/ед., руб.",
+        tooltip_value_title="Опер. прибыль/ед.",
+        value_format=".2f",
+        threshold=150.0,
+        threshold_label="План 150 руб.",
+    )
+    if g1_chart is None:
+        st.info("Нет данных для графика опер. прибыли/ед.")
+    else:
+        st.altair_chart(g1_chart, width="stretch")
+
+    # Второй график
+    st.markdown("### VVBromo: операционная прибыль, ₽")
+    st.caption("Суммарная операционная прибыль VVBromo по бандам.")
+
+    g2_data = agg_df.dropna(subset=["vvbromo_operating_profit"]).copy()
+    g2_data["report_date"] = pd.to_datetime(g2_data["report_date"])
+    g2_chart = build_vvbromo_chart(
+        chart_df=g2_data,
+        value_column="vvbromo_operating_profit",
+        y_title="Операционная прибыль, руб.",
+        tooltip_value_title="Операционная прибыль",
+        value_format=".2f",
+    )
+    if g2_chart is None:
+        st.info("Нет данных для графика операционной прибыли.")
+    else:
+        st.altair_chart(g2_chart, width="stretch")
+
 
 def render_sources_tab(latest_row: pd.Series) -> None:
     st.subheader("Статусы источников")
