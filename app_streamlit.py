@@ -124,7 +124,6 @@ CHART_LEVEL_CONVERSION = "Тип WB / конверсии"
 CHART_AGGREGATION_LEVELS = [
     CHART_LEVEL_CABINET,
     CHART_LEVEL_CATEGORY,
-    CHART_LEVEL_BAND,
     CHART_LEVEL_ARTICLE,
     CHART_LEVEL_CONVERSION,
 ]
@@ -6009,7 +6008,7 @@ def build_ad_cart_cost_chart_series_map(*, is_conversion_level: bool) -> dict[st
     }
 
 
-def render_charts_tab(
+def render_efficiency_charts(
     filtered: pd.DataFrame,
     preselected_product_label: str | None,
     option_map: dict[str, dict[str, object]],
@@ -6365,8 +6364,23 @@ def render_charts_tab(
             },
         )
 
-    st.divider()
-    render_vvbromo_charts(filtered)
+
+def render_charts_tab(
+    filtered: pd.DataFrame,
+    preselected_product_label: str | None,
+    option_map: dict[str, dict[str, object]],
+    ad_campaign_product_df: pd.DataFrame | None = None,
+) -> None:
+    tab_eff, tab_vbro = st.tabs(["Эффективность рекламы", "VVBromo"])
+    with tab_eff:
+        render_efficiency_charts(
+            filtered=filtered,
+            preselected_product_label=preselected_product_label,
+            option_map=option_map,
+            ad_campaign_product_df=ad_campaign_product_df,
+        )
+    with tab_vbro:
+        render_vvbromo_charts(filtered)
 
 
 def build_vvbromo_chart(
