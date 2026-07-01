@@ -30,6 +30,7 @@ from app_streamlit import (
     build_debug_snapshot,
     build_debug_trace_frame,
     build_chart_metrics_by_date,
+    build_chart_kpi_card_html,
     build_chart_period_summary,
     build_ad_cart_cost_chart_series_map,
     build_ad_carts_chart_series_map,
@@ -78,6 +79,7 @@ from app_streamlit import (
     build_stock_warehouse_history_table,
     build_stock_warehouse_product_table,
     build_stock_warehouse_problem_profit_total,
+    build_ad_campaign_product_scope_dataframe,
     should_render_stock_warehouse_history_pivot,
     build_stock_all_band_level,
     build_stock_warehouse_summary_card_html,
@@ -97,7 +99,26 @@ def test_build_stock_warehouse_summary_card_html_uses_compact_sizes() -> None:
 
     assert "1.35rem" in html
     assert "0.72rem" in html
+    assert "min-height:94px" in html
+    assert "justify-content:space-between" in html
     assert "2026-06-16" in html
+
+
+def test_build_chart_kpi_card_html_uses_fixed_height_layout() -> None:
+    html = build_chart_kpi_card_html(
+        label="CPO РК",
+        value_text="156.2 руб.",
+        caption_text="Порог превышен: 150 руб.",
+        background="#fff1f2",
+        border="#ef4444",
+        value_color="#0f172a",
+        caption_color="#b91c1c",
+    )
+
+    assert "height:136px" in html
+    assert "justify-content:space-between" in html
+    assert "min-height:32px" in html
+    assert "min-height:28px" in html
 
 
 def test_spp_columns_are_exposed_in_main_streamlit_views() -> None:
@@ -3839,6 +3860,37 @@ def test_filter_rows_by_selected_product_label_filters_overview_by_nm_id() -> No
     assert result["supplier_article"].tolist() == ["beta"]
 
 
+def test_build_ad_campaign_product_scope_dataframe_uses_selected_product_and_sidebar_dates() -> None:
+    df = pd.DataFrame(
+        [
+            {"report_date": "2026-06-18", "nm_id": 101, "supplier_article": "alpha", "advert_id": 1},
+            {"report_date": "2026-06-19", "nm_id": 101, "supplier_article": "alpha", "advert_id": 2},
+            {"report_date": "2026-06-18", "nm_id": 202, "supplier_article": "beta", "advert_id": 3},
+            {"report_date": "2026-06-20", "nm_id": 101, "supplier_article": "alpha", "advert_id": 4},
+        ]
+    )
+    option_map = {
+        "alpha | 101 | Product A": {"nm_id": 101},
+        "beta | 202 | Product B": {"nm_id": 202},
+    }
+
+    result = build_ad_campaign_product_scope_dataframe(
+        df,
+        selected_product_label="alpha | 101 | Product A",
+        option_map=option_map,
+        allowed_report_dates=[
+            pd.to_datetime("2026-06-18").date(),
+            pd.to_datetime("2026-06-19").date(),
+        ],
+    )
+
+    assert result["nm_id"].tolist() == [101, 101]
+    assert result["report_date"].tolist() == [
+        pd.to_datetime("2026-06-18").date(),
+        pd.to_datetime("2026-06-19").date(),
+    ]
+
+
 def test_build_excel_export_bytes_creates_xlsx_from_current_table() -> None:
     export_df = pd.DataFrame(
         [
@@ -4033,9 +4085,15 @@ def test_build_stock_all_product_level_keeps_product_title_for_display() -> None
     result = build_stock_all_product_level(snapshot_df, settings_df, pd.Timestamp("2026-06-30").date())
 
     assert "title" in result.columns
+    assert "query_group" in result.columns
+    assert "band_name" in result.columns
     assert result[["nm_id", "title"]].to_dict(orient="records") == [
         {"nm_id": 101, "title": "Товар 101"},
         {"nm_id": 202, "title": "Товар 202"},
+    ]
+    assert result[["nm_id", "query_group", "band_name"]].to_dict(orient="records") == [
+        {"nm_id": 101, "query_group": "трусы детские", "band_name": "Трусы детские"},
+        {"nm_id": 202, "query_group": "трусы женские", "band_name": "Трусы женские"},
     ]
 
 
@@ -4078,9 +4136,60 @@ def test_build_stock_all_band_level_uses_only_real_query_groups_from_db() -> Non
     )
 
     result = build_stock_all_band_level(product_df)
+    assert result["band_name"].tolist() == ["Прочее", "Трусы женские"]
+    assert result["products_count"].tolist() == [3, 1]
+    return
 
     assert result["band"].tolist() == ["детская футболка", "трусы женские"]
-    assert result["products_count"].tolist() == [1, 1]
+    assert result["products_count"].tolist() == [3, 1]
+
+
+def test_build_stock_all_product_level_exposes_business_band_name_from_query_group() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {"snapshot_date": pd.Timestamp("2026-06-30").date(), "nm_id": 1, "stock_qty": 1, "in_way_to_client": 0, "in_way_from_client": 0},
+            {"snapshot_date": pd.Timestamp("2026-06-30").date(), "nm_id": 2, "stock_qty": 1, "in_way_to_client": 0, "in_way_from_client": 0},
+            {"snapshot_date": pd.Timestamp("2026-06-30").date(), "nm_id": 3, "stock_qty": 1, "in_way_to_client": 0, "in_way_from_client": 0},
+            {"snapshot_date": pd.Timestamp("2026-06-30").date(), "nm_id": 4, "stock_qty": 1, "in_way_to_client": 0, "in_way_from_client": 0},
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {"nm_id": 1, "query_group": "women_underwear", "supplier_article": "a1", "title": "A1"},
+            {"nm_id": 2, "query_group": "kids_underwear", "supplier_article": "a2", "title": "A2"},
+            {"nm_id": 3, "query_group": "men_tshirts", "supplier_article": "a3", "title": "A3"},
+            {"nm_id": 4, "query_group": "unknown", "supplier_article": "a4", "title": "A4"},
+        ]
+    )
+
+    result = build_stock_all_product_level(snapshot_df, settings_df, pd.Timestamp("2026-06-30").date())
+
+    assert "query_group" in result.columns
+    assert "band_name" in result.columns
+    assert result[["nm_id", "band_name"]].to_dict(orient="records") == [
+        {"nm_id": 1, "band_name": "Трусы женские"},
+        {"nm_id": 2, "band_name": "Трусы детские"},
+        {"nm_id": 3, "band_name": "Футболки"},
+        {"nm_id": 4, "band_name": "Прочее"},
+    ]
+
+
+def test_build_stock_all_band_level_groups_by_business_band_name_and_preserves_totals() -> None:
+    product_df = pd.DataFrame(
+        [
+            {"query_group": "women_underwear", "band_name": "Трусы женские", "nm_id": 101, "wb_stock_qty": 5, "wb_in_way_to_client": 1, "wb_in_way_from_client": 0, "wb_total_in_contour": 6},
+            {"query_group": "kids_underwear", "band_name": "Трусы детские", "nm_id": 202, "wb_stock_qty": 3, "wb_in_way_to_client": 0, "wb_in_way_from_client": 2, "wb_total_in_contour": 5},
+            {"query_group": "women_tshirts", "band_name": "Футболки", "nm_id": 303, "wb_stock_qty": 9, "wb_in_way_to_client": 0, "wb_in_way_from_client": 0, "wb_total_in_contour": 9},
+            {"query_group": "men_tshirts", "band_name": "Футболки", "nm_id": 304, "wb_stock_qty": 2, "wb_in_way_to_client": 1, "wb_in_way_from_client": 0, "wb_total_in_contour": 3},
+            {"query_group": "gift_sets", "band_name": "Прочее", "nm_id": 404, "wb_stock_qty": 7, "wb_in_way_to_client": 0, "wb_in_way_from_client": 0, "wb_total_in_contour": 7},
+        ]
+    )
+
+    result = build_stock_all_band_level(product_df)
+
+    assert result["band_name"].tolist() == ["Прочее", "Трусы детские", "Трусы женские", "Футболки"]
+    assert result["products_count"].tolist() == [1, 1, 1, 2]
+    assert result["wb_total_in_contour"].sum() == product_df["wb_total_in_contour"].sum()
 
 
 def test_build_stock_warehouse_history_summary_metrics_counts_row_statuses() -> None:

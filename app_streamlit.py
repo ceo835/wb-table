@@ -1918,7 +1918,6 @@ def style_wb_site_price_monitor_table(df: pd.DataFrame) -> pd.io.formats.style.S
 
 
 def render_wb_site_price_tab(data_source: str) -> None:
-    st.caption("Источник: `fact_wb_site_price_snapshot` + `fact_wb_site_price_alert`, чтение напрямую из PostgreSQL.")
     if data_source != "db":
         st.info("Мониторинг цен WB доступен только в режиме PostgreSQL.")
         return
@@ -3020,11 +3019,12 @@ def build_stock_warehouse_summary_card_html(label: str, value: object, *, compac
     value_font_size = "1.35rem" if compact else "1.8rem"
     label_font_size = "0.72rem" if compact else "0.82rem"
     padding = "0.55rem 0.7rem" if compact else "0.8rem 0.9rem"
+    min_height = "94px" if compact else "112px"
     return (
         f'<div style="border:1px solid #e5e7eb;border-radius:12px;background:#ffffff;'
-        f'padding:{padding};min-height:74px;">'
-        f'<div style="font-size:{label_font_size};line-height:1.2;color:#6b7280;margin-bottom:0.3rem;">{escape(str(label))}</div>'
-        f'<div style="font-size:{value_font_size};line-height:1.1;font-weight:700;color:#111827;">{escape(str(value))}</div>'
+        f'padding:{padding};min-height:{min_height};display:flex;flex-direction:column;justify-content:space-between;box-sizing:border-box;">'
+        f'<div style="font-size:{label_font_size};line-height:1.2;color:#6b7280;min-height:2.1rem;">{escape(str(label))}</div>'
+        f'<div style="font-size:{value_font_size};line-height:1.1;font-weight:700;color:#111827;min-height:1.7rem;display:flex;align-items:flex-end;">{escape(str(value))}</div>'
         f"</div>"
     )
 
@@ -3341,7 +3341,7 @@ def build_stock_all_product_level(
     - wb_supply_qty         = None  (поставки на склад WB — отдельный источник)
     """
     empty_cols = [
-        "band", "nm_id", "vendor_code", "title",
+        "query_group", "band", "band_name", "nm_id", "vendor_code", "title",
         "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client",
         "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty",
     ]
@@ -3398,7 +3398,10 @@ def build_stock_all_product_level(
         agg["supplier_article"] = pd.NA
         agg["title"] = pd.NA
 
-    agg = agg.rename(columns={"query_group": "band", "supplier_article": "vendor_code"})
+    agg["query_group"] = agg["query_group"].map(normalize_query_group_value)
+    agg = agg.rename(columns={"supplier_article": "vendor_code"})
+    agg["band"] = agg["query_group"]
+    agg["band_name"] = agg["query_group"].map(build_stock_all_band_name)
     agg["title"] = agg["title"].where(agg["title"].notna(), agg["vendor_code"])
     agg["title"] = agg["title"].where(agg["title"].notna(), agg["nm_id"].astype(str))
 
@@ -3419,7 +3422,7 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
     Null-значения (1С, поставки WB) сохраняются как null, не заменяются на 0.
     """
     empty_cols = [
-        "band", "products_count",
+        "band", "band_name", "products_count",
         "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client",
         "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty",
     ]
@@ -3431,17 +3434,22 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
         product_df["band"] = pd.NA
 
     product_df = product_df.copy()
-    product_df["band"] = product_df["band"].map(normalize_query_group_value)
-    product_df = product_df[
-        product_df["band"].notna() & product_df["band"].ne(QUERY_GROUP_UNKNOWN)
-    ].copy()
+    if "query_group" not in product_df.columns:
+        product_df["query_group"] = product_df["band"]
+    product_df["query_group"] = product_df["query_group"].map(normalize_query_group_value)
+    product_df["band"] = product_df["query_group"]
+    if "band_name" not in product_df.columns:
+        product_df["band_name"] = product_df["query_group"].map(build_stock_all_band_name)
+    else:
+        product_df["band_name"] = product_df["query_group"].map(build_stock_all_band_name)
     if product_df.empty:
         return pd.DataFrame(columns=empty_cols)
 
     agg = (
-        product_df.groupby("band", as_index=False, dropna=False)
+        product_df.groupby("band_name", as_index=False, dropna=False)
         .agg(
             products_count=("nm_id", "nunique"),
+            band=("query_group", "first"),
             wb_stock_qty=("wb_stock_qty", lambda s: s.sum(min_count=1)),
             wb_in_way_to_client=("wb_in_way_to_client", lambda s: s.sum(min_count=1)),
             wb_in_way_from_client=("wb_in_way_from_client", lambda s: s.sum(min_count=1)),
@@ -3451,7 +3459,7 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
     agg["one_c_stock_qty"] = pd.NA
     agg["wb_supply_qty"] = pd.NA
 
-    return agg.sort_values("band", na_position="last").reset_index(drop=True)
+    return agg[empty_cols].sort_values("band_name", na_position="last").reset_index(drop=True)
 
 
 def _fmt_stock_int(value: object) -> str:
@@ -3464,16 +3472,23 @@ def _fmt_stock_int(value: object) -> str:
         return str(value)
 
 
+def build_stock_all_band_name(query_group: object) -> str:
+    normalized = normalize_query_group_value(query_group)
+    if normalized == "трусы женские":
+        return "Трусы женские"
+    if normalized == "трусы детские":
+        return "Трусы детские"
+    if normalized in {"женская футболка", "мужская футболка"}:
+        return "Футболки"
+    return "Прочее"
+
+
 def render_stock_all_tab(
     snapshot_df: "pd.DataFrame",
     settings_df: "pd.DataFrame",
     available_dates: "list[date]",
 ) -> None:
     """Рендерит вкладку 'Контроль всех остатков'."""
-    st.caption(
-        "Источник: `fact_stock_warehouse_snapshot`. "
-        "Агрегация по `nm_id` за последнюю доступную дату snapshot."
-    )
     if False:
         st.info(
         "**В пути к клиенту** — товары, которые уже ушли покупателям "
@@ -3513,7 +3528,7 @@ def render_stock_all_tab(
     wb_from_client = product_df["wb_in_way_from_client"].sum(min_count=1)
     wb_contour = product_df["wb_total_in_contour"].sum(min_count=1)
     products_count = product_df["nm_id"].nunique()
-    band_count = int(product_df["band"].nunique())
+    band_count = int(product_df["band_name"].nunique())
 
     metric_items = [
         ("Остаток WB на складах", _fmt_stock_int(wb_stock_total)),
@@ -3562,7 +3577,29 @@ def render_stock_all_tab(
     }
 
     if level == "По бандам":
-        display_df = build_stock_all_band_level(product_df).rename(columns=rename_band)
+        display_df = build_stock_all_band_level(product_df)[
+            [
+                "band_name",
+                "products_count",
+                "wb_stock_qty",
+                "wb_in_way_to_client",
+                "wb_in_way_from_client",
+                "wb_total_in_contour",
+                "one_c_stock_qty",
+                "wb_supply_qty",
+            ]
+        ].copy()
+        display_df.columns = [
+            "Банда",
+            "Банда",
+            "Товаров",
+            "Остаток WB на складах",
+            "В пути к клиенту",
+            "Возвраты в пути",
+            "Итого в контуре WB",
+            "Остаток 1С",
+            "Поставки на WB",
+        ]
         numeric_cols = {
             "Товаров", "Остаток WB на складах", "В пути к клиенту",
             "Возвраты в пути", "Итого в контуре WB",
@@ -3570,6 +3607,7 @@ def render_stock_all_tab(
     else:
         display_df = product_df[
             [
+                "band_name",
                 "nm_id",
                 "vendor_code",
                 "title",
@@ -3661,7 +3699,6 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         render_stock_all_tab(prepared_snapshot, settings_qg_df, available_dates)
 
     with tab_zero:
-        st.caption("Источник: `fact_stock_warehouse_snapshot`, агрегация до уровня Артикул WB × склад.")
         if snapshot_df.empty:
             st.warning("В `fact_stock_warehouse_snapshot` пока нет строк.")
             return
@@ -4538,6 +4575,21 @@ def filter_rows_by_selected_product_label(
 
     nm_id_series = pd.to_numeric(rows["nm_id"], errors="coerce")
     return rows.loc[nm_id_series == int(selected_nm_id)].copy()
+
+
+def build_ad_campaign_product_scope_dataframe(
+    rows: pd.DataFrame,
+    *,
+    selected_product_label: str | None,
+    option_map: dict[str, dict[str, object]],
+    allowed_report_dates: list[date] | None = None,
+) -> pd.DataFrame:
+    scoped = filter_rows_by_selected_product_label(rows, selected_product_label, option_map)
+    if scoped.empty or not allowed_report_dates or "report_date" not in scoped.columns:
+        return scoped
+    scoped = scoped.copy()
+    scoped["report_date"] = pd.to_datetime(scoped["report_date"], errors="coerce").dt.date
+    return scoped[scoped["report_date"].isin(allowed_report_dates)].copy()
 
 
 def get_selected_product_rows(
@@ -5959,6 +6011,35 @@ def format_chart_kpi_value(value: float | None, digits: int = 1, suffix: str = "
     return f"{float(value):,.{digits}f}".replace(",", " ") + suffix
 
 
+def build_chart_kpi_card_html(
+    *,
+    label: str,
+    value_text: str,
+    caption_text: str,
+    background: str,
+    border: str,
+    value_color: str,
+    caption_color: str,
+) -> str:
+    return f"""
+        <div style="
+            border:1px solid {border};
+            background:{background};
+            border-radius:12px;
+            padding:14px;
+            height:136px;
+            box-sizing:border-box;
+            display:flex;
+            flex-direction:column;
+            justify-content:space-between;
+        ">
+            <div style="font-size:13px; line-height:1.2; color:#475569; min-height:32px;">{label}</div>
+            <div style="font-size:28px; line-height:1; font-weight:700; color:{value_color}; min-height:32px; display:flex; align-items:center;">{value_text}</div>
+            <div style="font-size:12px; line-height:1.2; color:{caption_color}; min-height:28px; display:flex; align-items:flex-end;">{caption_text}</div>
+        </div>
+    """
+
+
 def render_chart_kpi_card(
     *,
     label: str,
@@ -5972,13 +6053,15 @@ def render_chart_kpi_card(
     border = "#ef4444" if is_alert else "#dbe4ee"
     caption = f"Порог превышен: {threshold:g}{suffix}" if is_alert and threshold is not None else "&nbsp;"
     st.markdown(
-        f"""
-        <div style="border:1px solid {border}; background:{background}; border-radius:12px; padding:14px; min-height:120px;">
-            <div style="font-size:13px; color:#475569; margin-bottom:8px;">{label}</div>
-            <div style="font-size:28px; font-weight:700; color:#0f172a;">{format_chart_kpi_value(value, digits, suffix)}</div>
-            <div style="font-size:12px; color:#b91c1c; margin-top:8px;">{caption}</div>
-        </div>
-        """,
+        build_chart_kpi_card_html(
+            label=label,
+            value_text=format_chart_kpi_value(value, digits, suffix),
+            caption_text=caption,
+            background=background,
+            border=border,
+            value_color="#0f172a",
+            caption_color="#b91c1c",
+        ),
         unsafe_allow_html=True,
     )
 
@@ -6179,13 +6262,15 @@ def render_charts_tab(
 
 def render_not_applicable_kpi_card(*, label: str, reason: str = "Не применяется") -> None:
     st.markdown(
-        f"""
-        <div style="border:1px solid #dbe4ee; background:#f8fafc; border-radius:12px; padding:14px; min-height:120px;">
-            <div style="font-size:13px; color:#475569; margin-bottom:8px;">{label}</div>
-            <div style="font-size:24px; font-weight:700; color:#94a3b8;">—</div>
-            <div style="font-size:12px; color:#64748b; margin-top:8px;">{reason}</div>
-        </div>
-        """,
+        build_chart_kpi_card_html(
+            label=label,
+            value_text="—",
+            caption_text=reason,
+            background="#f8fafc",
+            border="#dbe4ee",
+            value_color="#94a3b8",
+            caption_color="#64748b",
+        ),
         unsafe_allow_html=True,
     )
 
@@ -7075,7 +7160,15 @@ def render_upload_tab() -> None:
 
 
 
-def render_ad_campaign_product_tab(df: pd.DataFrame, data_source: str, error_text: str | None = None) -> None:
+def render_ad_campaign_product_tab(
+    df: pd.DataFrame,
+    data_source: str,
+    error_text: str | None = None,
+    *,
+    selected_product_label: str | None = None,
+    option_map: dict[str, dict[str, object]] | None = None,
+    allowed_report_dates: list[date] | None = None,
+) -> None:
     st.subheader(AD_CAMPAIGN_PRODUCT_LABEL)
     st.caption(
         "Отдельная детализация рекламы по grain: дата + товар + advert_id + тип конверсии. "
@@ -7088,33 +7181,25 @@ def render_ad_campaign_product_tab(df: pd.DataFrame, data_source: str, error_tex
         st.info("Для выбранного режима данных строки РК по товару пока отсутствуют.")
         return
 
-    filter_cols = st.columns(4)
-    available_dates = sorted(d for d in df["report_date"].dropna().unique().tolist())
-    selected_dates = filter_cols[0].multiselect("Дата", options=available_dates, default=available_dates)
-    supplier_search = filter_cols[1].text_input("Артикул продавца")
-    nm_search = filter_cols[2].text_input("nm_id")
-    advert_search = filter_cols[3].text_input("advert_id")
+    filtered = build_ad_campaign_product_scope_dataframe(
+        df,
+        selected_product_label=selected_product_label,
+        option_map=option_map or {},
+        allowed_report_dates=allowed_report_dates,
+    )
+    if filtered.empty:
+        st.info("По выбранному товару и периоду строки РК не найдены.")
+        return
 
     filter_cols_2 = st.columns(4)
     conversion_options = sorted(
-        value for value in df["conversion_type"].dropna().astype(str).unique().tolist()
+        value for value in filtered["conversion_type"].dropna().astype(str).unique().tolist()
     )
     selected_conversions = filter_cols_2[0].multiselect("Тип конверсии", options=conversion_options)
     spend_only = filter_cols_2[1].checkbox("Только строки с расходом")
     atbs_only = filter_cols_2[2].checkbox("Только строки с корзинами")
     orders_only = filter_cols_2[3].checkbox("Только строки с заказами")
 
-    filtered = df.copy()
-    if selected_dates:
-        filtered = filtered[filtered["report_date"].isin(selected_dates)]
-    if supplier_search:
-        filtered = filtered[
-            filtered["supplier_article"].fillna("").str.contains(supplier_search, case=False, na=False)
-        ]
-    if nm_search:
-        filtered = filtered[filtered["nm_id"].astype(str).str.contains(nm_search, case=False, na=False)]
-    if advert_search:
-        filtered = filtered[filtered["advert_id"].astype(str).str.contains(advert_search, case=False, na=False)]
     if selected_conversions:
         filtered = filtered[filtered["conversion_type"].isin(selected_conversions)]
     if spend_only:
@@ -7193,7 +7278,6 @@ def main() -> None:
     display_coverage = df.attrs.get("display_coverage")
     ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
     render_compact_metric_css()
-    st.caption(f"Источник данных: {'PostgreSQL' if data_source == 'db' else 'CSV'}")
     render_available_dates_summary(df)
     filtered, filter_debug_trace = build_filtered_dataset(df, data_source)
 
@@ -7235,7 +7319,14 @@ def main() -> None:
     with tab_overview:
         render_overview_tab(filtered, filter_debug_trace, display_coverage)
     with tab_ad_campaign:
-        render_ad_campaign_product_tab(ad_campaign_product_df, data_source, ad_campaign_product_error)
+        render_ad_campaign_product_tab(
+            ad_campaign_product_df,
+            data_source,
+            ad_campaign_product_error,
+            selected_product_label=selected_product_label,
+            option_map=option_map,
+            allowed_report_dates=sorted(d for d in filtered["report_date"].dropna().unique().tolist()),
+        )
     with tab_product:
         render_product_tab(product_rows, default_detail_date)
     with tab_charts:
