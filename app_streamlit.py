@@ -3462,6 +3462,103 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
     return agg[empty_cols].sort_values("band_name", na_position="last").reset_index(drop=True)
 
 
+def build_stock_all_display_dataframe(
+    product_df: "pd.DataFrame",
+    *,
+    level: str,
+) -> tuple["pd.DataFrame", set[str]]:
+    if level == "По бандам":
+        source_df = build_stock_all_band_level(product_df)
+        source_columns = [
+            "band_name",
+            "products_count",
+            "wb_stock_qty",
+            "wb_in_way_to_client",
+            "wb_in_way_from_client",
+            "wb_total_in_contour",
+            "one_c_stock_qty",
+            "wb_supply_qty",
+        ]
+        rename_map = {
+            "band_name": "Банда",
+            "products_count": "Товаров",
+            "wb_stock_qty": "Остаток WB на складах",
+            "wb_in_way_to_client": "В пути к клиенту",
+            "wb_in_way_from_client": "Возвраты в пути",
+            "wb_total_in_contour": "Итого в контуре WB",
+            "one_c_stock_qty": "Остаток 1С",
+            "wb_supply_qty": "Поставки на WB",
+        }
+        ordered_columns = [
+            "Банда",
+            "Товаров",
+            "Остаток WB на складах",
+            "В пути к клиенту",
+            "Возвраты в пути",
+            "Итого в контуре WB",
+            "Остаток 1С",
+            "Поставки на WB",
+        ]
+        numeric_cols = {
+            "Товаров",
+            "Остаток WB на складах",
+            "В пути к клиенту",
+            "Возвраты в пути",
+            "Итого в контуре WB",
+        }
+    else:
+        source_df = product_df.copy()
+        source_columns = [
+            "band_name",
+            "nm_id",
+            "vendor_code",
+            "title",
+            "wb_stock_qty",
+            "wb_in_way_to_client",
+            "wb_in_way_from_client",
+            "wb_total_in_contour",
+            "one_c_stock_qty",
+            "wb_supply_qty",
+        ]
+        rename_map = {
+            "band_name": "Банда",
+            "nm_id": "Артикул WB",
+            "vendor_code": "Артикул продавца",
+            "title": "Название",
+            "wb_stock_qty": "Остаток WB на складах",
+            "wb_in_way_to_client": "В пути к клиенту",
+            "wb_in_way_from_client": "Возвраты в пути",
+            "wb_total_in_contour": "Итого в контуре WB",
+            "one_c_stock_qty": "Остаток 1С",
+            "wb_supply_qty": "Поставки на WB",
+        }
+        ordered_columns = [
+            "Банда",
+            "Артикул WB",
+            "Артикул продавца",
+            "Название",
+            "Остаток WB на складах",
+            "В пути к клиенту",
+            "Возвраты в пути",
+            "Итого в контуре WB",
+            "Остаток 1С",
+            "Поставки на WB",
+        ]
+        numeric_cols = {
+            "Артикул WB",
+            "Остаток WB на складах",
+            "В пути к клиенту",
+            "Возвраты в пути",
+            "Итого в контуре WB",
+        }
+
+    display_df = source_df.reindex(columns=source_columns).rename(columns=rename_map)
+    for column_name in ordered_columns:
+        if column_name not in display_df.columns:
+            display_df[column_name] = pd.NA
+    return display_df[ordered_columns].copy(), numeric_cols
+
+
 def _fmt_stock_int(value: object) -> str:
     """Форматирует целое число с пробелами как разделителями тысяч или '—' если null."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -3553,87 +3650,7 @@ def render_stock_all_tab(
         horizontal=True,
         key="stock_all_level_radio",
     )
-
-    rename_product = {
-        "band": "Банда",
-        "nm_id": "Артикул WB",
-        "vendor_code": "Артикул продавца",
-        "wb_stock_qty": "Остаток WB на складах",
-        "wb_in_way_to_client": "В пути к клиенту",
-        "wb_in_way_from_client": "Возвраты в пути",
-        "wb_total_in_contour": "Итого в контуре WB",
-        "one_c_stock_qty": "Остаток 1С",
-        "wb_supply_qty": "Поставки на WB",
-    }
-    rename_band = {
-        "band": "Банда",
-        "products_count": "Товаров",
-        "wb_stock_qty": "Остаток WB на складах",
-        "wb_in_way_to_client": "В пути к клиенту",
-        "wb_in_way_from_client": "Возвраты в пути",
-        "wb_total_in_contour": "Итого в контуре WB",
-        "one_c_stock_qty": "Остаток 1С",
-        "wb_supply_qty": "Поставки на WB",
-    }
-
-    if level == "По бандам":
-        display_df = build_stock_all_band_level(product_df)[
-            [
-                "band_name",
-                "products_count",
-                "wb_stock_qty",
-                "wb_in_way_to_client",
-                "wb_in_way_from_client",
-                "wb_total_in_contour",
-                "one_c_stock_qty",
-                "wb_supply_qty",
-            ]
-        ].copy()
-        display_df.columns = [
-            "Банда",
-            "Банда",
-            "Товаров",
-            "Остаток WB на складах",
-            "В пути к клиенту",
-            "Возвраты в пути",
-            "Итого в контуре WB",
-            "Остаток 1С",
-            "Поставки на WB",
-        ]
-        numeric_cols = {
-            "Товаров", "Остаток WB на складах", "В пути к клиенту",
-            "Возвраты в пути", "Итого в контуре WB",
-        }
-    else:
-        display_df = product_df[
-            [
-                "band_name",
-                "nm_id",
-                "vendor_code",
-                "title",
-                "wb_stock_qty",
-                "wb_in_way_to_client",
-                "wb_in_way_from_client",
-                "wb_total_in_contour",
-                "one_c_stock_qty",
-                "wb_supply_qty",
-            ]
-        ].copy()
-        display_df.columns = [
-            "Артикул WB",
-            "Артикул продавца",
-            "Название",
-            "Остаток WB на складах",
-            "В пути к клиенту",
-            "Возвраты в пути",
-            "Итого в контуре WB",
-            "Остаток 1С",
-            "Поставки на WB",
-        ]
-        numeric_cols = {
-            "Артикул WB", "Остаток WB на складах", "В пути к клиенту",
-            "Возвраты в пути", "Итого в контуре WB",
-        }
+    display_df, numeric_cols = build_stock_all_display_dataframe(product_df, level=level)
 
     # null-колонки — явно "нет данных", не 0
     for null_col in ("Остаток 1С", "Поставки на WB"):

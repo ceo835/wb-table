@@ -82,6 +82,7 @@ from app_streamlit import (
     build_ad_campaign_product_scope_dataframe,
     should_render_stock_warehouse_history_pivot,
     build_stock_all_band_level,
+    build_stock_all_display_dataframe,
     build_stock_warehouse_summary_card_html,
     build_stock_all_product_level,
     build_stock_warehouse_display_dataframe,
@@ -4190,6 +4191,76 @@ def test_build_stock_all_band_level_groups_by_business_band_name_and_preserves_t
     assert result["band_name"].tolist() == ["Прочее", "Трусы детские", "Трусы женские", "Футболки"]
     assert result["products_count"].tolist() == [1, 1, 1, 2]
     assert result["wb_total_in_contour"].sum() == product_df["wb_total_in_contour"].sum()
+
+
+def test_build_stock_all_display_dataframe_product_mode_uses_safe_rename_and_keeps_all_columns() -> None:
+    product_df = pd.DataFrame(
+        [
+            {
+                "band_name": "Трусы женские",
+                "nm_id": 101,
+                "vendor_code": "art-101",
+                "title": "Товар 101",
+                "wb_stock_qty": 5,
+                "wb_in_way_to_client": 1,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 6,
+                "one_c_stock_qty": pd.NA,
+                "wb_supply_qty": pd.NA,
+            }
+        ]
+    )
+
+    result, numeric_cols = build_stock_all_display_dataframe(product_df, level="По товарам")
+
+    assert result.columns.tolist() == [
+        "Банда",
+        "Артикул WB",
+        "Артикул продавца",
+        "Название",
+        "Остаток WB на складах",
+        "В пути к клиенту",
+        "Возвраты в пути",
+        "Итого в контуре WB",
+        "Остаток 1С",
+        "Поставки на WB",
+    ]
+    assert result.iloc[0]["Банда"] == "Трусы женские"
+    assert result.iloc[0]["Артикул WB"] == 101
+    assert "Артикул WB" in numeric_cols
+
+
+def test_build_stock_all_display_dataframe_band_mode_adds_missing_optional_columns_without_crash() -> None:
+    product_df = pd.DataFrame(
+        [
+            {
+                "query_group": "women_underwear",
+                "band_name": "Трусы женские",
+                "nm_id": 101,
+                "wb_stock_qty": 5,
+                "wb_in_way_to_client": 1,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 6,
+            }
+        ]
+    )
+
+    result, numeric_cols = build_stock_all_display_dataframe(product_df, level="По бандам")
+
+    assert result.columns.tolist() == [
+        "Банда",
+        "Товаров",
+        "Остаток WB на складах",
+        "В пути к клиенту",
+        "Возвраты в пути",
+        "Итого в контуре WB",
+        "Остаток 1С",
+        "Поставки на WB",
+    ]
+    assert result.iloc[0]["Банда"] == "Трусы женские"
+    assert result.iloc[0]["Товаров"] == 1
+    assert pd.isna(result.iloc[0]["Остаток 1С"])
+    assert "Товаров" in numeric_cols
 
 
 def test_build_stock_warehouse_history_summary_metrics_counts_row_statuses() -> None:
