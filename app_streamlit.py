@@ -75,6 +75,8 @@ MAIN_WB_WAREHOUSES_PATH = ROOT_DIR / "data" / "config" / "main_wb_warehouses.csv
 WB_SITE_PRICE_TAB_LABEL = "Мониторинг цен WB"
 DEFAULT_DATA_SOURCE = "csv"
 STOCK_WAREHOUSE_TAB_LABEL = "Остатки по складам"
+STOCK_ZERO_POSITIONS_TAB_LABEL = "Контроль нулевых позиций"
+STOCK_ALL_POSITIONS_TAB_LABEL = "Контроль всех остатков"
 WAREHOUSE_SCOPE_MAIN = "Основные склады"
 WAREHOUSE_SCOPE_ALL = "Все склады"
 STOCK_STATUS_OK = "OK"
@@ -3310,259 +3312,521 @@ def prepare_stock_warehouse_table_for_display(
     return style_stock_warehouse_table(safe_df, warehouse_columns)
 
 
-def render_stock_warehouse_tab(data_source: str) -> None:
-    st.caption("Источник: `fact_stock_warehouse_snapshot`, агрегация до уровня Артикул WB × склад.")
-    if data_source != "db":
-        st.info("Вкладка складских остатков доступна в режиме PostgreSQL, потому что читает `fact_stock_warehouse_snapshot` напрямую.")
-        return
 
-    snapshot_df = load_stock_warehouse_snapshot_from_db()
-    if snapshot_df.empty:
-        st.warning("В `fact_stock_warehouse_snapshot` пока нет строк.")
-        return
+# ---------------------------------------------------------------------------
+# Контроль всех остатков — вспомогательные функции
+# ---------------------------------------------------------------------------
 
-    prepared_snapshot = prepare_stock_warehouse_snapshot_dataframe(snapshot_df)
-    available_dates = sorted(d for d in prepared_snapshot["snapshot_date"].dropna().unique().tolist())
-    if not available_dates:
-        st.warning("В `fact_stock_warehouse_snapshot` нет валидных дат snapshot.")
-        return
+def build_stock_all_product_level(
+    snapshot_df: "pd.DataFrame",
+    settings_df: "pd.DataFrame",
+    snapshot_date: "date",
+) -> "pd.DataFrame":
+    """
+    Агрегирует fact_stock_warehouse_snapshot до уровня nm_id за выбранную дату.
 
-    tracked_df = load_tracked_products()
-    tracked_df = attach_stock_query_groups(tracked_df, load_settings_product_query_groups_from_db())
-    main_warehouses = load_main_wb_warehouses(
-        str(MAIN_WB_WAREHOUSES_PATH),
-        MAIN_WB_WAREHOUSES_PATH.stat().st_mtime if MAIN_WB_WAREHOUSES_PATH.exists() else None,
-    )
-    import zoneinfo
-    moscow_tz = zoneinfo.ZoneInfo("Europe/Moscow")
-    report_day = (datetime.now(moscow_tz) - timedelta(days=1)).date()
-    default_snapshot_date = resolve_stock_warehouse_default_snapshot_date(available_dates, report_day)
-    selected_snapshot_date = st.date_input(
-        "Дата отчёта",
-        value=default_snapshot_date,
-        min_value=available_dates[0],
-        max_value=available_dates[-1],
-        key="stock_warehouse_snapshot_date",
-    )
-
-    filter_cols = st.columns(4)
-    show_only_tracked = filter_cols[0].checkbox("Показывать только отслеживаемые товары", value=True)
-    show_sellout = filter_cols[1].checkbox("Показывать распродажные товары", value=True)
-    only_problematic = filter_cols[2].checkbox("Показывать только проблемные товары", value=False)
-    warehouse_scope = filter_cols[3].radio("Склады", options=[WAREHOUSE_SCOPE_MAIN, WAREHOUSE_SCOPE_ALL], horizontal=False)
-
-    current_snapshot = prepared_snapshot[prepared_snapshot["snapshot_date"] == selected_snapshot_date].copy()
-    all_warehouses = sorted(current_snapshot["warehouse_name"].dropna().astype(str).unique().tolist())
-    selected_warehouses = main_warehouses if warehouse_scope == WAREHOUSE_SCOPE_MAIN else all_warehouses
-    if not selected_warehouses:
-        st.warning("Для выбранной даты не найден список складов.")
-        return
-
-    product_table = build_stock_warehouse_product_table(
-        prepared_snapshot,
-        tracked_df,
-        snapshot_date=selected_snapshot_date,
-        selected_warehouses=selected_warehouses,
-        main_warehouses=main_warehouses,
-        show_only_tracked=show_only_tracked,
-        show_sellout=show_sellout,
-    )
-    summary_metrics = build_stock_warehouse_summary_metrics(product_table)
-    problem_table = build_stock_warehouse_problem_table(product_table)
-    problem_profit_total = build_stock_warehouse_problem_profit_total(problem_table)
-
-    summary_items = [
-        ("Дата snapshot", selected_snapshot_date.isoformat()),
-        ("Всего tracked товаров", f"{summary_metrics['total_products']:,}".replace(",", " ")),
-        ("Потенц. прибыль", format_summary_rub(problem_profit_total)),
-        ("Товаров с нулём на складах", f"{summary_metrics['zero_products']:,}".replace(",", " ")),
-        ("Товаров без данных", f"{summary_metrics['no_data_products']:,}".replace(",", " ")),
-        ("Всего нулевых складов", f"{summary_metrics['total_zero_warehouses']:,}".replace(",", " ")),
+    Возвращает product-level DataFrame:
+    - band (= query_group из settings_products)
+    - nm_id, vendor_code (supplier_article)
+    - wb_stock_qty          = SUM(stock_qty)
+    - wb_in_way_to_client   = SUM(in_way_to_client)  [уже ушли покупателям]
+    - wb_in_way_from_client = SUM(in_way_from_client) [возвраты в пути]
+    - wb_total_in_contour   = сумма трёх компонентов
+    - one_c_stock_qty       = None  (источник не подключён)
+    - wb_supply_qty         = None  (поставки на склад WB — отдельный источник)
+    """
+    empty_cols = [
+        "band", "nm_id", "vendor_code",
+        "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client",
+        "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty",
     ]
-    summary_cols = st.columns(6)
-    for column, (label, value) in zip(summary_cols, summary_items):
-        column.markdown(
+    if snapshot_df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    day_df = snapshot_df[snapshot_df["snapshot_date"] == snapshot_date].copy()
+    if day_df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    for col in ("stock_qty", "in_way_to_client", "in_way_from_client"):
+        if col not in day_df.columns:
+            day_df[col] = pd.NA
+        day_df[col] = pd.to_numeric(day_df[col], errors="coerce")
+
+    agg = (
+        day_df.groupby("nm_id", as_index=False)[
+            ["stock_qty", "in_way_to_client", "in_way_from_client"]
+        ]
+        .sum(min_count=1)
+        .rename(columns={
+            "stock_qty": "wb_stock_qty",
+            "in_way_to_client": "wb_in_way_to_client",
+            "in_way_from_client": "wb_in_way_from_client",
+        })
+    )
+
+    # Итого в контуре WB: сумма трёх компонентов, null только если все null
+    tmp = agg[["wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client"]]
+    has_any = tmp.notna().any(axis=1)
+    agg["wb_total_in_contour"] = tmp.sum(axis=1, min_count=1).where(has_any, other=pd.NA)
+
+    # Недоступные источники — явно null, не 0
+    agg["one_c_stock_qty"] = pd.NA
+    agg["wb_supply_qty"] = pd.NA
+
+    # Подтягиваем band (query_group) и vendor_code из settings_products
+    if not settings_df.empty:
+        s = settings_df.copy()
+        s["nm_id"] = pd.to_numeric(s["nm_id"], errors="coerce")
+        s = s.dropna(subset=["nm_id"])
+        s["nm_id"] = s["nm_id"].astype(int)
+        keep = ["nm_id"]
+        if "query_group" in s.columns:
+            keep.append("query_group")
+        if "supplier_article" in s.columns:
+            keep.append("supplier_article")
+        s = s[keep].drop_duplicates(subset=["nm_id"])
+        agg = agg.merge(s, on="nm_id", how="left")
+    else:
+        agg["query_group"] = pd.NA
+        agg["supplier_article"] = pd.NA
+
+    agg = agg.rename(columns={"query_group": "band", "supplier_article": "vendor_code"})
+
+    for col in empty_cols:
+        if col not in agg.columns:
+            agg[col] = pd.NA
+
+    return (
+        agg[empty_cols]
+        .sort_values(["band", "nm_id"], na_position="last")
+        .reset_index(drop=True)
+    )
+
+
+def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Агрегирует product-level до band-level.
+    Null-значения (1С, поставки WB) сохраняются как null, не заменяются на 0.
+    """
+    empty_cols = [
+        "band", "products_count",
+        "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client",
+        "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty",
+    ]
+    if product_df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    if "band" not in product_df.columns:
+        product_df = product_df.copy()
+        product_df["band"] = pd.NA
+
+    agg = (
+        product_df.groupby("band", as_index=False, dropna=False)
+        .agg(
+            products_count=("nm_id", "nunique"),
+            wb_stock_qty=("wb_stock_qty", lambda s: s.sum(min_count=1)),
+            wb_in_way_to_client=("wb_in_way_to_client", lambda s: s.sum(min_count=1)),
+            wb_in_way_from_client=("wb_in_way_from_client", lambda s: s.sum(min_count=1)),
+            wb_total_in_contour=("wb_total_in_contour", lambda s: s.sum(min_count=1)),
+        )
+    )
+    agg["one_c_stock_qty"] = pd.NA
+    agg["wb_supply_qty"] = pd.NA
+
+    return agg.sort_values("band", na_position="last").reset_index(drop=True)
+
+
+def _fmt_stock_int(value: object) -> str:
+    """Форматирует целое число с пробелами как разделителями тысяч или '—' если null."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "—"
+    try:
+        return f"{int(value):,}".replace(",", "\u202f")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def render_stock_all_tab(
+    snapshot_df: "pd.DataFrame",
+    settings_df: "pd.DataFrame",
+    latest_date: "date | None",
+) -> None:
+    """Рендерит вкладку 'Контроль всех остатков'."""
+    st.caption(
+        "Источник: `fact_stock_warehouse_snapshot`. "
+        "Агрегация по `nm_id` за последнюю доступную дату snapshot."
+    )
+    st.info(
+        "**В пути к клиенту** — товары, которые уже ушли покупателям "
+        "(WB передал их службе доставки). Это **не** поставки на склад WB. "
+        "Поставки на склад WB (`Поставки на WB`) будут добавлены отдельно "
+        "после подключения соответствующего источника.",
+        icon="ℹ️",
+    )
+
+    if latest_date is None:
+        st.warning("В `fact_stock_warehouse_snapshot` нет данных.")
+        return
+
+    st.markdown(f"**Дата актуальности WB-остатков:** `{latest_date.isoformat()}`")
+
+    product_df = build_stock_all_product_level(snapshot_df, settings_df, latest_date)
+
+    if product_df.empty:
+        st.warning(f"Нет строк за {latest_date.isoformat()} в `fact_stock_warehouse_snapshot`.")
+        return
+
+    level = st.radio(
+        "Уровень агрегации",
+        options=["По товарам", "По бандам"],
+        horizontal=True,
+        key="stock_all_level_radio",
+    )
+
+    rename_product = {
+        "band": "Банда",
+        "nm_id": "Артикул WB",
+        "vendor_code": "Артикул продавца",
+        "wb_stock_qty": "Остаток WB на складах",
+        "wb_in_way_to_client": "В пути к клиенту",
+        "wb_in_way_from_client": "Возвраты в пути",
+        "wb_total_in_contour": "Итого в контуре WB",
+        "one_c_stock_qty": "Остаток 1С",
+        "wb_supply_qty": "Поставки на WB",
+    }
+    rename_band = {
+        "band": "Банда",
+        "products_count": "Товаров",
+        "wb_stock_qty": "Остаток WB на складах",
+        "wb_in_way_to_client": "В пути к клиенту",
+        "wb_in_way_from_client": "Возвраты в пути",
+        "wb_total_in_contour": "Итого в контуре WB",
+        "one_c_stock_qty": "Остаток 1С",
+        "wb_supply_qty": "Поставки на WB",
+    }
+
+    if level == "По бандам":
+        display_df = build_stock_all_band_level(product_df).rename(columns=rename_band)
+        numeric_cols = {
+            "Товаров", "Остаток WB на складах", "В пути к клиенту",
+            "Возвраты в пути", "Итого в контуре WB",
+        }
+    else:
+        display_df = product_df.copy().rename(columns=rename_product)
+        numeric_cols = {
+            "Артикул WB", "Остаток WB на складах", "В пути к клиенту",
+            "Возвраты в пути", "Итого в контуре WB",
+        }
+
+    # null-колонки — явно "нет данных", не 0
+    for null_col in ("Остаток 1С", "Поставки на WB"):
+        if null_col in display_df.columns:
+            display_df[null_col] = "нет данных"
+
+    st.dataframe(
+        sanitize_dataframe_for_streamlit_display(display_df, numeric_columns=numeric_cols),
+        width="stretch",
+        hide_index=True,
+    )
+
+    # Итоговые карточки
+    st.divider()
+    wb_stock_total = product_df["wb_stock_qty"].sum(min_count=1)
+    wb_in_way = product_df["wb_in_way_to_client"].sum(min_count=1)
+    wb_from_client = product_df["wb_in_way_from_client"].sum(min_count=1)
+    wb_contour = product_df["wb_total_in_contour"].sum(min_count=1)
+    products_count = product_df["nm_id"].nunique()
+    band_count = int(product_df["band"].nunique())
+
+    metric_items = [
+        ("Остаток WB на складах", _fmt_stock_int(wb_stock_total)),
+        ("В пути к клиенту", _fmt_stock_int(wb_in_way)),
+        ("Возвраты в пути", _fmt_stock_int(wb_from_client)),
+        ("Итого в контуре WB", _fmt_stock_int(wb_contour)),
+        ("Остаток 1С", "нет данных"),
+        ("Поставки на WB", "нет данных"),
+        ("Товаров / Банд", f"{products_count}\u202f/\u202f{band_count}"),
+    ]
+    cols = st.columns(len(metric_items))
+    for col, (label, value) in zip(cols, metric_items):
+        col.markdown(
             build_stock_warehouse_summary_card_html(label, value, compact=True),
             unsafe_allow_html=True,
         )
 
-    st.write("**Проблемные товары**")
-    problem_display = build_stock_warehouse_display_dataframe(problem_table, problem_table=True)
-    st.dataframe(
-        prepare_stock_warehouse_table_for_display(problem_display, []),
-        width="stretch",
-        hide_index=True,
-    )
 
-    if only_problematic:
-        product_table = product_table[product_table["problem_status"].ne(STOCK_STATUS_OK)].copy()
-
-    display_columns = [
-        "nm_id",
-        "tracked_label",
-        "query_group",
-        "lifecycle_status",
-        *selected_warehouses,
-        "total_main_warehouses",
-        "warehouses_with_stock",
-        "zero_warehouses_count",
-        "no_data_warehouses_count",
-        "problem_status",
-    ]
-    table_display = build_stock_warehouse_display_dataframe(
-        product_table.reindex(columns=display_columns),
-        problem_table=False,
-    )
-    warehouse_display_columns = [warehouse_name for warehouse_name in selected_warehouses if warehouse_name in table_display.columns]
-
-    st.write("**Остатки по складам**")
-    st.dataframe(
-        prepare_stock_warehouse_table_for_display(table_display, warehouse_display_columns),
-        width="stretch",
-        hide_index=True,
-    )
-
-    st.divider()
-    st.write("**История остатков по складам**")
-    history_default_start = available_dates[max(0, len(available_dates) - 7)]
-    history_period = st.date_input(
-        "Период истории складов",
-        value=(history_default_start, available_dates[-1]),
-        min_value=available_dates[0],
-        max_value=available_dates[-1],
-    )
-    if isinstance(history_period, tuple) and len(history_period) == 2:
-        raw_history_start, raw_history_end = history_period
-    else:
-        raw_history_start = raw_history_end = selected_snapshot_date
-    history_start = min(raw_history_start, raw_history_end)
-    history_end = max(raw_history_start, raw_history_end)
-    selected_history_dates = [value for value in available_dates if history_start <= value <= history_end]
-
-    if not selected_history_dates:
-        st.info("В выбранном периоде нет доступных дат snapshot.")
+def render_stock_warehouse_tab(data_source: str) -> None:
+    """
+    Вкладка \u2018Остатки по складам\u2019 с двумя внутренними вкладками:
+    1. Контроль нулевых позиций (существующая логика без изменений)
+    2. Контроль всех остатков (новая)
+    """
+    if data_source != "db":
+        st.info("Вкладка складских остатков доступна в режиме PostgreSQL.")
         return
 
-    history_table = build_stock_warehouse_history_table(
-        snapshot_df,
-        tracked_df,
-        selected_dates=selected_history_dates,
-        monitored_warehouses=selected_warehouses,
-    )
-    history_summary = build_stock_warehouse_history_summary_metrics(history_table)
-    history_pivot = build_stock_warehouse_history_pivot_table(history_table)
-    history_ivan_check = build_stock_warehouse_history_ivan_check_table(history_table)
+    snapshot_df = load_stock_warehouse_snapshot_from_db()
+    prepared_snapshot = prepare_stock_warehouse_snapshot_dataframe(snapshot_df)
+    available_dates = sorted(d for d in prepared_snapshot["snapshot_date"].dropna().unique().tolist())
+    latest_date = available_dates[-1] if available_dates else None
 
-    history_summary_items = [
-        ("Дат в периоде", f"{history_summary['dates_count']:,}".replace(",", " ")),
-        ("Товаров", f"{history_summary['products_count']:,}".replace(",", " ")),
-        ("Складов", f"{history_summary['warehouses_count']:,}".replace(",", " ")),
-        ("Строк с остатком", f"{history_summary['in_stock_rows']:,}".replace(",", " ")),
-        ("Нулевых строк", f"{history_summary['zero_rows']:,}".replace(",", " ")),
-        ("Строк без данных", f"{history_summary['no_data_rows']:,}".replace(",", " ")),
-        ("Аномалий", f"{history_summary['anomalies_count']:,}".replace(",", " ")),
-    ]
-    history_summary_cols = st.columns(len(history_summary_items))
-    for column, (label, value) in zip(history_summary_cols, history_summary_items):
-        column.markdown(build_stock_warehouse_summary_card_html(label, value, compact=True), unsafe_allow_html=True)
+    # Загружаем settings_products один раз для обеих вкладок
+    settings_qg_df = load_settings_product_query_groups_from_db()
 
-    stock_status_labels = {
-        STOCK_HISTORY_STATUS_IN_STOCK: "Есть остаток",
-        STOCK_HISTORY_STATUS_ZERO: "0",
-        STOCK_HISTORY_STATUS_NO_DATA: "Нет данных",
-    }
-    history_display = history_table.copy()
-    history_display["loaded_at"] = pd.to_datetime(history_display["loaded_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-    history_display["loaded_at"] = history_display["loaded_at"].fillna(STOCK_WAREHOUSE_NO_DATA_DISPLAY)
-    history_display["stock_status"] = history_display["stock_status"].map(
-        lambda value: stock_status_labels.get(str(value), value)
-    )
-    history_display = history_display.rename(
-        columns={
-            "snapshot_date": "Дата",
-            "nm_id": "Артикул WB",
-            "supplier_article": "Артикул",
-            "product_name": "Товар",
-            "lifecycle_status": "Статус товара",
-            "warehouse_name": "Склад",
-            "stock_qty": "Остаток",
-            "stock_status": "Статус остатка",
-            "loaded_at": "Загружено в БД",
+    tab_zero, tab_all = st.tabs([
+        STOCK_ZERO_POSITIONS_TAB_LABEL,
+        STOCK_ALL_POSITIONS_TAB_LABEL,
+    ])
+
+    with tab_all:
+        render_stock_all_tab(prepared_snapshot, settings_qg_df, latest_date)
+
+    with tab_zero:
+        st.caption("Источник: `fact_stock_warehouse_snapshot`, агрегация до уровня Артикул WB × склад.")
+        if snapshot_df.empty:
+            st.warning("В `fact_stock_warehouse_snapshot` пока нет строк.")
+            return
+
+        if not available_dates:
+            st.warning("В `fact_stock_warehouse_snapshot` нет валидных дат snapshot.")
+            return
+
+        tracked_df = load_tracked_products()
+        tracked_df = attach_stock_query_groups(tracked_df, settings_qg_df)
+        main_warehouses = load_main_wb_warehouses(
+            str(MAIN_WB_WAREHOUSES_PATH),
+            MAIN_WB_WAREHOUSES_PATH.stat().st_mtime if MAIN_WB_WAREHOUSES_PATH.exists() else None,
+        )
+        import zoneinfo
+        moscow_tz = zoneinfo.ZoneInfo("Europe/Moscow")
+        report_day = (datetime.now(moscow_tz) - timedelta(days=1)).date()
+        default_snapshot_date = resolve_stock_warehouse_default_snapshot_date(available_dates, report_day)
+        selected_snapshot_date = st.date_input(
+            "Дата отчёта",
+            value=default_snapshot_date,
+            min_value=available_dates[0],
+            max_value=available_dates[-1],
+            key="stock_warehouse_snapshot_date",
+        )
+
+        filter_cols = st.columns(4)
+        show_only_tracked = filter_cols[0].checkbox("Показывать только отслеживаемые товары", value=True)
+        show_sellout = filter_cols[1].checkbox("Показывать распродажные товары", value=True)
+        only_problematic = filter_cols[2].checkbox("Показывать только проблемные товары", value=False)
+        warehouse_scope = filter_cols[3].radio("Склады", options=[WAREHOUSE_SCOPE_MAIN, WAREHOUSE_SCOPE_ALL], horizontal=False)
+
+        current_snapshot = prepared_snapshot[prepared_snapshot["snapshot_date"] == selected_snapshot_date].copy()
+        all_warehouses = sorted(current_snapshot["warehouse_name"].dropna().astype(str).unique().tolist())
+        selected_warehouses = main_warehouses if warehouse_scope == WAREHOUSE_SCOPE_MAIN else all_warehouses
+        if not selected_warehouses:
+            st.warning("Для выбранной даты не найден список складов.")
+            return
+
+        product_table = build_stock_warehouse_product_table(
+            prepared_snapshot,
+            tracked_df,
+            snapshot_date=selected_snapshot_date,
+            selected_warehouses=selected_warehouses,
+            main_warehouses=main_warehouses,
+            show_only_tracked=show_only_tracked,
+            show_sellout=show_sellout,
+        )
+        summary_metrics = build_stock_warehouse_summary_metrics(product_table)
+        problem_table = build_stock_warehouse_problem_table(product_table)
+        problem_profit_total = build_stock_warehouse_problem_profit_total(problem_table)
+
+        summary_items = [
+            ("Дата snapshot", selected_snapshot_date.isoformat()),
+            ("Всего tracked товаров", f"{summary_metrics['total_products']:,}".replace(",", " ")),
+            ("Потенц. прибыль", format_summary_rub(problem_profit_total)),
+            ("Товаров с нулём на складах", f"{summary_metrics['zero_products']:,}".replace(",", " ")),
+            ("Товаров без данных", f"{summary_metrics['no_data_products']:,}".replace(",", " ")),
+            ("Всего нулевых складов", f"{summary_metrics['total_zero_warehouses']:,}".replace(",", " ")),
+        ]
+        summary_cols = st.columns(6)
+        for column, (label, value) in zip(summary_cols, summary_items):
+            column.markdown(
+                build_stock_warehouse_summary_card_html(label, value, compact=True),
+                unsafe_allow_html=True,
+            )
+
+        st.write("**Проблемные товары**")
+        problem_display = build_stock_warehouse_display_dataframe(problem_table, problem_table=True)
+        st.dataframe(
+            prepare_stock_warehouse_table_for_display(problem_display, []),
+            width="stretch",
+            hide_index=True,
+        )
+
+        if only_problematic:
+            product_table = product_table[product_table["problem_status"].ne(STOCK_STATUS_OK)].copy()
+
+        display_columns = [
+            "nm_id",
+            "tracked_label",
+            "query_group",
+            "lifecycle_status",
+            *selected_warehouses,
+            "total_main_warehouses",
+            "warehouses_with_stock",
+            "zero_warehouses_count",
+            "no_data_warehouses_count",
+            "problem_status",
+        ]
+        table_display = build_stock_warehouse_display_dataframe(
+            product_table.reindex(columns=display_columns),
+            problem_table=False,
+        )
+        warehouse_display_columns = [warehouse_name for warehouse_name in selected_warehouses if warehouse_name in table_display.columns]
+
+        st.write("**Остатки по складам**")
+        st.dataframe(
+            prepare_stock_warehouse_table_for_display(table_display, warehouse_display_columns),
+            width="stretch",
+            hide_index=True,
+        )
+
+        st.divider()
+        st.write("**История остатков по складам**")
+        history_default_start = available_dates[max(0, len(available_dates) - 7)]
+        history_period = st.date_input(
+            "Период истории складов",
+            value=(history_default_start, available_dates[-1]),
+            min_value=available_dates[0],
+            max_value=available_dates[-1],
+        )
+        if isinstance(history_period, tuple) and len(history_period) == 2:
+            raw_history_start, raw_history_end = history_period
+        else:
+            raw_history_start = raw_history_end = selected_snapshot_date
+        history_start = min(raw_history_start, raw_history_end)
+        history_end = max(raw_history_start, raw_history_end)
+        selected_history_dates = [value for value in available_dates if history_start <= value <= history_end]
+
+        if not selected_history_dates:
+            st.info("В выбранном периоде нет доступных дат snapshot.")
+            return
+
+        history_table = build_stock_warehouse_history_table(
+            snapshot_df,
+            tracked_df,
+            selected_dates=selected_history_dates,
+            monitored_warehouses=selected_warehouses,
+        )
+        history_summary = build_stock_warehouse_history_summary_metrics(history_table)
+        history_pivot = build_stock_warehouse_history_pivot_table(history_table)
+        history_ivan_check = build_stock_warehouse_history_ivan_check_table(history_table)
+
+        history_summary_items = [
+            ("Дат в периоде", f"{history_summary['dates_count']:,}".replace(",", " ")),
+            ("Товаров", f"{history_summary['products_count']:,}".replace(",", " ")),
+            ("Складов", f"{history_summary['warehouses_count']:,}".replace(",", " ")),
+            ("Строк с остатком", f"{history_summary['in_stock_rows']:,}".replace(",", " ")),
+            ("Нулевых строк", f"{history_summary['zero_rows']:,}".replace(",", " ")),
+            ("Строк без данных", f"{history_summary['no_data_rows']:,}".replace(",", " ")),
+            ("Аномалий", f"{history_summary['anomalies_count']:,}".replace(",", " ")),
+        ]
+        history_summary_cols = st.columns(len(history_summary_items))
+        for column, (label, value) in zip(history_summary_cols, history_summary_items):
+            column.markdown(build_stock_warehouse_summary_card_html(label, value, compact=True), unsafe_allow_html=True)
+
+        stock_status_labels = {
+            STOCK_HISTORY_STATUS_IN_STOCK: "Есть остаток",
+            STOCK_HISTORY_STATUS_ZERO: "0",
+            STOCK_HISTORY_STATUS_NO_DATA: "Нет данных",
         }
-    )
-    history_display["Статус товара"] = history_display["Статус товара"].map(
-        lambda value: {"active": "Основной", "sellout": "Распродажа"}.get(str(value), value)
-    )
-    st.caption("`NO_DATA` показывается отдельно и не считается нулевым остатком.")
-    st.dataframe(
-        sanitize_dataframe_for_streamlit_display(
-            history_display[
-                ["Дата", "Артикул WB", "Артикул", "Товар", "Статус товара", "Склад", "Остаток", "Статус остатка", "Загружено в БД"]
-            ],
-            numeric_columns={"Артикул WB", "Остаток"},
-        ),
-        width="stretch",
-        hide_index=True,
-    )
-    with st.expander("Диагностика поисковых запросов (Debug Check)"):
-        try:
-            with session_scope() as session:
-                diag_stmt1 = """
-                    select
-                      day,
-                      query_group,
-                      count(*) as rows_count,
-                      count(distinct nm_id) as nm_count,
-                      count(distinct query_text) as query_text_count,
-                      sum(coalesce(orders_current, 0)) as orders_sum,
-                      sum(coalesce(frequency_current, 0)) as raw_frequency_sum
-                    from fact_wb_search_query_text_day
-                    where day = :report_day
-                    group by day, query_group
-                    order by query_group;
-                """
-                res1 = session.execute(
-                    text(diag_stmt1),
-                    {"report_day": selected_snapshot_date}
-                ).all()
-                df1 = pd.DataFrame([dict(row._mapping) for row in res1])
-                st.markdown("**Общая статистика по группам:**")
-                if not df1.empty:
-                    st.dataframe(df1)
-                else:
-                    st.write("Нет данных.")
+        history_display = history_table.copy()
+        history_display["loaded_at"] = pd.to_datetime(history_display["loaded_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+        history_display["loaded_at"] = history_display["loaded_at"].fillna(STOCK_WAREHOUSE_NO_DATA_DISPLAY)
+        history_display["stock_status"] = history_display["stock_status"].map(
+            lambda value: stock_status_labels.get(str(value), value)
+        )
+        history_display = history_display.rename(
+            columns={
+                "snapshot_date": "Дата",
+                "nm_id": "Артикул WB",
+                "supplier_article": "Артикул",
+                "product_name": "Товар",
+                "lifecycle_status": "Статус товара",
+                "warehouse_name": "Склад",
+                "stock_qty": "Остаток",
+                "stock_status": "Статус остатка",
+                "loaded_at": "Загружено в БД",
+            }
+        )
+        history_display["Статус товара"] = history_display["Статус товара"].map(
+            lambda value: {"active": "Основной", "sellout": "Распродажа"}.get(str(value), value)
+        )
+        st.caption("`NO_DATA` показывается отдельно и не считается нулевым остатком.")
+        st.dataframe(
+            sanitize_dataframe_for_streamlit_display(
+                history_display[
+                    ["Дата", "Артикул WB", "Артикул", "Товар", "Статус товара", "Склад", "Остаток", "Статус остатка", "Загружено в БД"]
+                ],
+                numeric_columns={"Артикул WB", "Остаток"},
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+        with st.expander("Диагностика поисковых запросов (Debug Check)"):
+            try:
+                with session_scope() as session:
+                    diag_stmt1 = """
+                        select
+                          day,
+                          query_group,
+                          count(*) as rows_count,
+                          count(distinct nm_id) as nm_count,
+                          count(distinct query_text) as query_text_count,
+                          sum(coalesce(orders_current, 0)) as orders_sum,
+                          sum(coalesce(frequency_current, 0)) as raw_frequency_sum
+                        from fact_wb_search_query_text_day
+                        where day = :report_day
+                        group by day, query_group
+                        order by query_group;
+                    """
+                    res1 = session.execute(
+                        text(diag_stmt1),
+                        {"report_day": selected_snapshot_date}
+                    ).all()
+                    df1 = pd.DataFrame([dict(row._mapping) for row in res1])
+                    st.markdown("**Общая статистика по группам:**")
+                    if not df1.empty:
+                        st.dataframe(df1)
+                    else:
+                        st.write("Нет данных.")
 
-                diag_stmt2 = """
-                    with dedup as (
-                      select
-                        day,
-                        query_group,
-                        query_text,
-                        max(frequency_current) as frequency
-                      from fact_wb_search_query_text_day
-                      where day = :report_day
-                      group by day, query_group, query_text
-                    )
-                    select
-                      day,
-                      query_group,
-                      sum(frequency) as search_queries
-                    from dedup
-                    group by day, query_group
-                    order by query_group;
-                """
-                res2 = session.execute(
-                    text(diag_stmt2),
-                    {"report_day": selected_snapshot_date}
-                ).all()
-                df2 = pd.DataFrame([dict(row._mapping) for row in res2])
-                st.markdown("**Dedupe-агрегат поисковых запросов:**")
-                if not df2.empty:
-                    st.dataframe(df2)
-                else:
-                    st.write("Нет данных.")
-        except Exception as e:
-            st.error(f"Ошибка при загрузке диагностики: {e}")
+                    diag_stmt2 = """
+                        with dedup as (
+                          select
+                            day,
+                            query_group,
+                            query_text,
+                            max(frequency_current) as frequency
+                          from fact_wb_search_query_text_day
+                          where day = :report_day
+                          group by day, query_group, query_text
+                        )
+                        select
+                          day,
+                          query_group,
+                          sum(frequency) as search_queries
+                        from dedup
+                        group by day, query_group
+                        order by query_group;
+                    """
+                    res2 = session.execute(
+                        text(diag_stmt2),
+                        {"report_day": selected_snapshot_date}
+                    ).all()
+                    df2 = pd.DataFrame([dict(row._mapping) for row in res2])
+                    st.markdown("**Dedupe-агрегат поисковых запросов:**")
+                    if not df2.empty:
+                        st.dataframe(df2)
+                    else:
+                        st.write("Нет данных.")
+            except Exception as e:
+                st.error(f"Ошибка при загрузке диагностики: {e}")
 
 
 def save_uploaded_file_to_temp(uploaded_file: Any) -> Path:
