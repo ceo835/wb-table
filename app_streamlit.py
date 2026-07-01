@@ -6940,6 +6940,13 @@ def build_upload_tab_sections() -> list[dict[str, object]]:
             "implemented": True,
             "importer_func": import_orders_geography_xlsx,
         },
+        {
+            "title": "Загрузить ВБро",
+            "report_name": "ВБро",
+            "state_key": VBRO_UPLOAD_KEY,
+            "implemented": False,
+            "accepted_extensions": ["xlsx", "xls", "csv"],
+        },
     ]
 
 
