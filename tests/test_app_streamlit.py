@@ -79,7 +79,9 @@ from app_streamlit import (
     build_stock_warehouse_product_table,
     build_stock_warehouse_problem_profit_total,
     should_render_stock_warehouse_history_pivot,
+    build_stock_all_band_level,
     build_stock_warehouse_summary_card_html,
+    build_stock_all_product_level,
     build_stock_warehouse_display_dataframe,
     build_stock_warehouse_summary_metrics,
     format_summary_rub,
@@ -3986,6 +3988,99 @@ def test_build_stock_warehouse_history_table_builds_virtual_grid_and_stock_statu
     assert row_zero["stock_qty"] == 0
     assert row_no_data["stock_status"] == "NO_DATA"
     assert pd.isna(row_no_data["stock_qty"])
+
+
+def test_build_stock_all_product_level_keeps_product_title_for_display() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": pd.Timestamp("2026-06-30").date(),
+                "nm_id": 101,
+                "warehouse_id": 10,
+                "warehouse_name": "Коледино",
+                "stock_qty": 5,
+                "in_way_to_client": 1,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-30").date(),
+                "nm_id": 202,
+                "warehouse_id": 20,
+                "warehouse_name": "Казань",
+                "stock_qty": 3,
+                "in_way_to_client": 0,
+                "in_way_from_client": 2,
+            },
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 101,
+                "query_group": "kids_underwear",
+                "supplier_article": "art-101",
+                "title": "Товар 101",
+            },
+            {
+                "nm_id": 202,
+                "query_group": "women_underwear",
+                "supplier_article": "art-202",
+                "title": "Товар 202",
+            },
+        ]
+    )
+
+    result = build_stock_all_product_level(snapshot_df, settings_df, pd.Timestamp("2026-06-30").date())
+
+    assert "title" in result.columns
+    assert result[["nm_id", "title"]].to_dict(orient="records") == [
+        {"nm_id": 101, "title": "Товар 101"},
+        {"nm_id": 202, "title": "Товар 202"},
+    ]
+
+
+def test_build_stock_all_band_level_uses_only_real_query_groups_from_db() -> None:
+    product_df = pd.DataFrame(
+        [
+            {
+                "band": "трусы женские",
+                "nm_id": 101,
+                "wb_stock_qty": 5,
+                "wb_in_way_to_client": 1,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 6,
+            },
+            {
+                "band": "детская футболка",
+                "nm_id": 202,
+                "wb_stock_qty": 3,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 2,
+                "wb_total_in_contour": 5,
+            },
+            {
+                "band": "unknown",
+                "nm_id": 303,
+                "wb_stock_qty": 9,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 9,
+            },
+            {
+                "band": pd.NA,
+                "nm_id": 404,
+                "wb_stock_qty": 7,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 7,
+            },
+        ]
+    )
+
+    result = build_stock_all_band_level(product_df)
+
+    assert result["band"].tolist() == ["детская футболка", "трусы женские"]
+    assert result["products_count"].tolist() == [1, 1]
 
 
 def test_build_stock_warehouse_history_summary_metrics_counts_row_statuses() -> None:

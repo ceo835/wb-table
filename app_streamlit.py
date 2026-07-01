@@ -42,6 +42,7 @@ from src.db.models import (
     SettingsLostProfitMarketArea,
 )
 from src.db.product_query_group_backfill import (
+    QUERY_GROUP_UNKNOWN,
     QUERY_GROUP_VALUES as PRODUCT_QUERY_GROUP_VALUES,
     format_query_group_label,
     normalize_query_group_value,
@@ -2137,16 +2138,20 @@ def load_settings_product_query_groups_from_db(cache_buster: str | None = None) 
                 select(
                     SettingsProducts.nm_id,
                     SettingsProducts.query_group,
+                    SettingsProducts.supplier_article,
+                    SettingsProducts.title,
                 ).order_by(SettingsProducts.nm_id.asc())
             ).all()
     except Exception:
         logger.exception("Failed to load query_group from settings_products for stock warehouse tab")
-        return pd.DataFrame(columns=["nm_id", "query_group"])
+        return pd.DataFrame(columns=["nm_id", "query_group", "supplier_article", "title"])
     return pd.DataFrame(
         [
             {
                 "nm_id": row.nm_id,
                 "query_group": row.query_group,
+                "supplier_article": row.supplier_article,
+                "title": row.title,
             }
             for row in rows
         ]
@@ -3336,7 +3341,7 @@ def build_stock_all_product_level(
     - wb_supply_qty         = None  (поставки на склад WB — отдельный источник)
     """
     empty_cols = [
-        "band", "nm_id", "vendor_code",
+        "band", "nm_id", "vendor_code", "title",
         "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client",
         "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty",
     ]
@@ -3384,13 +3389,18 @@ def build_stock_all_product_level(
             keep.append("query_group")
         if "supplier_article" in s.columns:
             keep.append("supplier_article")
+        if "title" in s.columns:
+            keep.append("title")
         s = s[keep].drop_duplicates(subset=["nm_id"])
         agg = agg.merge(s, on="nm_id", how="left")
     else:
         agg["query_group"] = pd.NA
         agg["supplier_article"] = pd.NA
+        agg["title"] = pd.NA
 
     agg = agg.rename(columns={"query_group": "band", "supplier_article": "vendor_code"})
+    agg["title"] = agg["title"].where(agg["title"].notna(), agg["vendor_code"])
+    agg["title"] = agg["title"].where(agg["title"].notna(), agg["nm_id"].astype(str))
 
     for col in empty_cols:
         if col not in agg.columns:
@@ -3398,7 +3408,7 @@ def build_stock_all_product_level(
 
     return (
         agg[empty_cols]
-        .sort_values(["band", "nm_id"], na_position="last")
+        .sort_values(["title", "nm_id"], na_position="last")
         .reset_index(drop=True)
     )
 
@@ -3419,6 +3429,14 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
     if "band" not in product_df.columns:
         product_df = product_df.copy()
         product_df["band"] = pd.NA
+
+    product_df = product_df.copy()
+    product_df["band"] = product_df["band"].map(normalize_query_group_value)
+    product_df = product_df[
+        product_df["band"].notna() & product_df["band"].ne(QUERY_GROUP_UNKNOWN)
+    ].copy()
+    if product_df.empty:
+        return pd.DataFrame(columns=empty_cols)
 
     agg = (
         product_df.groupby("band", as_index=False, dropna=False)
@@ -3449,14 +3467,15 @@ def _fmt_stock_int(value: object) -> str:
 def render_stock_all_tab(
     snapshot_df: "pd.DataFrame",
     settings_df: "pd.DataFrame",
-    latest_date: "date | None",
+    available_dates: "list[date]",
 ) -> None:
     """Рендерит вкладку 'Контроль всех остатков'."""
     st.caption(
         "Источник: `fact_stock_warehouse_snapshot`. "
         "Агрегация по `nm_id` за последнюю доступную дату snapshot."
     )
-    st.info(
+    if False:
+        st.info(
         "**В пути к клиенту** — товары, которые уже ушли покупателям "
         "(WB передал их службе доставки). Это **не** поставки на склад WB. "
         "Поставки на склад WB (`Поставки на WB`) будут добавлены отдельно "
@@ -3464,17 +3483,54 @@ def render_stock_all_tab(
         icon="ℹ️",
     )
 
+    latest_date = available_dates[-1] if available_dates else None
     if latest_date is None:
         st.warning("В `fact_stock_warehouse_snapshot` нет данных.")
         return
 
     st.markdown(f"**Дата актуальности WB-остатков:** `{latest_date.isoformat()}`")
 
-    product_df = build_stock_all_product_level(snapshot_df, settings_df, latest_date)
+    import zoneinfo
+    moscow_tz = zoneinfo.ZoneInfo("Europe/Moscow")
+    report_day = (datetime.now(moscow_tz) - timedelta(days=1)).date()
+    default_snapshot_date = resolve_stock_warehouse_default_snapshot_date(available_dates, report_day)
+    selected_snapshot_date = st.date_input(
+        "Дата среза остатков",
+        value=default_snapshot_date,
+        min_value=available_dates[0],
+        max_value=available_dates[-1],
+        key="stock_all_snapshot_date",
+    )
+
+    product_df = build_stock_all_product_level(snapshot_df, settings_df, selected_snapshot_date)
 
     if product_df.empty:
         st.warning(f"Нет строк за {latest_date.isoformat()} в `fact_stock_warehouse_snapshot`.")
         return
+
+    wb_stock_total = product_df["wb_stock_qty"].sum(min_count=1)
+    wb_in_way = product_df["wb_in_way_to_client"].sum(min_count=1)
+    wb_from_client = product_df["wb_in_way_from_client"].sum(min_count=1)
+    wb_contour = product_df["wb_total_in_contour"].sum(min_count=1)
+    products_count = product_df["nm_id"].nunique()
+    band_count = int(product_df["band"].nunique())
+
+    metric_items = [
+        ("Остаток WB на складах", _fmt_stock_int(wb_stock_total)),
+        ("В пути к клиенту", _fmt_stock_int(wb_in_way)),
+        ("Возвраты в пути", _fmt_stock_int(wb_from_client)),
+        ("Итого в контуре WB", _fmt_stock_int(wb_contour)),
+        ("Остаток 1С", "нет данных"),
+        ("Поставки на WB", "нет данных"),
+        ("Товаров / Банд", f"{products_count}\u202f/\u202f{band_count}"),
+    ]
+    cols = st.columns(len(metric_items))
+    for col, (label, value) in zip(cols, metric_items):
+        col.markdown(
+            build_stock_warehouse_summary_card_html(label, value, compact=True),
+            unsafe_allow_html=True,
+        )
+    st.divider()
 
     level = st.radio(
         "Уровень агрегации",
@@ -3512,7 +3568,30 @@ def render_stock_all_tab(
             "Возвраты в пути", "Итого в контуре WB",
         }
     else:
-        display_df = product_df.copy().rename(columns=rename_product)
+        display_df = product_df[
+            [
+                "nm_id",
+                "vendor_code",
+                "title",
+                "wb_stock_qty",
+                "wb_in_way_to_client",
+                "wb_in_way_from_client",
+                "wb_total_in_contour",
+                "one_c_stock_qty",
+                "wb_supply_qty",
+            ]
+        ].copy()
+        display_df.columns = [
+            "Артикул WB",
+            "Артикул продавца",
+            "Название",
+            "Остаток WB на складах",
+            "В пути к клиенту",
+            "Возвраты в пути",
+            "Итого в контуре WB",
+            "Остаток 1С",
+            "Поставки на WB",
+        ]
         numeric_cols = {
             "Артикул WB", "Остаток WB на складах", "В пути к клиенту",
             "Возвраты в пути", "Итого в контуре WB",
@@ -3530,7 +3609,7 @@ def render_stock_all_tab(
     )
 
     # Итоговые карточки
-    st.divider()
+    return
     wb_stock_total = product_df["wb_stock_qty"].sum(min_count=1)
     wb_in_way = product_df["wb_in_way_to_client"].sum(min_count=1)
     wb_from_client = product_df["wb_in_way_from_client"].sum(min_count=1)
@@ -3579,7 +3658,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
     ])
 
     with tab_all:
-        render_stock_all_tab(prepared_snapshot, settings_qg_df, latest_date)
+        render_stock_all_tab(prepared_snapshot, settings_qg_df, available_dates)
 
     with tab_zero:
         st.caption("Источник: `fact_stock_warehouse_snapshot`, агрегация до уровня Артикул WB × склад.")
