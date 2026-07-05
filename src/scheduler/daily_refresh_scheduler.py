@@ -5,7 +5,7 @@ import threading
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Callable, Mapping
 
-from scripts.run_daily_dashboard_refresh import resolve_default_target_date, run_daily_dashboard_refresh
+from scripts.run_daily_dashboard_refresh import DEFAULT_DASHBOARD_START_DATE, resolve_default_target_date, run_daily_dashboard_refresh
 from src.db.app_job_runs import JOB_STATUS_FAILED, JOB_STATUS_SKIPPED, JOB_STATUS_SUCCESS, has_successful_job_run, run_guarded_job
 from src.db.connection import create_db_engine
 
@@ -100,10 +100,15 @@ def _scheduler_loop(stop_event: threading.Event, runner: Callable[[date], dict[s
     log_scheduler("Daily refresh scheduler enabled")
 
     now = utc_now()
-    target_date = resolve_default_target_date(now)
-    if should_run_startup_catchup(now=now, has_success_today=_has_success_for_date(target_date)):
-        log_scheduler("Daily refresh started")
-        execute_daily_refresh_once(run_date=target_date, runner=runner)
+    yesterday = resolve_default_target_date(now)
+    # Check last 7 days for any missing daily refreshes
+    start_catchup = max(DEFAULT_DASHBOARD_START_DATE, yesterday - timedelta(days=7))
+    current_date = start_catchup
+    while current_date <= yesterday:
+        if not _has_success_for_date(current_date):
+            log_scheduler(f"Catchup: Daily refresh started for {current_date.isoformat()}")
+            execute_daily_refresh_once(run_date=current_date, runner=runner)
+        current_date += timedelta(days=1)
 
     while not stop_event.is_set():
         next_run = build_next_run_at(utc_now())

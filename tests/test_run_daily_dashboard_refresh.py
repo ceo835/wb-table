@@ -44,6 +44,17 @@ def mock_search_query_loader(monkeypatch):
             "rows_in_db": 10,
         },
     )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_wb_seller_price_snapshot",
+        lambda **kwargs: {
+            "success": True,
+            "resolved_date": kwargs["snapshot_date"].isoformat(),
+            "nm_ids_count": 59,
+            "success_count": 59,
+            "failed_count": 0,
+            "rows_inserted": 59,
+        },
+    )
 
 
 def test_run_daily_dashboard_refresh_search_queries_success_and_failure(monkeypatch, tmp_path: Path) -> None:
@@ -220,6 +231,7 @@ def test_run_daily_dashboard_refresh_writes_summary_files(monkeypatch, tmp_path:
         "wb_site_price_monitor": "success",
         "warehouse_snapshot": "200",
         "search_queries": "200",
+        "wb_seller_price": "success",
     }
     assert "warehouse_snapshot" in md_path.read_text(encoding="utf-8")
 
@@ -721,7 +733,16 @@ def test_scheduler_startup_catchup_uses_yesterday_target_date(monkeypatch) -> No
 
     _scheduler_loop(StopAfterStartup(), runner=None)
 
-    assert startup_calls == [date(2026, 6, 20)]
+    assert startup_calls == [
+        date(2026, 6, 13),
+        date(2026, 6, 14),
+        date(2026, 6, 15),
+        date(2026, 6, 16),
+        date(2026, 6, 17),
+        date(2026, 6, 18),
+        date(2026, 6, 19),
+        date(2026, 6, 20),
+    ]
 
 
 def test_scheduler_scheduled_run_uses_yesterday_target_date(monkeypatch) -> None:
