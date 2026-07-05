@@ -272,8 +272,15 @@ def run_loader(year: int, apply: bool = False, dry_run: bool = True) -> dict[str
                     "raw_row": raw_row
                 })
 
+    # Deduplicate records by (day, nm_id) keeping the last one
+    deduped_records = {}
+    for record in parsed_records:
+        key = (record["day"], record["nm_id"])
+        deduped_records[key] = record
+    parsed_records = list(deduped_records.values())
+
     rows_parsed = len(parsed_records)
-    distinct_dates = len(dates_found)
+    distinct_dates = len(set(dates_found))
     distinct_nm_ids = len(unique_nm_ids)
     date_min = min(dates_found).isoformat() if dates_found else None
     date_max = max(dates_found).isoformat() if dates_found else None
