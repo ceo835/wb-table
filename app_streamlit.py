@@ -42,6 +42,7 @@ from src.db.models import (
     SettingsLostProfitMarketArea,
     FactFunnelDay,
     FactIvanStockSheetDay,
+    FactWbStatisticsOrderSizeDay,
 )
 from src.db.product_query_group_backfill import (
     QUERY_GROUP_UNKNOWN,
@@ -3350,40 +3351,65 @@ def build_stock_all_product_level(
         "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client",
         "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty", "wb_vs_one_c_diff",
     ]
-    if snapshot_df.empty:
+    if settings_df.empty and snapshot_df.empty:
         return pd.DataFrame(columns=empty_cols)
 
-    day_df = snapshot_df[snapshot_df["snapshot_date"] == snapshot_date].copy()
-    if day_df.empty:
-        return pd.DataFrame(columns=empty_cols)
+    # 1. Сбор базового фрейма из settings_df
+    base_df = pd.DataFrame(columns=["nm_id", "query_group", "supplier_article", "title"])
+    if not settings_df.empty:
+        s = settings_df.copy()
+        s["nm_id"] = pd.to_numeric(s["nm_id"], errors="coerce")
+        s = s.dropna(subset=["nm_id"])
+        s["nm_id"] = s["nm_id"].astype(int)
+        keep = ["nm_id"]
+        for col in ("query_group", "supplier_article", "title"):
+            if col in s.columns:
+                keep.append(col)
+        base_df = s[keep].drop_duplicates(subset=["nm_id"]).copy()
 
-    for col in ("stock_qty", "in_way_to_client", "in_way_from_client"):
-        if col not in day_df.columns:
-            day_df[col] = pd.NA
-        day_df[col] = pd.to_numeric(day_df[col], errors="coerce")
+    # 2. Агрегация остатков WB
+    day_df = snapshot_df[snapshot_df["snapshot_date"] == snapshot_date].copy() if not snapshot_df.empty else pd.DataFrame()
+    if not day_df.empty:
+        for col in ("stock_qty", "in_way_to_client", "in_way_from_client"):
+            if col not in day_df.columns:
+                day_df[col] = pd.NA
+            day_df[col] = pd.to_numeric(day_df[col], errors="coerce")
 
-    agg = (
-        day_df.groupby("nm_id", as_index=False)[
-            ["stock_qty", "in_way_to_client", "in_way_from_client"]
-        ]
-        .sum(min_count=1)
-        .rename(columns={
-            "stock_qty": "wb_stock_qty",
-            "in_way_to_client": "wb_in_way_to_client",
-            "in_way_from_client": "wb_in_way_from_client",
-        })
-    )
+        agg = (
+            day_df.groupby("nm_id", as_index=False)[
+                ["stock_qty", "in_way_to_client", "in_way_from_client"]
+            ]
+            .sum(min_count=1)
+            .rename(columns={
+                "stock_qty": "wb_stock_qty",
+                "in_way_to_client": "wb_in_way_to_client",
+                "in_way_from_client": "wb_in_way_from_client",
+            })
+        )
+        tmp = agg[["wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client"]]
+        has_any = tmp.notna().any(axis=1)
+        agg["wb_total_in_contour"] = tmp.sum(axis=1, min_count=1).where(has_any, other=pd.NA)
+    else:
+        agg = pd.DataFrame(columns=["nm_id", "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client", "wb_total_in_contour"])
 
-    # Итого в контуре WB: сумма трёх компонентов, null только если все null
-    tmp = agg[["wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client"]]
-    has_any = tmp.notna().any(axis=1)
-    agg["wb_total_in_contour"] = tmp.sum(axis=1, min_count=1).where(has_any, other=pd.NA)
+    agg["nm_id"] = pd.to_numeric(agg["nm_id"], errors="coerce")
+    agg = agg.dropna(subset=["nm_id"])
+    agg["nm_id"] = agg["nm_id"].astype(int)
 
-    # Недоступные источники — явно null, не 0
+    # 3. Соединение базового фрейма и остатков WB
+    if not base_df.empty:
+        agg = base_df.merge(agg, on="nm_id", how="left")
+    else:
+        if day_df.empty:
+            return pd.DataFrame(columns=empty_cols)
+        agg["query_group"] = pd.NA
+        agg["supplier_article"] = pd.NA
+        agg["title"] = pd.NA
+
+    # 4. Прикрепление остатков 1С
     agg["one_c_stock_qty"] = pd.NA
     agg["wb_supply_qty"] = pd.NA
 
-    # Подтягиваем band (query_group) и vendor_code из settings_products
     if one_c_stock_df is not None and not one_c_stock_df.empty:
         one_c_df = one_c_stock_df.copy()
         one_c_df["nm_id"] = pd.to_numeric(one_c_df.get("nm_id"), errors="coerce")
@@ -3397,25 +3423,6 @@ def build_stock_all_product_level(
                 .rename(columns={"ivan_stock_qty": "one_c_stock_qty"})
             )
             agg = agg.drop(columns=["one_c_stock_qty"], errors="ignore").merge(one_c_df, on="nm_id", how="left")
-
-    if not settings_df.empty:
-        s = settings_df.copy()
-        s["nm_id"] = pd.to_numeric(s["nm_id"], errors="coerce")
-        s = s.dropna(subset=["nm_id"])
-        s["nm_id"] = s["nm_id"].astype(int)
-        keep = ["nm_id"]
-        if "query_group" in s.columns:
-            keep.append("query_group")
-        if "supplier_article" in s.columns:
-            keep.append("supplier_article")
-        if "title" in s.columns:
-            keep.append("title")
-        s = s[keep].drop_duplicates(subset=["nm_id"])
-        agg = agg.merge(s, on="nm_id", how="left")
-    else:
-        agg["query_group"] = pd.NA
-        agg["supplier_article"] = pd.NA
-        agg["title"] = pd.NA
 
     agg["query_group"] = agg["query_group"].map(normalize_query_group_value)
     agg = agg.rename(columns={"supplier_article": "vendor_code"})
@@ -3939,13 +3946,11 @@ def build_stock_all_size_display_dataframe(size_df: "pd.DataFrame") -> tuple["pd
         "Баркод",
         "Остаток WB по размеру",
         "Остаток 1С по размеру",
-        "Разница WB - 1С по размеру",
     ]
     numeric_cols = {
         "Артикул WB",
         "Остаток WB по размеру",
         "Остаток 1С по размеру",
-        "Разница WB - 1С по размеру",
     }
     display_df = size_df.reindex(columns=source_columns).rename(columns=rename_map)
     for column_name in ordered_columns:
@@ -4107,6 +4112,7 @@ def render_stock_all_tab(
         width="stretch",
         hide_index=True,
     )
+    st.markdown("* Прогноз остатков рассчитывается как суммарный остаток WB + 1С, делённый на скорость продаж. Значение указано в днях.")
 
     # Итоговые карточки
     return
@@ -6589,6 +6595,100 @@ def load_sales_speed_data_from_db(snapshot_date: date) -> pd.DataFrame:
         df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
         df["order_count"] = pd.to_numeric(df["order_count"], errors="coerce")
         return df
+
+
+@st.cache_data(show_spinner=False)
+def load_size_sales_speed_data_from_db(snapshot_date: date) -> pd.DataFrame:
+    """
+    Загружает продажи по размерам из fact_wb_statistics_order_size_day за 7 завершенных дней
+    до snapshot_date (т.е. [snapshot_date - 7 days, snapshot_date - 1 day]).
+    """
+    date_from = snapshot_date - timedelta(days=7)
+    date_to = snapshot_date - timedelta(days=1)
+    with session_scope() as session:
+        stmt = select(
+            FactWbStatisticsOrderSizeDay.date,
+            FactWbStatisticsOrderSizeDay.nm_id,
+            FactWbStatisticsOrderSizeDay.barcode,
+            FactWbStatisticsOrderSizeDay.chrt_id,
+            FactWbStatisticsOrderSizeDay.tech_size,
+            FactWbStatisticsOrderSizeDay.order_count,
+            FactWbStatisticsOrderSizeDay.cancel_count
+        ).where(
+            FactWbStatisticsOrderSizeDay.date >= date_from,
+            FactWbStatisticsOrderSizeDay.date <= date_to
+        )
+        results = session.execute(stmt).all()
+        if not results:
+            return pd.DataFrame(columns=["date", "nm_id", "barcode", "chrt_id", "tech_size", "order_count", "cancel_count"])
+        df = pd.DataFrame([
+            {
+                "date": r.date,
+                "nm_id": r.nm_id,
+                "barcode": r.barcode,
+                "chrt_id": r.chrt_id,
+                "tech_size": r.tech_size,
+                "order_count": r.order_count,
+                "cancel_count": r.cancel_count,
+            }
+            for r in results
+        ])
+        df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+        df["chrt_id"] = pd.to_numeric(df["chrt_id"], errors="coerce")
+        df["order_count"] = pd.to_numeric(df["order_count"], errors="coerce")
+        df["cancel_count"] = pd.to_numeric(df["cancel_count"], errors="coerce")
+        return df
+
+
+def get_size_sales_speed_yesterday2(
+    size_sales_df: pd.DataFrame,
+    snapshot_date: date,
+    nm_id: int,
+    barcode: str,
+) -> float | None:
+    """
+    Возвращает скорость продаж размера за позавчера (snapshot_date - 2 days).
+    """
+    if size_sales_df.empty:
+        return None
+    target_date = snapshot_date - timedelta(days=2)
+    clean_bc = str(barcode).strip().replace(" ", "")
+    mask = (
+        (size_sales_df["date"] == target_date) & 
+        (size_sales_df["nm_id"] == nm_id) & 
+        (size_sales_df["barcode"].str.strip().str.replace(" ", "") == clean_bc)
+    )
+    filtered = size_sales_df[mask]
+    if filtered.empty:
+        return 0.0
+    return float(filtered["order_count"].sum())
+
+
+def get_size_sales_speed_week(
+    size_sales_df: pd.DataFrame,
+    snapshot_date: date,
+    nm_id: int,
+    barcode: str,
+) -> float | None:
+    """
+    Возвращает среднюю скорость продаж размера за последние 7 завершенных дней.
+    """
+    if size_sales_df.empty:
+        return None
+    date_from = snapshot_date - timedelta(days=7)
+    date_to = snapshot_date - timedelta(days=1)
+    clean_bc = str(barcode).strip().replace(" ", "")
+    mask = (
+        (size_sales_df["date"] >= date_from) & 
+        (size_sales_df["date"] <= date_to) & 
+        (size_sales_df["nm_id"] == nm_id) & 
+        (size_sales_df["barcode"].str.strip().str.replace(" ", "") == clean_bc)
+    )
+    filtered = size_sales_df[mask]
+    if filtered.empty:
+        return 0.0
+    total_orders = float(filtered["order_count"].sum())
+    return total_orders / 7.0
 
 
 @st.cache_data(show_spinner=False)

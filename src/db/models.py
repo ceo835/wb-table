@@ -705,6 +705,28 @@ class FactStockWarehouseSnapshot(Base, TimestampMixin):
     source: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
+class FactWbStatisticsOrderSizeDay(Base, TimestampMixin):
+    __tablename__ = "fact_wb_statistics_order_size_day"
+    __table_args__ = (
+        UniqueConstraint(
+            "date",
+            "nm_id",
+            "barcode",
+            name="uq_fact_wb_statistics_order_size_day_natural_key",
+        ),
+        Index("idx_fact_wb_statistics_order_size_day_date_nm", "date", "nm_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    barcode: Mapped[str] = mapped_column(String(64), nullable=False)
+    chrt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tech_size: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    order_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cancel_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class FactLocalizationRegionDay(Base, StatusMixin):
     __tablename__ = "fact_localization_region_day"
     __table_args__ = (
