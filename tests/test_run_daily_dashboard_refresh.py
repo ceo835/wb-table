@@ -22,8 +22,16 @@ from src.db.base import Base
 from src.db.models import AppJobRun
 from src.scheduler.daily_refresh_scheduler import (
     DAILY_REFRESH_JOB_NAME,
+    IVAN_STOCK_JOB_NAME,
+    VVBROMO_JOB_NAME,
     build_next_run_at,
+    build_next_worker_run_at,
+    build_worker_job_slots,
+    collect_due_worker_job_slots,
     execute_daily_refresh_once,
+    run_due_worker_job_slots,
+    run_scheduler_worker_once,
+    resolve_worker_job_run_date,
     should_autostart_daily_refresh,
     should_run_startup_catchup,
     _scheduler_loop,
@@ -771,6 +779,106 @@ def test_scheduler_scheduled_run_uses_yesterday_target_date(monkeypatch) -> None
     _scheduler_loop(StopAfterScheduledRun(), runner=None)
 
     assert scheduled_calls == [date(2026, 6, 20)]
+
+
+def test_build_worker_job_slots_contains_dashboard_vvbromo_and_ivan_jobs() -> None:
+    slots = build_worker_job_slots(
+        dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
+    )
+
+    assert [(slot.job_name, slot.slot_label) for slot in slots] == [
+        (DAILY_REFRESH_JOB_NAME, "1100_msk"),
+        (VVBROMO_JOB_NAME, "0900_msk"),
+        (VVBROMO_JOB_NAME, "2100_msk"),
+        (IVAN_STOCK_JOB_NAME, "2200_msk"),
+    ]
+
+
+def test_collect_due_worker_job_slots_respects_schedule_and_success_state() -> None:
+    slots = build_worker_job_slots(
+        dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
+    )
+    now = datetime(2026, 7, 6, 20, 30, tzinfo=UTC)
+
+    due = collect_due_worker_job_slots(
+        now,
+        slots,
+        has_success_checker=lambda job_name, run_date: job_name == "vvbromo_sync__0900_msk",
+    )
+
+    assert [(slot.guard_job_name, run_date.isoformat()) for slot, run_date in due] == [
+        (DAILY_REFRESH_JOB_NAME, "2026-07-05"),
+        ("vvbromo_sync__2100_msk", "2026-07-06"),
+        ("ivan_stock_sync__2200_msk", "2026-07-06"),
+    ]
+
+
+def test_run_due_worker_job_slots_continues_when_one_job_fails() -> None:
+    slots = build_worker_job_slots(
+        dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
+    )[1:3]
+    now = datetime(2026, 7, 6, 18, 30, tzinfo=UTC)
+
+    def fake_executor(slot, run_date):
+        if slot.guard_job_name == "vvbromo_sync__0900_msk":
+            raise RuntimeError("vvbromo failed")
+        return {"status": "success", "job_name": slot.job_name, "run_date": run_date.isoformat()}
+
+    results = run_due_worker_job_slots(
+        now,
+        slots,
+        has_success_checker=lambda *_args, **_kwargs: False,
+        executor=fake_executor,
+    )
+
+    assert results[0]["status"] == "failed"
+    assert results[0]["job_name"] == VVBROMO_JOB_NAME
+    assert results[1]["status"] == "success"
+
+
+def test_run_scheduler_worker_once_runs_dashboard_catchup_and_same_day_sheet_jobs() -> None:
+    slots = build_worker_job_slots(
+        dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
+    )
+    now = datetime(2026, 7, 6, 19, 30, tzinfo=UTC)
+    executed: list[tuple[str, date]] = []
+
+    def fake_executor(slot, run_date):
+        executed.append((slot.guard_job_name, run_date))
+        return {"status": "success", "job_name": slot.job_name, "run_date": run_date.isoformat()}
+
+    run_scheduler_worker_once(
+        now=now,
+        job_slots=slots,
+        has_success_checker=lambda *_args, **_kwargs: False,
+        executor=fake_executor,
+        include_startup_catchup=True,
+    )
+
+    assert executed[:8] == [
+        (DAILY_REFRESH_JOB_NAME, date(2026, 6, 28)),
+        (DAILY_REFRESH_JOB_NAME, date(2026, 6, 29)),
+        (DAILY_REFRESH_JOB_NAME, date(2026, 6, 30)),
+        (DAILY_REFRESH_JOB_NAME, date(2026, 7, 1)),
+        (DAILY_REFRESH_JOB_NAME, date(2026, 7, 2)),
+        (DAILY_REFRESH_JOB_NAME, date(2026, 7, 3)),
+        (DAILY_REFRESH_JOB_NAME, date(2026, 7, 4)),
+        (DAILY_REFRESH_JOB_NAME, date(2026, 7, 5)),
+    ]
+    assert executed[-4:] == [
+        ("vvbromo_sync__0900_msk", date(2026, 7, 6)),
+        (DAILY_REFRESH_JOB_NAME, date(2026, 7, 5)),
+        ("vvbromo_sync__2100_msk", date(2026, 7, 6)),
+        ("ivan_stock_sync__2200_msk", date(2026, 7, 6)),
+    ]
 
 
 def test_default_runner_enables_core_refresh(monkeypatch) -> None:
