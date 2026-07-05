@@ -40,6 +40,8 @@ from src.db.models import (
     SettingsLostProfitQueryGroupCoefficient,
     SettingsLostProfitWarehouseArea,
     SettingsLostProfitMarketArea,
+    FactFunnelDay,
+    FactIvanStockSheetDay,
 )
 from src.db.product_query_group_backfill import (
     QUERY_GROUP_UNKNOWN,
@@ -3452,13 +3454,22 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
     if product_df.empty:
         return pd.DataFrame(columns=empty_cols)
 
+    product_df = product_df.copy()
     if "band" not in product_df.columns:
-        product_df = product_df.copy()
         product_df["band"] = pd.NA
 
-    product_df = product_df.copy()
     if "query_group" not in product_df.columns:
         product_df["query_group"] = product_df["band"]
+
+    for col in [
+        "wb_stock_qty",
+        "wb_in_way_to_client",
+        "wb_in_way_from_client",
+        "wb_total_in_contour",
+        "one_c_stock_qty",
+    ]:
+        if col not in product_df.columns:
+            product_df[col] = pd.NA
     product_df["query_group"] = product_df["query_group"].map(normalize_query_group_value)
     product_df["band"] = product_df["query_group"]
     if "band_name" not in product_df.columns:
@@ -3735,6 +3746,8 @@ def build_stock_all_display_dataframe(
     product_df: "pd.DataFrame",
     *,
     level: str,
+    snapshot_date: "date | None" = None,
+    sales_df: "pd.DataFrame | None" = None,
 ) -> tuple["pd.DataFrame", set[str]]:
     if level == "По бандам":
         source_df = build_stock_all_band_level(product_df)
@@ -3813,6 +3826,10 @@ def build_stock_all_display_dataframe(
             "Итого в контуре WB",
             "Остаток 1С",
             "Поставки на WB",
+            "Скорость продаж за позавчера",
+            "Скорость продаж за прошедшую неделю",
+            "Прогноз остатков по скорости позавчера",
+            "Прогноз остатков по скорости недели",
         ]
         numeric_cols = {
             "Артикул WB",
@@ -3820,20 +3837,70 @@ def build_stock_all_display_dataframe(
             "В пути к клиенту",
             "Возвраты в пути",
             "Итого в контуре WB",
+            "Скорость продаж за позавчера",
+            "Скорость продаж за прошедшую неделю",
+            "Прогноз остатков по скорости позавчера",
+            "Прогноз остатков по скорости недели",
         }
 
     display_df = source_df.reindex(columns=source_columns).rename(columns=rename_map)
     difference_label = "Разница WB - 1С"
     supply_label = "Поставки на WB"
     one_c_label = "Остаток 1С"
-    if "wb_vs_one_c_diff" in source_df.columns:
-        display_df[difference_label] = pd.to_numeric(source_df["wb_vs_one_c_diff"], errors="coerce")
-    else:
-        display_df[difference_label] = pd.NA
-    if difference_label not in ordered_columns and supply_label in ordered_columns:
-        ordered_columns.insert(ordered_columns.index(supply_label), difference_label)
+
     numeric_cols = set(numeric_cols)
-    numeric_cols.update({difference_label, one_c_label})
+    numeric_cols.add(one_c_label)
+
+    # Разницу не выводим в UI ни на уровне товаров, ни на уровне банд
+
+    # Расчет скоростей продаж и прогнозов остатков
+    if level == "По товарам":
+        display_df["Скорость продаж за позавчера"] = pd.NA
+        display_df["Скорость продаж за прошедшую неделю"] = pd.NA
+        display_df["Прогноз остатков по скорости позавчера"] = pd.NA
+        display_df["Прогноз остатков по скорости недели"] = pd.NA
+
+        if snapshot_date is not None and sales_df is not None and not sales_df.empty:
+            p_yesterday2 = snapshot_date - timedelta(days=2)
+            p_week_start = snapshot_date - timedelta(days=7)
+            p_week_end = snapshot_date - timedelta(days=1)
+
+            # Скорость за позавчера
+            df_yesterday2 = sales_df[sales_df["date"] == p_yesterday2]
+            if not df_yesterday2.empty:
+                y2_series = df_yesterday2.groupby("nm_id")["order_count"].sum(min_count=1)
+                nm_ids = pd.to_numeric(display_df["Артикул WB"], errors="coerce")
+                display_df["Скорость продаж за позавчера"] = nm_ids.map(y2_series)
+
+            # Средняя скорость за 7 дней
+            df_week = sales_df[(sales_df["date"] >= p_week_start) & (sales_df["date"] <= p_week_end)]
+            if not df_week.empty:
+                week_sum = df_week.groupby("nm_id")["order_count"].sum(min_count=1)
+                week_speed = week_sum / 7.0
+                nm_ids = pd.to_numeric(display_df["Артикул WB"], errors="coerce")
+                display_df["Скорость продаж за прошедшую неделю"] = nm_ids.map(week_speed)
+
+            # Прогноз остатков (Суммарный остаток = Остаток WB + Остаток 1С)
+            wb_stock = pd.to_numeric(display_df["Остаток WB на складах"], errors="coerce")
+            one_c_stock = pd.to_numeric(display_df["Остаток 1С"], errors="coerce")
+            
+            total_stock = wb_stock.fillna(0) + one_c_stock.fillna(0)
+            total_stock = total_stock.where(wb_stock.notna() | one_c_stock.notna(), pd.NA)
+
+            # Прогноз по позавчера
+            speed_y2 = pd.to_numeric(display_df["Скорость продаж за позавчера"], errors="coerce")
+            forecast_y2 = total_stock / speed_y2
+            display_df["Прогноз остатков по скорости позавчера"] = forecast_y2.where(
+                (speed_y2 > 0) & speed_y2.notna() & total_stock.notna(), pd.NA
+            )
+
+            # Прогноз по неделе
+            speed_w = pd.to_numeric(display_df["Скорость продаж за прошедшую неделю"], errors="coerce")
+            forecast_w = total_stock / speed_w
+            display_df["Прогноз остатков по скорости недели"] = forecast_w.where(
+                (speed_w > 0) & speed_w.notna() & total_stock.notna(), pd.NA
+            )
+
     for column_name in ordered_columns:
         if column_name not in display_df.columns:
             display_df[column_name] = pd.NA
@@ -4014,7 +4081,13 @@ def render_stock_all_tab(
         )
         display_df, numeric_cols = build_stock_all_size_display_dataframe(size_df)
     else:
-        display_df, numeric_cols = build_stock_all_display_dataframe(product_df, level=level)
+        sales_df = load_sales_speed_data_from_db(selected_snapshot_date)
+        display_df, numeric_cols = build_stock_all_display_dataframe(
+            product_df,
+            level=level,
+            snapshot_date=selected_snapshot_date,
+            sales_df=sales_df,
+        )
     display_df_raw = display_df.copy()
 
     # null-колонки — явно "нет данных", не 0
@@ -6486,6 +6559,39 @@ def build_threshold_breaches_table(chart_df: pd.DataFrame, context: dict[str, ob
 
 
 @st.cache_data(show_spinner=False)
+def load_sales_speed_data_from_db(snapshot_date: date) -> pd.DataFrame:
+    """
+    Загружает nm_id, date и order_count из fact_funnel_day за 7 завершенных дней
+    до snapshot_date (т.е. [snapshot_date - 7 days, snapshot_date - 1 day]).
+    """
+    date_from = snapshot_date - timedelta(days=7)
+    date_to = snapshot_date - timedelta(days=1)
+    with session_scope() as session:
+        stmt = select(
+            FactFunnelDay.nm_id,
+            FactFunnelDay.date,
+            FactFunnelDay.order_count
+        ).where(
+            FactFunnelDay.date >= date_from,
+            FactFunnelDay.date <= date_to
+        )
+        results = session.execute(stmt).all()
+        if not results:
+            return pd.DataFrame(columns=["nm_id", "date", "order_count"])
+        df = pd.DataFrame([
+            {
+                "nm_id": r.nm_id,
+                "date": r.date,
+                "order_count": r.order_count
+            }
+            for r in results
+        ])
+        df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+        df["order_count"] = pd.to_numeric(df["order_count"], errors="coerce")
+        return df
+
+
+@st.cache_data(show_spinner=False)
 def load_ivan_stock_product_level_from_db(stock_date: date) -> pd.DataFrame:
     rows = load_ivan_stock_product_level(stock_date)
     if not rows:
@@ -7221,13 +7327,418 @@ def render_efficiency_charts(
         )
 
 
+@st.cache_data(show_spinner=False)
+def load_stock_warehouse_snapshot_range_from_db(date_from: date, date_to: date) -> pd.DataFrame:
+    with session_scope() as session:
+        rows = session.execute(
+            select(FactStockWarehouseSnapshot)
+            .where(
+                FactStockWarehouseSnapshot.snapshot_date >= date_from,
+                FactStockWarehouseSnapshot.snapshot_date <= date_to
+            )
+        ).scalars().all()
+        if not rows:
+            return pd.DataFrame(columns=["snapshot_date", "nm_id", "stock_qty"])
+        materialized_rows = [
+            {
+                "snapshot_date": row.snapshot_date,
+                "nm_id": row.nm_id,
+                "stock_qty": row.stock_qty,
+            }
+            for row in rows
+        ]
+        df = pd.DataFrame(materialized_rows)
+        df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+        df["stock_qty"] = pd.to_numeric(df["stock_qty"], errors="coerce")
+        return df
+
+
+@st.cache_data(show_spinner=False)
+def load_ivan_stock_range_from_db(date_from: date, date_to: date) -> pd.DataFrame:
+    with session_scope() as session:
+        stmt = select(
+            FactIvanStockSheetDay.stock_date,
+            FactIvanStockSheetDay.nm_id,
+            FactIvanStockSheetDay.quantity
+        ).where(
+            FactIvanStockSheetDay.stock_date >= date_from,
+            FactIvanStockSheetDay.stock_date <= date_to
+        )
+        results = session.execute(stmt).all()
+        if not results:
+            return pd.DataFrame(columns=["snapshot_date", "nm_id", "one_c_stock_qty"])
+        df = pd.DataFrame([
+            {
+                "snapshot_date": r.stock_date,
+                "nm_id": r.nm_id,
+                "one_c_stock_qty": r.quantity
+            }
+            for r in results
+        ])
+        df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+        df["one_c_stock_qty"] = pd.to_numeric(df["one_c_stock_qty"], errors="coerce")
+        return df
+
+
+@st.cache_data(show_spinner=False)
+def load_funnel_sales_range_from_db(date_from: date, date_to: date) -> pd.DataFrame:
+    with session_scope() as session:
+        stmt = select(
+            FactFunnelDay.nm_id,
+            FactFunnelDay.date,
+            FactFunnelDay.order_count
+        ).where(
+            FactFunnelDay.date >= date_from,
+            FactFunnelDay.date <= date_to
+        )
+        results = session.execute(stmt).all()
+        if not results:
+            return pd.DataFrame(columns=["nm_id", "date", "order_count"])
+        df = pd.DataFrame([
+            {
+                "nm_id": r.nm_id,
+                "date": r.date,
+                "order_count": r.order_count
+            }
+            for r in results
+        ])
+        df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+        df["order_count"] = pd.to_numeric(df["order_count"], errors="coerce")
+        return df
+
+
+def prepare_stock_speed_charts_dataframe(
+    snapshot_df: pd.DataFrame,
+    one_c_df: pd.DataFrame,
+    sales_df: pd.DataFrame,
+    settings_qg_df: pd.DataFrame,
+    min_date: date,
+    max_date: date,
+) -> pd.DataFrame:
+    if snapshot_df.empty:
+        wb_daily = pd.DataFrame(columns=["date", "nm_id", "wb_stock_qty"])
+    else:
+        wb_daily = snapshot_df.groupby(["snapshot_date", "nm_id"], as_index=False)["stock_qty"].sum(min_count=1)
+        wb_daily = wb_daily.rename(columns={"snapshot_date": "date", "stock_qty": "wb_stock_qty"})
+
+    if one_c_df.empty:
+        one_c_daily = pd.DataFrame(columns=["date", "nm_id", "one_c_stock_qty"])
+    else:
+        one_c_daily = one_c_df.rename(columns={"snapshot_date": "date"})
+
+    # Приводим к типу date
+    if not wb_daily.empty:
+        wb_daily["date"] = pd.to_datetime(wb_daily["date"]).dt.date
+    if not one_c_daily.empty:
+        one_c_daily["date"] = pd.to_datetime(one_c_daily["date"]).dt.date
+
+    stocks_daily = pd.merge(wb_daily, one_c_daily, on=["date", "nm_id"], how="outer")
+    wb_qty = pd.to_numeric(stocks_daily["wb_stock_qty"], errors="coerce")
+    one_c_qty = pd.to_numeric(stocks_daily["one_c_stock_qty"], errors="coerce")
+    stocks_daily["total_stock"] = wb_qty.fillna(0) + one_c_qty.fillna(0)
+    stocks_daily["total_stock"] = stocks_daily["total_stock"].where(wb_qty.notna() | one_c_qty.notna(), pd.NA)
+
+    if sales_df.empty:
+        merged = stocks_daily.copy()
+        merged["sales_speed_y2"] = pd.NA
+        merged["sales_speed_7d"] = pd.NA
+    else:
+        all_nm_ids = sales_df["nm_id"].unique()
+        date_range_idx = pd.date_range(start=min_date - timedelta(days=7), end=max_date)
+        grid = pd.MultiIndex.from_product([all_nm_ids, date_range_idx.date], names=["nm_id", "date"]).to_frame().reset_index(drop=True)
+
+        sales_df_clean = sales_df.copy()
+        sales_df_clean["nm_id"] = pd.to_numeric(sales_df_clean["nm_id"], errors="coerce")
+        sales_df_clean = sales_df_clean.dropna(subset=["nm_id"])
+        sales_df_clean["nm_id"] = sales_df_clean["nm_id"].astype(int)
+
+        grid = grid.merge(sales_df_clean, on=["nm_id", "date"], how="left")
+        grid = grid.sort_values(["nm_id", "date"]).reset_index(drop=True)
+
+        grid["order_count_filled"] = pd.to_numeric(grid["order_count"], errors="coerce").fillna(0)
+        grid["has_data"] = grid["order_count"].notna().astype(int)
+
+        groupby_obj = grid.groupby("nm_id")
+        grid["sales_speed_y2"] = groupby_obj["order_count"].shift(2)
+
+        grid["sum_7d"] = groupby_obj["order_count_filled"].shift(1).groupby(grid["nm_id"]).rolling(7, min_periods=1).sum().reset_index(level=0, drop=True)
+        grid["count_7d"] = groupby_obj["has_data"].shift(1).groupby(grid["nm_id"]).rolling(7, min_periods=1).sum().reset_index(level=0, drop=True)
+
+        grid["sales_speed_7d"] = grid["sum_7d"] / 7.0
+        grid["sales_speed_7d"] = grid["sales_speed_7d"].where(grid["count_7d"] > 0, pd.NA)
+
+        # Мержим остатки с сеткой скоростей
+        stocks_daily["date"] = pd.to_datetime(stocks_daily["date"]).dt.date
+        grid["date"] = pd.to_datetime(grid["date"]).dt.date
+        merged = pd.merge(stocks_daily, grid[["nm_id", "date", "sales_speed_y2", "sales_speed_7d"]], on=["nm_id", "date"], how="left")
+
+    merged = merged[(merged["date"] >= min_date) & (merged["date"] <= max_date)]
+
+    # Привязываем query_group / band
+    if not settings_qg_df.empty:
+        s = settings_qg_df.copy()
+        s["nm_id"] = pd.to_numeric(s["nm_id"], errors="coerce")
+        s = s.dropna(subset=["nm_id"])
+        s["nm_id"] = s["nm_id"].astype(int)
+        keep = ["nm_id"]
+        if "query_group" in s.columns:
+            keep.append("query_group")
+        if "supplier_article" in s.columns:
+            keep.append("supplier_article")
+        if "title" in s.columns:
+            keep.append("title")
+        s = s[keep].drop_duplicates(subset=["nm_id"])
+        merged = merged.merge(s, on="nm_id", how="left")
+    else:
+        merged["query_group"] = pd.NA
+        merged["supplier_article"] = pd.NA
+        merged["title"] = pd.NA
+
+    merged["query_group"] = merged["query_group"].map(normalize_query_group_value)
+    merged["band_name"] = merged["query_group"].map(build_stock_all_band_name)
+    return merged
+
+
+def aggregate_stock_charts_by_article(df_all: pd.DataFrame, speed_col: str, selected_label: str) -> pd.DataFrame:
+    df = df_all.copy()
+    df["display_label"] = (
+        df["supplier_article"].fillna("").astype(str) + " | " + 
+        df["nm_id"].astype(str) + " | " + 
+        df["title"].fillna("").astype(str)
+    )
+    df_chart = df[df["display_label"] == selected_label].copy()
+    if df_chart.empty:
+        return pd.DataFrame(columns=["date", "sales_speed", "forecast_months", "band_name"])
+
+    stock = pd.to_numeric(df_chart["total_stock"], errors="coerce")
+    speed = pd.to_numeric(df_chart[speed_col], errors="coerce")
+
+    forecast_days = stock / speed
+    df_chart["forecast_months"] = forecast_days / 30.0
+    df_chart["forecast_months"] = df_chart["forecast_months"].where(
+        (speed > 0) & speed.notna() & stock.notna(), pd.NA
+    )
+    df_chart["sales_speed"] = speed
+    df_chart["band_name"] = "Товар"
+    return df_chart
+
+
+def aggregate_stock_charts_by_band(df_all: pd.DataFrame, speed_col: str) -> pd.DataFrame:
+    df = df_all.copy()
+    df["sales_speed_item"] = pd.to_numeric(df[speed_col], errors="coerce")
+    df["total_stock_item"] = pd.to_numeric(df["total_stock"], errors="coerce")
+
+    agg_df = df.groupby(["date", "band_name"], as_index=False).agg({
+        "sales_speed_item": lambda s: s.sum(min_count=1),
+        "total_stock_item": lambda s: s.sum(min_count=1),
+    })
+
+    speed = agg_df["sales_speed_item"]
+    stock = agg_df["total_stock_item"]
+
+    forecast_days = stock / speed
+    agg_df["forecast_months"] = forecast_days / 30.0
+    agg_df["forecast_months"] = agg_df["forecast_months"].where(
+        (speed > 0) & speed.notna() & stock.notna(), pd.NA
+    )
+    agg_df["sales_speed"] = speed
+    return agg_df
+
+
+def aggregate_stock_charts_by_cabinet(df_all: pd.DataFrame, speed_col: str) -> pd.DataFrame:
+    df = df_all.copy()
+    df["sales_speed_item"] = pd.to_numeric(df[speed_col], errors="coerce")
+    df["total_stock_item"] = pd.to_numeric(df["total_stock"], errors="coerce")
+
+    agg_df = df.groupby(["date"], as_index=False).agg({
+        "sales_speed_item": lambda s: s.sum(min_count=1),
+        "total_stock_item": lambda s: s.sum(min_count=1),
+    })
+
+    speed = agg_df["sales_speed_item"]
+    stock = agg_df["total_stock_item"]
+
+    forecast_days = stock / speed
+    agg_df["forecast_months"] = forecast_days / 30.0
+    agg_df["forecast_months"] = agg_df["forecast_months"].where(
+        (speed > 0) & speed.notna() & stock.notna(), pd.NA
+    )
+    agg_df["sales_speed"] = speed
+    agg_df["band_name"] = "Кабинет"
+    return agg_df
+
+
+def build_stock_speed_chart_altair(
+    *,
+    chart_df: pd.DataFrame,
+    value_column: str,
+    y_title: str,
+    tooltip_value_title: str,
+    value_format: str,
+    color_column: str | None = None,
+    thresholds: list[float] | None = None,
+) -> alt.Chart | None:
+    if chart_df.empty:
+        return None
+
+    df_plot = chart_df.copy()
+    df_plot["report_date"] = pd.to_datetime(df_plot["date"])
+    df_plot = df_plot.dropna(subset=[value_column])
+    if df_plot.empty:
+        return None
+
+    unique_dates_count = len(df_plot["report_date"].unique())
+
+    x_encode = alt.X(
+        "report_date:T",
+        title="Дата",
+        axis=alt.Axis(format="%d.%m", labelAngle=0, tickCount=min(max(unique_dates_count, 2), 10)),
+    )
+    y_encode = alt.Y(
+        f"{value_column}:Q",
+        title=y_title,
+        axis=alt.Axis(format=value_format),
+        scale=alt.Scale(zero=True, nice=True),
+    )
+
+    tooltip_list = [
+        alt.Tooltip("report_date:T", title="Дата", format="%d.%m.%Y"),
+        alt.Tooltip(f"{value_column}:Q", title=tooltip_value_title, format=value_format),
+    ]
+
+    if color_column:
+        color_encode = alt.Color(f"{color_column}:N", title="Банда")
+        tooltip_list.insert(1, alt.Tooltip(f"{color_column}:N", title="Банда"))
+        base = alt.Chart(df_plot).encode(x=x_encode, y=y_encode, color=color_encode, tooltip=tooltip_list)
+    else:
+        base = alt.Chart(df_plot).encode(x=x_encode, y=y_encode, tooltip=tooltip_list)
+
+    layers: list[alt.Chart] = [
+        base.mark_line(strokeWidth=3),
+        base.mark_circle(size=55),
+    ]
+
+    if thresholds:
+        for val in thresholds:
+            rule_df = pd.DataFrame({"threshold": [val], "label": [f"{val} мес."]})
+            layers.append(
+                alt.Chart(rule_df).mark_rule(color="#10b981", strokeDash=[6, 4], strokeWidth=1.5).encode(y="threshold:Q")
+            )
+            layers.append(
+                alt.Chart(rule_df)
+                .mark_text(color="#10b981", align="left", dx=8, dy=-6, fontSize=11)
+                .encode(x=alt.value(8), y="threshold:Q", text="label:N")
+            )
+
+    return alt.layer(*layers).resolve_scale(color="shared").properties(height=320)
+
+
+def render_stock_speed_charts(filtered: pd.DataFrame, preselected_product_label: str | None) -> None:
+    st.subheader("Остатки и скорость продаж")
+
+    unique_dates = sorted(d for d in filtered["report_date"].dropna().unique().tolist())
+    if not unique_dates:
+        st.warning("В выбранном периоде нет данных.")
+        return
+
+    min_date = unique_dates[0]
+    max_date = unique_dates[-1]
+
+    # Селекторы
+    grouping = st.radio("Группировка", options=["По артикулам", "По бандам", "За кабинет"], horizontal=True, key="stock_charts_grouping")
+    speed_method = st.radio("Метод скорости", options=["Позавчера", "Прошедшая неделя"], horizontal=True, key="stock_charts_speed_method")
+
+    # Загрузка
+    snapshot_df = load_stock_warehouse_snapshot_range_from_db(min_date, max_date)
+    one_c_df = load_ivan_stock_range_from_db(min_date, max_date)
+    sales_df = load_funnel_sales_range_from_db(min_date - timedelta(days=7), max_date - timedelta(days=1))
+    settings_qg_df = load_settings_product_query_groups_from_db()
+
+    if snapshot_df.empty and one_c_df.empty:
+        st.info("Нет данных об остатках за выбранный период.")
+        return
+
+    df_all = prepare_stock_speed_charts_dataframe(
+        snapshot_df=snapshot_df,
+        one_c_df=one_c_df,
+        sales_df=sales_df,
+        settings_qg_df=settings_qg_df,
+        min_date=min_date,
+        max_date=max_date
+    )
+
+    if df_all.empty:
+        st.info("Нет данных для построения графиков.")
+        return
+
+    speed_col = "sales_speed_y2" if speed_method == "Позавчера" else "sales_speed_7d"
+
+    if grouping == "По артикулам":
+        df_all["display_label"] = (
+            df_all["supplier_article"].fillna("").astype(str) + " | " + 
+            df_all["nm_id"].astype(str) + " | " + 
+            df_all["title"].fillna("").astype(str)
+        )
+        options = sorted(df_all["display_label"].dropna().unique().tolist())
+        if not options:
+            st.info("Нет доступных артикулов.")
+            return
+
+        default_idx = 0
+        if preselected_product_label:
+            for idx, opt in enumerate(options):
+                if preselected_product_label in opt:
+                    default_idx = idx
+                    break
+
+        selected_label = st.selectbox("Артикул", options=options, index=default_idx, key="stock_charts_article_select")
+        df_chart = aggregate_stock_charts_by_article(df_all, speed_col, selected_label)
+        color_col = None
+    elif grouping == "По бандам":
+        df_chart = aggregate_stock_charts_by_band(df_all, speed_col)
+        color_col = "band_name"
+    else:
+        df_chart = aggregate_stock_charts_by_cabinet(df_all, speed_col)
+        color_col = None
+
+    # Графики
+    st.markdown("### Скорость продаж")
+    speed_chart = build_stock_speed_chart_altair(
+        chart_df=df_chart,
+        value_column="sales_speed",
+        y_title="Скорость продаж, шт/день",
+        tooltip_value_title="Скорость",
+        value_format=".1f",
+        color_column=color_col,
+    )
+    if speed_chart:
+        st.altair_chart(speed_chart, width="stretch")
+    else:
+        st.info("Нет данных для построения графика скорости продаж.")
+
+    st.markdown("### Прогноз остатков")
+    forecast_chart = build_stock_speed_chart_altair(
+        chart_df=df_chart,
+        value_column="forecast_months",
+        y_title="Прогноз остатков, мес.",
+        tooltip_value_title="Прогноз",
+        value_format=".1f",
+        color_column=color_col,
+        thresholds=[3.5, 4.5]
+    )
+    if forecast_chart:
+        st.altair_chart(forecast_chart, width="stretch")
+    else:
+        st.info("Нет данных для построения графика прогноза остатков.")
+
+
 def render_charts_tab(
     filtered: pd.DataFrame,
     preselected_product_label: str | None,
     option_map: dict[str, dict[str, object]],
     ad_campaign_product_df: pd.DataFrame | None = None,
 ) -> None:
-    tab_eff, tab_vbro = st.tabs(["Эффективность рекламы", "VVBromo"])
+    tab_eff, tab_vbro, tab_stock = st.tabs(["Эффективность рекламы", "VVBromo", "Остатки и скорость продаж"])
     with tab_eff:
         render_efficiency_charts(
             filtered=filtered,
@@ -7237,6 +7748,8 @@ def render_charts_tab(
         )
     with tab_vbro:
         render_vvbromo_charts(filtered)
+    with tab_stock:
+        render_stock_speed_charts(filtered, preselected_product_label)
 
 
 def build_vvbromo_chart(

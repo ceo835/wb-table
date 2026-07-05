@@ -4275,15 +4275,121 @@ def test_build_stock_all_display_dataframe_product_mode_uses_safe_rename_and_kee
         "Возвраты в пути",
         "Итого в контуре WB",
         "Остаток 1С",
-        "Разница WB - 1С",
         "Поставки на WB",
+        "Скорость продаж за позавчера",
+        "Скорость продаж за прошедшую неделю",
+        "Прогноз остатков по скорости позавчера",
+        "Прогноз остатков по скорости недели",
     ]
     assert result.iloc[0]["Банда"] == "Трусы женские"
     assert result.iloc[0]["Артикул WB"] == 101
     assert result.iloc[0]["Остаток 1С"] == 4
-    assert result.iloc[0]["Разница WB - 1С"] == 1
+    assert "Разница WB - 1С" not in result.columns
+    assert "Разница WB - 1С" not in numeric_cols
     assert "Артикул WB" in numeric_cols
-    assert "Разница WB - 1С" in numeric_cols
+    assert "Скорость продаж за позавчера" in numeric_cols
+    assert "Скорость продаж за прошедшую неделю" in numeric_cols
+    assert "Прогноз остатков по скорости позавчера" in numeric_cols
+    assert "Прогноз остатков по скорости недели" in numeric_cols
+
+
+def test_build_stock_all_display_dataframe_with_sales_speed_calculations() -> None:
+    from datetime import date
+    
+    product_df = pd.DataFrame(
+        [
+            {
+                "query_group": "women_underwear",
+                "band_name": "Трусы женские",
+                "nm_id": 101,
+                "wb_stock_qty": 10,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 10,
+                "one_c_stock_qty": 4,  # Суммарный остаток = 10 + 4 = 14
+                "wb_vs_one_c_diff": 6,
+                "wb_supply_qty": pd.NA,
+            },
+            {
+                "query_group": "women_underwear",
+                "band_name": "Трусы женские",
+                "nm_id": 102,
+                "wb_stock_qty": 5,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 5,
+                "one_c_stock_qty": pd.NA,  # Суммарный остаток = 5
+                "wb_vs_one_c_diff": pd.NA,
+                "wb_supply_qty": pd.NA,
+            },
+            {
+                "query_group": "women_underwear",
+                "band_name": "Трусы женские",
+                "nm_id": 103,
+                "wb_stock_qty": 0,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 0,
+                "one_c_stock_qty": 0,  # Суммарный остаток = 0
+                "wb_vs_one_c_diff": 0,
+                "wb_supply_qty": pd.NA,
+            }
+        ]
+    )
+
+    snapshot_date = date(2026, 7, 4)
+    # Позавчера = 2026-07-02
+    # Неделя = 2026-06-27 - 2026-07-03
+    sales_data = [
+        # Для 101:
+        # позавчера: 2
+        {"nm_id": 101, "date": date(2026, 7, 2), "order_count": 2},
+        # другие дни за неделю: 1, 0, 3, 1, 0. Всего за неделю: 2 + 1 + 0 + 3 + 1 + 0 = 7. Средняя = 7 / 7 = 1.0
+        {"nm_id": 101, "date": date(2026, 7, 3), "order_count": 1},
+        {"nm_id": 101, "date": date(2026, 7, 1), "order_count": 0},
+        {"nm_id": 101, "date": date(2026, 6, 30), "order_count": 3},
+        {"nm_id": 101, "date": date(2026, 6, 29), "order_count": 1},
+        {"nm_id": 101, "date": date(2026, 6, 28), "order_count": 0},
+        # Для 102:
+        # позавчера: данных нет (должно быть pd.NA)
+        # неделя: все продажи 0. Сумма = 0. Средняя = 0.0.
+        {"nm_id": 102, "date": date(2026, 7, 3), "order_count": 0},
+        {"nm_id": 102, "date": date(2026, 7, 1), "order_count": 0},
+        # Для 103:
+        # позавчера: 1. Прогноз по позавчера: 0 / 1 = 0
+        {"nm_id": 103, "date": date(2026, 7, 2), "order_count": 1},
+    ]
+    sales_df = pd.DataFrame(sales_data)
+
+    result, numeric_cols = build_stock_all_display_dataframe(
+        product_df,
+        level="По товарам",
+        snapshot_date=snapshot_date,
+        sales_df=sales_df
+    )
+
+    # Товар 101
+    row_101 = result[result["Артикул WB"] == 101].iloc[0]
+    assert row_101["Скорость продаж за позавчера"] == 2
+    assert row_101["Скорость продаж за прошедшую неделю"] == 1.0
+    # Прогноз позавчера: 14 / 2 = 7.0
+    assert row_101["Прогноз остатков по скорости позавчера"] == 7.0
+    # Прогноз неделя: 14 / 1.0 = 14.0
+    assert row_101["Прогноз остатков по скорости недели"] == 14.0
+
+    # Товар 102
+    row_102 = result[result["Артикул WB"] == 102].iloc[0]
+    assert pd.isna(row_102["Скорость продаж за позавчера"])
+    assert row_102["Скорость продаж за прошедшую неделю"] == 0.0
+    # Прогнозы должны быть null (позавчера - нет скорости, неделя - скорость 0)
+    assert pd.isna(row_102["Прогноз остатков по скорости позавчера"])
+    assert pd.isna(row_102["Прогноз остатков по скорости недели"])
+
+    # Товар 103
+    row_103 = result[result["Артикул WB"] == 103].iloc[0]
+    assert row_103["Скорость продаж за позавчера"] == 1
+    # Прогноз позавчера: 0 / 1 = 0.0
+    assert row_103["Прогноз остатков по скорости позавчера"] == 0.0
 
 
 def test_build_stock_all_display_dataframe_band_mode_adds_missing_optional_columns_without_crash() -> None:
@@ -4313,13 +4419,13 @@ def test_build_stock_all_display_dataframe_band_mode_adds_missing_optional_colum
         "Возвраты в пути",
         "Итого в контуре WB",
         "Остаток 1С",
-        "Разница WB - 1С",
         "Поставки на WB",
     ]
     assert result.iloc[0]["Банда"] == "Трусы женские"
     assert result.iloc[0]["Товаров"] == 1
     assert result.iloc[0]["Остаток 1С"] == 4
-    assert result.iloc[0]["Разница WB - 1С"] == 1
+    assert "Разница WB - 1С" not in result.columns
+    assert "Разница WB - 1С" not in numeric_cols
     assert "Товаров" in numeric_cols
 
 
@@ -4654,3 +4760,111 @@ def test_build_stock_all_size_display_dataframe_uses_russian_columns() -> None:
     assert result.iloc[0]["Баркод"] == "111"
     assert "Остаток WB по размеру" in numeric_cols
     assert "Разница WB - 1С по размеру" in numeric_cols
+
+
+def test_stock_speed_charts_calculations_and_aggregations() -> None:
+    from datetime import date
+    from app_streamlit import (
+        prepare_stock_speed_charts_dataframe,
+        aggregate_stock_charts_by_article,
+        aggregate_stock_charts_by_band,
+        aggregate_stock_charts_by_cabinet
+    )
+    
+    # 1. Mock Data
+    snapshot_df = pd.DataFrame([
+        {"snapshot_date": date(2026, 7, 3), "nm_id": 101, "stock_qty": 10},
+        {"snapshot_date": date(2026, 7, 4), "nm_id": 101, "stock_qty": 12},
+        {"snapshot_date": date(2026, 7, 4), "nm_id": 102, "stock_qty": 5},
+    ])
+    
+    one_c_df = pd.DataFrame([
+        {"snapshot_date": date(2026, 7, 3), "nm_id": 101, "one_c_stock_qty": 4},
+        {"snapshot_date": date(2026, 7, 4), "nm_id": 101, "one_c_stock_qty": pd.NA},
+    ])
+    
+    sales_df = pd.DataFrame([
+        {"nm_id": 101, "date": date(2026, 7, 2), "order_count": 2},
+        {"nm_id": 101, "date": date(2026, 7, 3), "order_count": 1},
+        {"nm_id": 102, "date": date(2026, 7, 2), "order_count": 0},
+    ])
+    
+    settings_qg_df = pd.DataFrame([
+        {"nm_id": 101, "query_group": "women_underwear", "supplier_article": "art-101", "title": "Товар 101"},
+        {"nm_id": 102, "query_group": "women_underwear", "supplier_article": "art-102", "title": "Товар 102"},
+    ])
+    
+    # 2. prepare dataframe
+    df_all = prepare_stock_speed_charts_dataframe(
+        snapshot_df=snapshot_df,
+        one_c_df=one_c_df,
+        sales_df=sales_df,
+        settings_qg_df=settings_qg_df,
+        min_date=date(2026, 7, 3),
+        max_date=date(2026, 7, 4)
+    )
+    
+    assert not df_all.empty
+    
+    # Проверяем total_stock
+    row_101_3 = df_all[(df_all["nm_id"] == 101) & (df_all["date"] == date(2026, 7, 3))].iloc[0]
+    assert row_101_3["total_stock"] == 14
+    
+    row_101_4 = df_all[(df_all["nm_id"] == 101) & (df_all["date"] == date(2026, 7, 4))].iloc[0]
+    assert row_101_4["total_stock"] == 12
+    
+    # Проверяем скорость позавчера для 2026-07-04
+    assert row_101_4["sales_speed_y2"] == 2
+    
+    # 3. Test aggregate_stock_charts_by_article
+    selected_label = "art-101 | 101 | Товар 101"
+    df_art = aggregate_stock_charts_by_article(df_all, "sales_speed_y2", selected_label)
+    
+    art_row_4 = df_art[df_art["date"] == date(2026, 7, 4)].iloc[0]
+    assert art_row_4["sales_speed"] == 2
+    assert art_row_4["forecast_months"] == 0.2
+    
+    # 4. Test aggregate_stock_charts_by_band
+    df_band = aggregate_stock_charts_by_band(df_all, "sales_speed_y2")
+    band_row_4 = df_band[(df_band["date"] == date(2026, 7, 4)) & (df_band["band_name"] == "Трусы женские")].iloc[0]
+    assert band_row_4["sales_speed"] == 2
+    assert abs(band_row_4["forecast_months"] - (17.0 / 60.0)) < 1e-5
+    
+    # 5. Test aggregate_stock_charts_by_cabinet
+    df_cab = aggregate_stock_charts_by_cabinet(df_all, "sales_speed_y2")
+    cab_row_4 = df_cab[df_cab["date"] == date(2026, 7, 4)].iloc[0]
+    assert cab_row_4["sales_speed"] == 2
+    assert abs(cab_row_4["forecast_months"] - (17.0 / 60.0)) < 1e-5
+    
+    # 6. Test zero division safety
+    df_art_102 = aggregate_stock_charts_by_article(df_all, "sales_speed_y2", "art-102 | 102 | Товар 102")
+    art_102_row_4 = df_art_102[df_art_102["date"] == date(2026, 7, 4)].iloc[0]
+    assert art_102_row_4["sales_speed"] == 0
+    assert pd.isna(art_102_row_4["forecast_months"])
+
+
+def test_render_charts_tab_contains_new_tab() -> None:
+    from unittest.mock import patch, MagicMock
+    import pandas as pd
+    from app_streamlit import render_charts_tab
+    
+    filtered_mock = pd.DataFrame({"report_date": []})
+    
+    with patch("streamlit.tabs") as mock_tabs:
+        mock_tabs.return_value = (MagicMock(), MagicMock(), MagicMock())
+        
+        with patch("streamlit.subheader"), \
+             patch("streamlit.selectbox"), \
+             patch("streamlit.radio"), \
+             patch("streamlit.info"), \
+             patch("streamlit.warning"), \
+             patch("streamlit.markdown"), \
+             patch("app_streamlit.render_efficiency_charts"), \
+             patch("app_streamlit.render_vvbromo_charts"), \
+             patch("app_streamlit.render_stock_speed_charts"):
+             
+            render_charts_tab(filtered_mock, None, {})
+            
+            mock_tabs.assert_called_once()
+            args, kwargs = mock_tabs.call_args
+            assert "Остатки и скорость продаж" in args[0]
