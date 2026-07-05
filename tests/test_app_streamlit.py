@@ -83,6 +83,8 @@ from app_streamlit import (
     should_render_stock_warehouse_history_pivot,
     build_stock_all_band_level,
     build_stock_all_display_dataframe,
+    build_stock_all_size_display_dataframe,
+    build_stock_all_size_level,
     build_stock_warehouse_summary_card_html,
     build_stock_all_product_level,
     build_stock_warehouse_display_dataframe,
@@ -4098,6 +4100,55 @@ def test_build_stock_all_product_level_keeps_product_title_for_display() -> None
     ]
 
 
+def test_build_stock_all_product_level_merges_ivan_stock_and_calculates_diff() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": pd.Timestamp("2026-06-30").date(),
+                "nm_id": 101,
+                "warehouse_id": 10,
+                "warehouse_name": "Коледино",
+                "stock_qty": 8,
+                "in_way_to_client": 1,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": pd.Timestamp("2026-06-30").date(),
+                "nm_id": 202,
+                "warehouse_id": 20,
+                "warehouse_name": "Казань",
+                "stock_qty": 3,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "query_group": "kids_underwear", "supplier_article": "art-101", "title": "Товар 101"},
+            {"nm_id": 202, "query_group": "women_underwear", "supplier_article": "art-202", "title": "Товар 202"},
+        ]
+    )
+    one_c_stock_df = pd.DataFrame(
+        [
+            {"stock_date": pd.Timestamp("2026-06-30").date(), "nm_id": 101, "ivan_stock_qty": 5},
+            {"stock_date": pd.Timestamp("2026-06-30").date(), "nm_id": 202, "ivan_stock_qty": 7},
+        ]
+    )
+
+    result = build_stock_all_product_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-06-30").date(),
+        one_c_stock_df=one_c_stock_df,
+    )
+
+    assert result[["nm_id", "one_c_stock_qty", "wb_vs_one_c_diff"]].to_dict(orient="records") == [
+        {"nm_id": 101, "one_c_stock_qty": 5, "wb_vs_one_c_diff": 3},
+        {"nm_id": 202, "one_c_stock_qty": 7, "wb_vs_one_c_diff": -4},
+    ]
+
+
 def test_build_stock_all_band_level_uses_only_real_query_groups_from_db() -> None:
     product_df = pd.DataFrame(
         [
@@ -4205,7 +4256,8 @@ def test_build_stock_all_display_dataframe_product_mode_uses_safe_rename_and_kee
                 "wb_in_way_to_client": 1,
                 "wb_in_way_from_client": 0,
                 "wb_total_in_contour": 6,
-                "one_c_stock_qty": pd.NA,
+                "one_c_stock_qty": 4,
+                "wb_vs_one_c_diff": 1,
                 "wb_supply_qty": pd.NA,
             }
         ]
@@ -4223,11 +4275,15 @@ def test_build_stock_all_display_dataframe_product_mode_uses_safe_rename_and_kee
         "Возвраты в пути",
         "Итого в контуре WB",
         "Остаток 1С",
+        "Разница WB - 1С",
         "Поставки на WB",
     ]
     assert result.iloc[0]["Банда"] == "Трусы женские"
     assert result.iloc[0]["Артикул WB"] == 101
+    assert result.iloc[0]["Остаток 1С"] == 4
+    assert result.iloc[0]["Разница WB - 1С"] == 1
     assert "Артикул WB" in numeric_cols
+    assert "Разница WB - 1С" in numeric_cols
 
 
 def test_build_stock_all_display_dataframe_band_mode_adds_missing_optional_columns_without_crash() -> None:
@@ -4241,6 +4297,8 @@ def test_build_stock_all_display_dataframe_band_mode_adds_missing_optional_colum
                 "wb_in_way_to_client": 1,
                 "wb_in_way_from_client": 0,
                 "wb_total_in_contour": 6,
+                "one_c_stock_qty": 4,
+                "wb_vs_one_c_diff": 1,
             }
         ]
     )
@@ -4255,11 +4313,13 @@ def test_build_stock_all_display_dataframe_band_mode_adds_missing_optional_colum
         "Возвраты в пути",
         "Итого в контуре WB",
         "Остаток 1С",
+        "Разница WB - 1С",
         "Поставки на WB",
     ]
     assert result.iloc[0]["Банда"] == "Трусы женские"
     assert result.iloc[0]["Товаров"] == 1
-    assert pd.isna(result.iloc[0]["Остаток 1С"])
+    assert result.iloc[0]["Остаток 1С"] == 4
+    assert result.iloc[0]["Разница WB - 1С"] == 1
     assert "Товаров" in numeric_cols
 
 
@@ -4399,3 +4459,198 @@ def test_build_stock_warehouse_history_ivan_check_table_contains_only_problem_pa
     assert ivan_check.loc[0, "days_zero"] == 0
     assert ivan_check.loc[0, "days_no_data"] == 2
     assert ivan_check.loc[0, "anomaly_type"] == "ALWAYS_NO_DATA"
+
+
+def test_build_stock_all_size_level_matches_by_barcode_and_calculates_diff() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 197330807,
+                "chrt_id": 101,
+                "warehouse_id": 1,
+                "warehouse_name": "Р’Р»Р°РґРёРјРёСЂ WB",
+                "stock_qty": 4,
+            },
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 197330807,
+                "chrt_id": 101,
+                "warehouse_id": 2,
+                "warehouse_name": "РўСѓР»Р°",
+                "stock_qty": 3,
+            },
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 197330807,
+                "chrt_id": 102,
+                "warehouse_id": 1,
+                "warehouse_name": "Р’Р»Р°РґРёРјРёСЂ WB",
+                "stock_qty": 5,
+            },
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 197330807,
+                "supplier_article": "BlackWOM5",
+                "title": "РўСЂСѓСЃС‹ РєРѕРјРїР»РµРєС‚",
+                "query_group": "women_underwear",
+            }
+        ]
+    )
+    one_c_size_df = pd.DataFrame(
+        [
+            {
+                "stock_date": "2026-07-04",
+                "nm_id": 197330807,
+                "size_name": "M",
+                "barcode": "111",
+                "quantity": 6,
+            },
+            {
+                "stock_date": "2026-07-04",
+                "nm_id": 197330807,
+                "size_name": "L",
+                "barcode": "222",
+                "quantity": 2,
+            },
+        ]
+    )
+    product_size_df = pd.DataFrame(
+        [
+            {"nm_id": 197330807, "chrt_id": 101, "barcode": "111", "size_name": "M", "tech_size": "42-44"},
+            {"nm_id": 197330807, "chrt_id": 102, "barcode": "222", "size_name": "L", "tech_size": "46-48"},
+        ]
+    )
+
+    result = build_stock_all_size_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-07-04").date(),
+        one_c_size_df=one_c_size_df,
+        product_size_df=product_size_df,
+    )
+
+    assert result["barcode"].tolist() == ["222", "111"]
+    row_l = result.loc[result["barcode"] == "222"].iloc[0]
+    row_m = result.loc[result["barcode"] == "111"].iloc[0]
+
+    assert row_l["wb_size_stock_qty"] == 5
+    assert row_l["one_c_size_stock_qty"] == 2
+    assert row_l["wb_vs_one_c_size_diff"] == 3
+    assert row_l["match_source"] == "barcode"
+
+    assert row_m["wb_size_stock_qty"] == 7
+    assert row_m["one_c_size_stock_qty"] == 6
+    assert row_m["wb_vs_one_c_size_diff"] == 1
+    assert row_m["vendor_code"] == "BlackWOM5"
+    assert row_m["band_name"] == "Трусы женские"
+
+
+def test_build_stock_all_size_level_falls_back_to_size_name_and_keeps_unmatched_wb_rows() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 91470767,
+                "chrt_id": 501,
+                "warehouse_id": 1,
+                "warehouse_name": "Р’Р»Р°РґРёРјРёСЂ WB",
+                "stock_qty": 8,
+            },
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 91470767,
+                "chrt_id": 502,
+                "warehouse_id": 1,
+                "warehouse_name": "Р’Р»Р°РґРёРјРёСЂ WB",
+                "stock_qty": 3,
+            },
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 91470767,
+                "supplier_article": "avokadogirl",
+                "title": "РўСЂСѓСЃС‹ РґРµС‚СЃРєРёРµ",
+                "query_group": "kids_underwear",
+            }
+        ]
+    )
+    one_c_size_df = pd.DataFrame(
+        [
+            {
+                "stock_date": "2026-07-04",
+                "nm_id": 91470767,
+                "size_name": "92",
+                "barcode": "",
+                "quantity": 5,
+            }
+        ]
+    )
+    product_size_df = pd.DataFrame(
+        [
+            {"nm_id": 91470767, "chrt_id": 501, "barcode": "9001", "size_name": "92", "tech_size": "86-92"},
+        ]
+    )
+
+    result = build_stock_all_size_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-07-04").date(),
+        one_c_size_df=one_c_size_df,
+        product_size_df=product_size_df,
+    )
+
+    assert len(result) == 2
+
+    matched_row = result.loc[result["chrt_id"] == 501].iloc[0]
+    wb_only_row = result.loc[result["chrt_id"] == 502].iloc[0]
+
+    assert matched_row["match_source"] == "size_name"
+    assert matched_row["wb_size_stock_qty"] == 8
+    assert matched_row["one_c_size_stock_qty"] == 5
+    assert matched_row["barcode"] == "9001"
+
+    assert wb_only_row["match_source"] == "wb_only"
+    assert wb_only_row["wb_size_stock_qty"] == 3
+    assert pd.isna(wb_only_row["one_c_size_stock_qty"])
+
+
+def test_build_stock_all_size_display_dataframe_uses_russian_columns() -> None:
+    size_df = pd.DataFrame(
+        [
+            {
+                "band_name": "РўСЂСѓСЃС‹ Р¶РµРЅСЃРєРёРµ",
+                "nm_id": 197330807,
+                "vendor_code": "BlackWOM5",
+                "title": "РўСЂСѓСЃС‹ РєРѕРјРїР»РµРєС‚",
+                "size_name": "M",
+                "barcode": "111",
+                "wb_size_stock_qty": 7,
+                "one_c_size_stock_qty": 6,
+                "wb_vs_one_c_size_diff": 1,
+            }
+        ]
+    )
+
+    result, numeric_cols = build_stock_all_size_display_dataframe(size_df)
+
+    assert result.columns.tolist() == [
+        "Банда",
+        "Артикул WB",
+        "Артикул продавца",
+        "Название",
+        "Размер",
+        "Баркод",
+        "Остаток WB по размеру",
+        "Остаток 1С по размеру",
+        "Разница WB - 1С по размеру",
+    ]
+    assert result.iloc[0]["Размер"] == "M"
+    assert result.iloc[0]["Баркод"] == "111"
+    assert "Остаток WB по размеру" in numeric_cols
+    assert "Разница WB - 1С по размеру" in numeric_cols

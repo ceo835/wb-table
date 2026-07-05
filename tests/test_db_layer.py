@@ -17,6 +17,7 @@ from src.db.models import (
     DimCampaign,
     DimDate,
     DimProduct,
+    DimProductSize,
     FactAdCampaignDay,
     FactAdCampaignNmDay,
     FactAdCostDay,
@@ -50,6 +51,7 @@ def test_db_models_import():
     assert SettingsLostProfitMarketArea.__tablename__ == "settings_lost_profit_market_areas"
     assert SettingsLostProfitWarehouseArea.__tablename__ == "settings_lost_profit_warehouse_areas"
     assert SettingsLostProfitQueryGroupCoefficient.__tablename__ == "settings_lost_profit_query_group_coefficients"
+    assert DimProductSize.__tablename__ == "dim_product_size"
 
 
 def test_db_metadata_contains_expected_tables():
@@ -58,6 +60,7 @@ def test_db_metadata_contains_expected_tables():
         "api_load_log",
         "validation_warning",
         "dim_product",
+        "dim_product_size",
         "dim_campaign",
         "dim_date",
         "settings_products",
@@ -100,11 +103,13 @@ def test_natural_unique_constraints_exist():
     assert ("period_start", "period_end", "nm_id", "region") in _unique_constraint_columns(FactLocalizationRegionDay)
     assert ("date", "nm_id", "campaign_ref") in _unique_constraint_columns(FactIvanAdsWideDay)
     assert ("report_date", "nm_id") in _unique_constraint_columns(MartTotalReport)
+    assert ("nm_id", "chrt_id", "barcode") in _unique_constraint_columns(DimProductSize)
 
 
 def test_metadata_includes_requested_dimension_and_fact_models():
     models = {
         DimProduct,
+        DimProductSize,
         DimCampaign,
         DimDate,
         SettingsProducts,

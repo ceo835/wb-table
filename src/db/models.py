@@ -150,6 +150,29 @@ class DimProduct(Base, StatusMixin):
     is_deleted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
+class DimProductSize(Base):
+    __tablename__ = "dim_product_size"
+    __table_args__ = (
+        UniqueConstraint("nm_id", "chrt_id", "barcode", name="uq_dim_product_size_nm_chrt_barcode"),
+        Index("idx_dim_product_size_nm_chrt", "nm_id", "chrt_id"),
+        Index("idx_dim_product_size_nm_barcode", "nm_id", "barcode"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chrt_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    barcode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tech_size: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_status: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class DimCampaign(Base, TimestampMixin):
     __tablename__ = "dim_campaign"
     __table_args__ = (
@@ -1101,5 +1124,4 @@ class FactIvanStockSheetDay(Base, TimestampMixin):
     nomenclature_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_sheet: Mapped[str] = mapped_column(Text, nullable=False, default="Остатки", server_default="Остатки")
     raw_row: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
-
 

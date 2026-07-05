@@ -47,6 +47,8 @@ from src.db.product_query_group_backfill import (
     format_query_group_label,
     normalize_query_group_value,
 )
+from src.db.ivan_stock_sheet_loader import load_ivan_stock_product_level, load_ivan_stock_size_level
+from src.db.product_size_loader import load_dim_product_size_rows
 from src.db.session import session_scope
 from src.config.settings import settings
 from src.importers.entry_points_importer import import_entry_points_xlsx
@@ -3326,6 +3328,7 @@ def build_stock_all_product_level(
     snapshot_df: "pd.DataFrame",
     settings_df: "pd.DataFrame",
     snapshot_date: "date",
+    one_c_stock_df: "pd.DataFrame | None" = None,
 ) -> "pd.DataFrame":
     """
     Агрегирует fact_stock_warehouse_snapshot до уровня nm_id за выбранную дату.
@@ -3343,7 +3346,7 @@ def build_stock_all_product_level(
     empty_cols = [
         "query_group", "band", "band_name", "nm_id", "vendor_code", "title",
         "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client",
-        "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty",
+        "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty", "wb_vs_one_c_diff",
     ]
     if snapshot_df.empty:
         return pd.DataFrame(columns=empty_cols)
@@ -3379,6 +3382,20 @@ def build_stock_all_product_level(
     agg["wb_supply_qty"] = pd.NA
 
     # Подтягиваем band (query_group) и vendor_code из settings_products
+    if one_c_stock_df is not None and not one_c_stock_df.empty:
+        one_c_df = one_c_stock_df.copy()
+        one_c_df["nm_id"] = pd.to_numeric(one_c_df.get("nm_id"), errors="coerce")
+        one_c_df["ivan_stock_qty"] = pd.to_numeric(one_c_df.get("ivan_stock_qty"), errors="coerce")
+        one_c_df = one_c_df.dropna(subset=["nm_id"]).copy()
+        if not one_c_df.empty:
+            one_c_df["nm_id"] = one_c_df["nm_id"].astype(int)
+            one_c_df = (
+                one_c_df.groupby("nm_id", as_index=False)["ivan_stock_qty"]
+                .sum(min_count=1)
+                .rename(columns={"ivan_stock_qty": "one_c_stock_qty"})
+            )
+            agg = agg.drop(columns=["one_c_stock_qty"], errors="ignore").merge(one_c_df, on="nm_id", how="left")
+
     if not settings_df.empty:
         s = settings_df.copy()
         s["nm_id"] = pd.to_numeric(s["nm_id"], errors="coerce")
@@ -3404,6 +3421,12 @@ def build_stock_all_product_level(
     agg["band_name"] = agg["query_group"].map(build_stock_all_band_name)
     agg["title"] = agg["title"].where(agg["title"].notna(), agg["vendor_code"])
     agg["title"] = agg["title"].where(agg["title"].notna(), agg["nm_id"].astype(str))
+    wb_stock_series = pd.to_numeric(agg["wb_stock_qty"], errors="coerce")
+    one_c_stock_series = pd.to_numeric(agg["one_c_stock_qty"], errors="coerce")
+    agg["wb_vs_one_c_diff"] = (wb_stock_series - one_c_stock_series).where(
+        wb_stock_series.notna() & one_c_stock_series.notna(),
+        other=pd.NA,
+    )
 
     for col in empty_cols:
         if col not in agg.columns:
@@ -3424,7 +3447,7 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
     empty_cols = [
         "band", "band_name", "products_count",
         "wb_stock_qty", "wb_in_way_to_client", "wb_in_way_from_client",
-        "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty",
+        "wb_total_in_contour", "one_c_stock_qty", "wb_supply_qty", "wb_vs_one_c_diff",
     ]
     if product_df.empty:
         return pd.DataFrame(columns=empty_cols)
@@ -3454,12 +3477,258 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
             wb_in_way_to_client=("wb_in_way_to_client", lambda s: s.sum(min_count=1)),
             wb_in_way_from_client=("wb_in_way_from_client", lambda s: s.sum(min_count=1)),
             wb_total_in_contour=("wb_total_in_contour", lambda s: s.sum(min_count=1)),
+            one_c_stock_qty=("one_c_stock_qty", lambda s: s.sum(min_count=1)),
         )
     )
-    agg["one_c_stock_qty"] = pd.NA
     agg["wb_supply_qty"] = pd.NA
+    wb_stock_series = pd.to_numeric(agg["wb_stock_qty"], errors="coerce")
+    one_c_stock_series = pd.to_numeric(agg["one_c_stock_qty"], errors="coerce")
+    agg["wb_vs_one_c_diff"] = (wb_stock_series - one_c_stock_series).where(
+        wb_stock_series.notna() & one_c_stock_series.notna(),
+        other=pd.NA,
+    )
 
     return agg[empty_cols].sort_values("band_name", na_position="last").reset_index(drop=True)
+
+
+def _normalize_stock_size_barcode(value: object) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip().replace(" ", "")
+    return text or None
+
+
+def _normalize_stock_size_name(value: object) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text.lower() or None
+
+
+def build_stock_all_size_level(
+    snapshot_df: "pd.DataFrame",
+    settings_df: "pd.DataFrame",
+    snapshot_date: "date",
+    one_c_size_df: "pd.DataFrame | None" = None,
+    product_size_df: "pd.DataFrame | None" = None,
+) -> "pd.DataFrame":
+    empty_cols = [
+        "query_group",
+        "band",
+        "band_name",
+        "nm_id",
+        "vendor_code",
+        "title",
+        "chrt_id",
+        "size_name",
+        "barcode",
+        "tech_size",
+        "wb_size_stock_qty",
+        "one_c_size_stock_qty",
+        "wb_vs_one_c_size_diff",
+        "match_source",
+    ]
+
+    prepared_snapshot_df = snapshot_df.copy()
+    if "snapshot_date" in prepared_snapshot_df.columns:
+        prepared_snapshot_df["snapshot_date"] = pd.to_datetime(
+            prepared_snapshot_df["snapshot_date"],
+            errors="coerce",
+        ).dt.date
+    wb_day_df = prepared_snapshot_df[prepared_snapshot_df["snapshot_date"] == snapshot_date].copy()
+    one_c_day_df = (one_c_size_df.copy() if one_c_size_df is not None else pd.DataFrame())
+    if "stock_date" in one_c_day_df.columns:
+        one_c_day_df = one_c_day_df[
+            pd.to_datetime(one_c_day_df["stock_date"], errors="coerce").dt.date == snapshot_date
+        ].copy()
+
+    if wb_day_df.empty and one_c_day_df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    wb_day_df["nm_id"] = pd.to_numeric(wb_day_df.get("nm_id"), errors="coerce")
+    wb_day_df["chrt_id"] = pd.to_numeric(wb_day_df.get("chrt_id"), errors="coerce")
+    wb_day_df["stock_qty"] = pd.to_numeric(wb_day_df.get("stock_qty"), errors="coerce")
+    wb_day_df = wb_day_df.dropna(subset=["nm_id", "chrt_id"])
+    if not wb_day_df.empty:
+        wb_day_df["nm_id"] = wb_day_df["nm_id"].astype(int)
+        wb_day_df["chrt_id"] = wb_day_df["chrt_id"].astype(int)
+    wb_grouped = (
+        wb_day_df.groupby(["nm_id", "chrt_id"], as_index=False)["stock_qty"]
+        .sum(min_count=1)
+        .rename(columns={"stock_qty": "wb_size_stock_qty"})
+    )
+    wb_lookup = {
+        (int(row["nm_id"]), int(row["chrt_id"])): row["wb_size_stock_qty"]
+        for row in wb_grouped.to_dict(orient="records")
+    }
+
+    one_c_day_df["nm_id"] = pd.to_numeric(one_c_day_df.get("nm_id"), errors="coerce")
+    one_c_day_df["quantity"] = pd.to_numeric(one_c_day_df.get("quantity"), errors="coerce")
+    one_c_day_df = one_c_day_df.dropna(subset=["nm_id"]).copy()
+    if not one_c_day_df.empty:
+        one_c_day_df["nm_id"] = one_c_day_df["nm_id"].astype(int)
+        one_c_day_df["barcode"] = one_c_day_df.get("barcode").map(_normalize_stock_size_barcode)
+        one_c_grouped = (
+            one_c_day_df.groupby(["nm_id", "size_name", "barcode"], dropna=False, as_index=False)["quantity"]
+            .sum(min_count=1)
+            .rename(columns={"quantity": "one_c_size_stock_qty"})
+        )
+    else:
+        one_c_grouped = pd.DataFrame(columns=["nm_id", "size_name", "barcode", "one_c_size_stock_qty"])
+
+    prepared_product_size = product_size_df.copy() if product_size_df is not None else pd.DataFrame()
+    if not prepared_product_size.empty:
+        prepared_product_size["nm_id"] = pd.to_numeric(prepared_product_size.get("nm_id"), errors="coerce")
+        prepared_product_size["chrt_id"] = pd.to_numeric(prepared_product_size.get("chrt_id"), errors="coerce")
+        prepared_product_size = prepared_product_size.dropna(subset=["nm_id", "chrt_id"]).copy()
+        prepared_product_size["nm_id"] = prepared_product_size["nm_id"].astype(int)
+        prepared_product_size["chrt_id"] = prepared_product_size["chrt_id"].astype(int)
+        prepared_product_size["barcode"] = prepared_product_size.get("barcode").map(_normalize_stock_size_barcode)
+        prepared_product_size["size_name"] = prepared_product_size.get("size_name").where(
+            prepared_product_size.get("size_name").notna(),
+            prepared_product_size.get("tech_size"),
+        )
+        prepared_product_size = prepared_product_size.drop_duplicates(
+            subset=["nm_id", "chrt_id", "barcode", "size_name", "tech_size"],
+            keep="first",
+        )
+
+    settings_meta: dict[int, dict[str, object]] = {}
+    if not settings_df.empty:
+        prepared_settings = settings_df.copy()
+        prepared_settings["nm_id"] = pd.to_numeric(prepared_settings.get("nm_id"), errors="coerce")
+        prepared_settings = prepared_settings.dropna(subset=["nm_id"]).copy()
+        prepared_settings["nm_id"] = prepared_settings["nm_id"].astype(int)
+        for row in prepared_settings.to_dict(orient="records"):
+            nm_id = int(row["nm_id"])
+            normalized_query_group = normalize_query_group_value(row.get("query_group"))
+            settings_meta[nm_id] = {
+                "query_group": normalized_query_group,
+                "band": normalized_query_group,
+                "band_name": build_stock_all_band_name(normalized_query_group),
+                "vendor_code": row.get("supplier_article"),
+                "title": row.get("title"),
+            }
+
+    def _with_product_meta(nm_id: int, payload: dict[str, object]) -> dict[str, object]:
+        meta = settings_meta.get(nm_id, {})
+        payload["query_group"] = meta.get("query_group")
+        payload["band"] = meta.get("band")
+        payload["band_name"] = meta.get("band_name", "Прочее")
+        payload["vendor_code"] = meta.get("vendor_code")
+        payload["title"] = meta.get("title") or meta.get("vendor_code") or str(nm_id)
+        return payload
+
+    barcode_matches: dict[tuple[int, str], dict[str, object] | None] = {}
+    size_name_matches: dict[tuple[int, str], dict[str, object] | None] = {}
+    chrt_meta: dict[tuple[int, int], list[dict[str, object]]] = {}
+    for row in prepared_product_size.to_dict(orient="records") if not prepared_product_size.empty else []:
+        nm_id = int(row["nm_id"])
+        chrt_id = int(row["chrt_id"])
+        clean_row = {
+            "nm_id": nm_id,
+            "chrt_id": chrt_id,
+            "barcode": row.get("barcode"),
+            "size_name": row.get("size_name"),
+            "tech_size": row.get("tech_size"),
+        }
+        chrt_meta.setdefault((nm_id, chrt_id), []).append(clean_row)
+        barcode_key = clean_row.get("barcode")
+        if barcode_key:
+            match_key = (nm_id, barcode_key)
+            if match_key not in barcode_matches:
+                barcode_matches[match_key] = clean_row
+            elif barcode_matches[match_key] != clean_row:
+                barcode_matches[match_key] = None
+        size_key = _normalize_stock_size_name(clean_row.get("size_name") or clean_row.get("tech_size"))
+        if size_key:
+            match_key = (nm_id, size_key)
+            if match_key not in size_name_matches:
+                size_name_matches[match_key] = clean_row
+            elif size_name_matches[match_key] != clean_row:
+                size_name_matches[match_key] = None
+
+    used_wb_keys: set[tuple[int, int]] = set()
+    rows: list[dict[str, object]] = []
+
+    for row in one_c_grouped.to_dict(orient="records"):
+        nm_id = int(row["nm_id"])
+        barcode = _normalize_stock_size_barcode(row.get("barcode"))
+        size_name = row.get("size_name")
+        size_key = _normalize_stock_size_name(size_name)
+        matched_row: dict[str, object] | None = None
+        match_source = "one_c_only"
+        if barcode:
+            matched_row = barcode_matches.get((nm_id, barcode))
+            if matched_row is not None:
+                match_source = "barcode"
+        if matched_row is None and size_key:
+            size_match = size_name_matches.get((nm_id, size_key))
+            if size_match is not None:
+                matched_row = size_match
+                match_source = "size_name"
+
+        chrt_id = int(matched_row["chrt_id"]) if matched_row else pd.NA
+        wb_qty = pd.NA
+        if matched_row:
+            wb_key = (nm_id, int(matched_row["chrt_id"]))
+            if wb_key in wb_lookup and wb_key not in used_wb_keys:
+                wb_qty = wb_lookup[wb_key]
+                used_wb_keys.add(wb_key)
+
+        result_row = _with_product_meta(
+            nm_id,
+            {
+                "nm_id": nm_id,
+                "chrt_id": chrt_id,
+                "size_name": size_name or (matched_row.get("size_name") if matched_row else None) or (matched_row.get("tech_size") if matched_row else None),
+                "barcode": barcode or (matched_row.get("barcode") if matched_row else None),
+                "tech_size": matched_row.get("tech_size") if matched_row else None,
+                "wb_size_stock_qty": wb_qty,
+                "one_c_size_stock_qty": row.get("one_c_size_stock_qty"),
+                "match_source": match_source,
+            },
+        )
+        wb_series = pd.to_numeric(pd.Series([result_row["wb_size_stock_qty"]]), errors="coerce")
+        one_c_series = pd.to_numeric(pd.Series([result_row["one_c_size_stock_qty"]]), errors="coerce")
+        result_row["wb_vs_one_c_size_diff"] = (
+            wb_series - one_c_series
+        ).where(wb_series.notna() & one_c_series.notna(), other=pd.NA).iloc[0]
+        rows.append(result_row)
+
+    for (nm_id, chrt_id), wb_qty in wb_lookup.items():
+        if (nm_id, chrt_id) in used_wb_keys:
+            continue
+        representative = (chrt_meta.get((nm_id, chrt_id)) or [{}])[0]
+        size_name = representative.get("size_name") or representative.get("tech_size") or f"chrt_id {chrt_id}"
+        rows.append(
+            _with_product_meta(
+                nm_id,
+                {
+                    "nm_id": nm_id,
+                    "chrt_id": chrt_id,
+                    "size_name": size_name,
+                    "barcode": representative.get("barcode"),
+                    "tech_size": representative.get("tech_size"),
+                    "wb_size_stock_qty": wb_qty,
+                    "one_c_size_stock_qty": pd.NA,
+                    "wb_vs_one_c_size_diff": pd.NA,
+                    "match_source": "wb_only",
+                },
+            )
+        )
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return pd.DataFrame(columns=empty_cols)
+    for column in empty_cols:
+        if column not in result.columns:
+            result[column] = pd.NA
+    return (
+        result[empty_cols]
+        .sort_values(["title", "nm_id", "size_name", "barcode"], na_position="last")
+        .reset_index(drop=True)
+    )
 
 
 def build_stock_all_display_dataframe(
@@ -3478,6 +3747,7 @@ def build_stock_all_display_dataframe(
             "wb_total_in_contour",
             "one_c_stock_qty",
             "wb_supply_qty",
+            "wb_vs_one_c_diff",
         ]
         rename_map = {
             "band_name": "Банда",
@@ -3553,6 +3823,64 @@ def build_stock_all_display_dataframe(
         }
 
     display_df = source_df.reindex(columns=source_columns).rename(columns=rename_map)
+    difference_label = "Разница WB - 1С"
+    supply_label = "Поставки на WB"
+    one_c_label = "Остаток 1С"
+    if "wb_vs_one_c_diff" in source_df.columns:
+        display_df[difference_label] = pd.to_numeric(source_df["wb_vs_one_c_diff"], errors="coerce")
+    else:
+        display_df[difference_label] = pd.NA
+    if difference_label not in ordered_columns and supply_label in ordered_columns:
+        ordered_columns.insert(ordered_columns.index(supply_label), difference_label)
+    numeric_cols = set(numeric_cols)
+    numeric_cols.update({difference_label, one_c_label})
+    for column_name in ordered_columns:
+        if column_name not in display_df.columns:
+            display_df[column_name] = pd.NA
+    return display_df[ordered_columns].copy(), numeric_cols
+
+
+def build_stock_all_size_display_dataframe(size_df: "pd.DataFrame") -> tuple["pd.DataFrame", set[str]]:
+    source_columns = [
+        "band_name",
+        "nm_id",
+        "vendor_code",
+        "title",
+        "size_name",
+        "barcode",
+        "wb_size_stock_qty",
+        "one_c_size_stock_qty",
+        "wb_vs_one_c_size_diff",
+    ]
+    rename_map = {
+        "band_name": "Банда",
+        "nm_id": "Артикул WB",
+        "vendor_code": "Артикул продавца",
+        "title": "Название",
+        "size_name": "Размер",
+        "barcode": "Баркод",
+        "wb_size_stock_qty": "Остаток WB по размеру",
+        "one_c_size_stock_qty": "Остаток 1С по размеру",
+        "wb_vs_one_c_size_diff": "Разница WB - 1С по размеру",
+    }
+    ordered_columns = [
+        "Банда",
+        "Артикул WB",
+        "Артикул продавца",
+        "Название",
+        "Размер",
+        "Баркод",
+        "Остаток WB по размеру",
+        "Остаток 1С по размеру",
+        "Разница WB - 1С по размеру",
+    ]
+    numeric_cols = {
+        "Артикул WB",
+        "Остаток WB по размеру",
+        "Остаток 1С по размеру",
+        "Разница WB - 1С по размеру",
+    }
+    display_df = size_df.reindex(columns=source_columns).rename(columns=rename_map)
     for column_name in ordered_columns:
         if column_name not in display_df.columns:
             display_df[column_name] = pd.NA
@@ -3614,7 +3942,13 @@ def render_stock_all_tab(
         key="stock_all_snapshot_date",
     )
 
-    product_df = build_stock_all_product_level(snapshot_df, settings_df, selected_snapshot_date)
+    one_c_product_df = load_ivan_stock_product_level_from_db(selected_snapshot_date)
+    product_df = build_stock_all_product_level(
+        snapshot_df,
+        settings_df,
+        selected_snapshot_date,
+        one_c_stock_df=one_c_product_df,
+    )
 
     if product_df.empty:
         st.warning(f"Нет строк за {latest_date.isoformat()} в `fact_stock_warehouse_snapshot`.")
@@ -3624,6 +3958,8 @@ def render_stock_all_tab(
     wb_in_way = product_df["wb_in_way_to_client"].sum(min_count=1)
     wb_from_client = product_df["wb_in_way_from_client"].sum(min_count=1)
     wb_contour = product_df["wb_total_in_contour"].sum(min_count=1)
+    one_c_stock_total = pd.to_numeric(product_df["one_c_stock_qty"], errors="coerce").sum(min_count=1)
+    wb_vs_one_c_diff_total = pd.to_numeric(product_df["wb_vs_one_c_diff"], errors="coerce").sum(min_count=1)
     products_count = product_df["nm_id"].nunique()
     band_count = int(product_df["band_name"].nunique())
 
@@ -3636,6 +3972,10 @@ def render_stock_all_tab(
         ("Поставки на WB", "нет данных"),
         ("Товаров / Банд", f"{products_count}\u202f/\u202f{band_count}"),
     ]
+    if len(metric_items) >= 5:
+        metric_items[4] = ("Остаток 1С", _fmt_stock_int(one_c_stock_total))
+        metric_items.insert(5, ("Разница WB - 1С", _fmt_stock_int(wb_vs_one_c_diff_total)))
+
     cols = st.columns(len(metric_items))
     for col, (label, value) in zip(cols, metric_items):
         col.markdown(
@@ -3646,16 +3986,48 @@ def render_stock_all_tab(
 
     level = st.radio(
         "Уровень агрегации",
-        options=["По товарам", "По бандам"],
+        options=["По товарам", "По бандам", "По размерам"],
         horizontal=True,
         key="stock_all_level_radio",
     )
-    display_df, numeric_cols = build_stock_all_display_dataframe(product_df, level=level)
+    if level == "По размерам":
+        one_c_size_df = load_ivan_stock_size_level_from_db(selected_snapshot_date)
+        wb_nm_ids = set(
+            pd.to_numeric(
+                snapshot_df.loc[snapshot_df["snapshot_date"] == selected_snapshot_date, "nm_id"],
+                errors="coerce",
+            ).dropna().astype(int).tolist()
+        )
+        if one_c_size_df.empty:
+            one_c_nm_ids: set[int] = set()
+        else:
+            one_c_nm_ids = set(
+                pd.to_numeric(one_c_size_df.get("nm_id"), errors="coerce").dropna().astype(int).tolist()
+            )
+        product_size_df = load_dim_product_size_from_db(tuple(sorted(wb_nm_ids | one_c_nm_ids)))
+        size_df = build_stock_all_size_level(
+            snapshot_df,
+            settings_df,
+            selected_snapshot_date,
+            one_c_size_df=one_c_size_df,
+            product_size_df=product_size_df,
+        )
+        display_df, numeric_cols = build_stock_all_size_display_dataframe(size_df)
+    else:
+        display_df, numeric_cols = build_stock_all_display_dataframe(product_df, level=level)
+    display_df_raw = display_df.copy()
 
     # null-колонки — явно "нет данных", не 0
-    for null_col in ("Остаток 1С", "Поставки на WB"):
+    null_columns = ("Остаток 1С", "Поставки на WB")
+    if level == "По размерам":
+        null_columns = ("Остаток 1С по размеру",)
+    for null_col in null_columns:
         if null_col in display_df.columns:
             display_df[null_col] = "нет данных"
+
+    for null_col in null_columns:
+        if null_col in display_df.columns and null_col in display_df_raw.columns:
+            display_df[null_col] = display_df_raw[null_col].where(display_df_raw[null_col].notna(), "нет данных")
 
     st.dataframe(
         sanitize_dataframe_for_streamlit_display(display_df, numeric_columns=numeric_cols),
@@ -6111,6 +6483,44 @@ def build_threshold_breaches_table(chart_df: pd.DataFrame, context: dict[str, ob
                 }
             )
     return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def load_ivan_stock_product_level_from_db(stock_date: date) -> pd.DataFrame:
+    rows = load_ivan_stock_product_level(stock_date)
+    if not rows:
+        return pd.DataFrame(columns=["stock_date", "nm_id", "ivan_stock_qty", "sizes_count", "barcodes_count"])
+    df = pd.DataFrame(rows)
+    if "nm_id" in df.columns:
+        df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+    if "ivan_stock_qty" in df.columns:
+        df["ivan_stock_qty"] = pd.to_numeric(df["ivan_stock_qty"], errors="coerce")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_ivan_stock_size_level_from_db(stock_date: date) -> pd.DataFrame:
+    rows = load_ivan_stock_size_level(stock_date)
+    if not rows:
+        return pd.DataFrame(columns=["stock_date", "nm_id", "size_name", "barcode", "quantity", "color_name", "nomenclature_raw"])
+    df = pd.DataFrame(rows)
+    if "nm_id" in df.columns:
+        df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+    if "quantity" in df.columns:
+        df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_dim_product_size_from_db(nm_ids: tuple[int, ...]) -> pd.DataFrame:
+    rows = load_dim_product_size_rows(nm_ids=list(nm_ids))
+    if not rows:
+        return pd.DataFrame(columns=["nm_id", "chrt_id", "barcode", "size_name", "tech_size", "source_status", "updated_at"])
+    df = pd.DataFrame(rows)
+    for column in ("nm_id", "chrt_id"):
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    return df
 
 
 def render_charts_tab(
