@@ -880,6 +880,53 @@ class FactWbSitePriceSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class FactCompetitorWbSitePriceSnapshot(Base):
+    __tablename__ = "fact_competitor_wb_site_price_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_date",
+            "competitor_group_key",
+            "competitor_nm_id",
+            "size_key",
+            name="uq_fact_competitor_wb_site_price_snapshot_key",
+        ),
+        Index(
+            "idx_fact_competitor_wb_site_price_snapshot_date_group_nm",
+            "snapshot_date",
+            "competitor_group_key",
+            "competitor_nm_id",
+        ),
+        Index(
+            "idx_fact_competitor_wb_site_price_snapshot_fetch_status",
+            "fetch_status",
+            "snapshot_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    competitor_group_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    competitor_group_name: Mapped[str] = mapped_column(Text, nullable=False)
+    competitor_nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    size_key: Mapped[str] = mapped_column(String(128), nullable=False, default="__default__", server_default="__default__")
+    chrt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    size_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    buyer_visible_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    wallet_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    strikethrough_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    price_text_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    availability_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fetch_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proxy_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class FactWbSitePriceAlert(Base):
     __tablename__ = "fact_wb_site_price_alert"
     __table_args__ = (
@@ -1035,5 +1082,24 @@ class FactWbSellerPriceSnapshot(Base):
     discount: Mapped[int | None] = mapped_column(Integer, nullable=True)
     seller_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FactIvanStockSheetDay(Base, TimestampMixin):
+    __tablename__ = "fact_ivan_stock_sheet_day"
+    __table_args__ = (
+        UniqueConstraint("stock_date", "nm_id", "size_name", "barcode", name="uq_fact_ivan_stock_sheet_day"),
+        Index("idx_fact_ivan_stock_sheet_day_date_nm", "stock_date", "nm_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    stock_date: Mapped[date] = mapped_column(Date, nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    size_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    barcode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    color_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    nomenclature_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_sheet: Mapped[str] = mapped_column(Text, nullable=False, default="Остатки", server_default="Остатки")
+    raw_row: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
 
 
