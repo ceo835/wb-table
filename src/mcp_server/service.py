@@ -98,6 +98,25 @@ PRODUCT_LOOKUP_ALIASES: dict[str, tuple[str, ...]] = {
     "title": ("title", "item_label", "product_name"),
 }
 
+ACTIVE_PRODUCTS_SETTINGS_ALIASES: dict[str, tuple[str, ...]] = {
+    "nm_id": ("nm_id",),
+    "supplier_article": ("supplier_article",),
+    "title": ("title",),
+    "brand": ("brand",),
+    "subject": ("subject",),
+    "active": ("active",),
+    "analytics_active": ("analytics_active",),
+}
+
+ACTIVE_PRODUCTS_DIM_ALIASES: dict[str, tuple[str, ...]] = {
+    "nm_id": ("nm_id",),
+    "supplier_article": ("supplier_article",),
+    "title": ("title",),
+    "brand": ("brand",),
+    "subject": ("subject",),
+    "category": ("category",),
+}
+
 
 class McpRepository(Protocol):
     def get_db_health(self) -> DbHealthResponse: ...
@@ -933,27 +952,55 @@ class PostgresMcpRepository:
             if not scope_nm_ids:
                 return ActiveProductsResponse(scope=scope_name or CORE_SCOPE, rows=0, items=[])
 
-            settings_rows = (
-                session.execute(
-                    select(SettingsProducts)
-                    .where(SettingsProducts.nm_id.in_(scope_nm_ids))
-                    .order_by(SettingsProducts.nm_id.asc())
-                )
-                .scalars()
-                .all()
+            settings_resolved, _ = self._resolve_table_aliases(
+                session,
+                SETTINGS_PRODUCTS_TABLE_NAME,
+                ACTIVE_PRODUCTS_SETTINGS_ALIASES,
             )
-            dim_rows = (
-                session.execute(
-                    select(DimProduct)
-                    .where(DimProduct.nm_id.in_(scope_nm_ids))
-                    .order_by(DimProduct.nm_id.asc())
-                )
-                .scalars()
-                .all()
-            )
+            settings_nm_column = settings_resolved.get("nm_id")
+            if settings_nm_column is not None:
+                settings_sql = f"""
+                    select
+                        {_select_expr(settings_resolved, "nm_id", cast_type="BIGINT", table_alias="s")},
+                        {_select_expr(settings_resolved, "supplier_article", table_alias="s")},
+                        {_select_expr(settings_resolved, "title", table_alias="s")},
+                        {_select_expr(settings_resolved, "brand", table_alias="s")},
+                        {_select_expr(settings_resolved, "subject", table_alias="s")},
+                        {_select_expr(settings_resolved, "active", cast_type="BOOLEAN", table_alias="s")},
+                        {_select_expr(settings_resolved, "analytics_active", cast_type="BOOLEAN", table_alias="s")}
+                    from {SETTINGS_PRODUCTS_TABLE_NAME} s
+                    where s.{_quote_ident(settings_nm_column)} = any(:nm_ids)
+                    order by s.{_quote_ident(settings_nm_column)} asc
+                """
+                settings_rows = session.execute(text(settings_sql), {"nm_ids": scope_nm_ids}).mappings().all()
+            else:
+                settings_rows = []
 
-        settings_by_nm = {int(row.nm_id): row for row in settings_rows}
-        dim_by_nm = {int(row.nm_id): row for row in dim_rows}
+            dim_resolved, _ = self._resolve_table_aliases(
+                session,
+                DIM_PRODUCT_TABLE_NAME,
+                ACTIVE_PRODUCTS_DIM_ALIASES,
+            )
+            dim_nm_column = dim_resolved.get("nm_id")
+            if dim_nm_column is not None:
+                dim_sql = f"""
+                    select
+                        {_select_expr(dim_resolved, "nm_id", cast_type="BIGINT", table_alias="d")},
+                        {_select_expr(dim_resolved, "supplier_article", table_alias="d")},
+                        {_select_expr(dim_resolved, "title", table_alias="d")},
+                        {_select_expr(dim_resolved, "brand", table_alias="d")},
+                        {_select_expr(dim_resolved, "subject", table_alias="d")},
+                        {_select_expr(dim_resolved, "category", table_alias="d")}
+                    from {DIM_PRODUCT_TABLE_NAME} d
+                    where d.{_quote_ident(dim_nm_column)} = any(:nm_ids)
+                    order by d.{_quote_ident(dim_nm_column)} asc
+                """
+                dim_rows = session.execute(text(dim_sql), {"nm_ids": scope_nm_ids}).mappings().all()
+            else:
+                dim_rows = []
+
+        settings_by_nm = {int(row["nm_id"]): dict(row) for row in settings_rows if row.get("nm_id") is not None}
+        dim_by_nm = {int(row["nm_id"]): dict(row) for row in dim_rows if row.get("nm_id") is not None}
         price_monitor_metadata = self._load_price_monitor_metadata()
 
         items: list[ActiveProductsItemResponse] = []
@@ -961,7 +1008,7 @@ class PostgresMcpRepository:
             settings_row = settings_by_nm.get(int(nm_id))
             dim_row = dim_by_nm.get(int(nm_id))
             tracked_meta = price_monitor_metadata.get(int(nm_id), {})
-            analytics_active = bool(getattr(settings_row, "analytics_active", False)) if settings_row is not None else False
+            analytics_active = bool(settings_row.get("analytics_active")) if settings_row is not None else False
             price_monitor_enabled = int(nm_id) in price_monitor_metadata
             if analytics_active and price_monitor_enabled:
                 reason = "price_monitor_seed"
@@ -971,7 +1018,7 @@ class PostgresMcpRepository:
                 reason = "price_monitor_seed_pending_backfill"
             elif price_monitor_enabled:
                 reason = "price_monitor_list"
-            elif settings_row is not None and bool(settings_row.active):
+            elif settings_row is not None and bool(settings_row.get("active")):
                 reason = "settings_products_active"
             else:
                 reason = None
@@ -980,22 +1027,22 @@ class PostgresMcpRepository:
                 ActiveProductsItemResponse(
                     nm_id=int(nm_id),
                     supplier_article=(
-                        (settings_row.supplier_article if settings_row is not None else None)
-                        or (dim_row.supplier_article if dim_row is not None else None)
+                        (settings_row.get("supplier_article") if settings_row is not None else None)
+                        or (dim_row.get("supplier_article") if dim_row is not None else None)
                     ),
                     title=(
-                        (settings_row.title if settings_row is not None else None)
-                        or (dim_row.title if dim_row is not None else None)
+                        (settings_row.get("title") if settings_row is not None else None)
+                        or (dim_row.get("title") if dim_row is not None else None)
                         or tracked_meta.get("tracked_label")
                     ),
                     brand=(
-                        (settings_row.brand if settings_row is not None else None)
-                        or (dim_row.brand if dim_row is not None else None)
+                        (settings_row.get("brand") if settings_row is not None else None)
+                        or (dim_row.get("brand") if dim_row is not None else None)
                     ),
-                    category=dim_row.category if dim_row is not None else None,
+                    category=dim_row.get("category") if dim_row is not None else None,
                     subject=(
-                        (settings_row.subject if settings_row is not None else None)
-                        or (dim_row.subject if dim_row is not None else None)
+                        (settings_row.get("subject") if settings_row is not None else None)
+                        or (dim_row.get("subject") if dim_row is not None else None)
                     ),
                     analytics_active=analytics_active,
                     price_monitor_enabled=price_monitor_enabled,
