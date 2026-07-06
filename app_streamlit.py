@@ -29,6 +29,7 @@ from src.config.settings import settings
 from src.db.mart_total_report_builder import build_mart_total_report
 from src.db.models import (
     DimProduct,
+    DimProductSize,
     FactStockWarehouseSnapshot,
     FactIvanAdsWideDay,
     FactWbSitePriceAlert,
@@ -136,6 +137,11 @@ CHART_AGGREGATION_LEVELS = [
     CHART_LEVEL_ARTICLE,
     CHART_LEVEL_CONVERSION,
 ]
+
+
+def _clip_non_negative_numeric_series(series: "pd.Series") -> "pd.Series":
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.clip(lower=0)
 
 DISPLAY_DELTA_COLUMNS_HIGHER_IS_BETTER = {
     "impressions_delta",
@@ -942,9 +948,47 @@ def get_db_dataset_cache_buster() -> str:
             ).one()
         except Exception:
             vvbromo_state = (None, None, 0)
+        stock_warehouse_state = session.execute(
+            select(
+                func.max(FactStockWarehouseSnapshot.snapshot_date),
+                func.max(FactStockWarehouseSnapshot.loaded_at),
+                func.count(),
+            )
+        ).one()
+        dim_product_size_state = session.execute(
+            select(
+                func.max(DimProductSize.updated_at),
+                func.count(func.distinct(DimProductSize.nm_id)),
+                func.count(),
+            )
+        ).one()
+        size_sales_state = session.execute(
+            select(
+                func.max(FactWbStatisticsOrderSizeDay.date),
+                func.max(FactWbStatisticsOrderSizeDay.loaded_at),
+                func.count(),
+            )
+        ).one()
+        ivan_stock_state = session.execute(
+            select(
+                func.max(FactIvanStockSheetDay.stock_date),
+                func.max(FactIvanStockSheetDay.loaded_at),
+                func.count(),
+            )
+        ).one()
     return "|".join(
         "" if value is None else str(value) 
-        for value in (*mart_state, *price_state, *seller_price_state, *alert_state, *vvbromo_state)
+        for value in (
+            *mart_state,
+            *price_state,
+            *seller_price_state,
+            *alert_state,
+            *vvbromo_state,
+            *stock_warehouse_state,
+            *dim_product_size_state,
+            *size_sales_state,
+            *ivan_stock_state,
+        )
     )
 
 
@@ -2105,7 +2149,7 @@ def load_main_wb_warehouses(path: str, cache_buster: float | None = None) -> lis
 
 
 @st.cache_data(show_spinner=False)
-def load_stock_warehouse_snapshot_from_db() -> pd.DataFrame:
+def load_stock_warehouse_snapshot_from_db(cache_buster: str | None = None) -> pd.DataFrame:
     with session_scope() as session:
         rows = session.execute(
             select(FactStockWarehouseSnapshot).order_by(
@@ -3368,7 +3412,15 @@ def build_stock_all_product_level(
         base_df = s[keep].drop_duplicates(subset=["nm_id"]).copy()
 
     # 2. Агрегация остатков WB
-    day_df = snapshot_df[snapshot_df["snapshot_date"] == snapshot_date].copy() if not snapshot_df.empty else pd.DataFrame()
+    if not snapshot_df.empty:
+        prepared_snapshot_df = snapshot_df.copy()
+        prepared_snapshot_df["snapshot_date"] = pd.to_datetime(
+            prepared_snapshot_df["snapshot_date"],
+            errors="coerce",
+        ).dt.date
+        day_df = prepared_snapshot_df[prepared_snapshot_df["snapshot_date"] == snapshot_date].copy()
+    else:
+        day_df = pd.DataFrame()
     if not day_df.empty:
         for col in ("stock_qty", "in_way_to_client", "in_way_from_client"):
             if col not in day_df.columns:
@@ -3413,7 +3465,7 @@ def build_stock_all_product_level(
     if one_c_stock_df is not None and not one_c_stock_df.empty:
         one_c_df = one_c_stock_df.copy()
         one_c_df["nm_id"] = pd.to_numeric(one_c_df.get("nm_id"), errors="coerce")
-        one_c_df["ivan_stock_qty"] = pd.to_numeric(one_c_df.get("ivan_stock_qty"), errors="coerce")
+        one_c_df["ivan_stock_qty"] = _clip_non_negative_numeric_series(one_c_df.get("ivan_stock_qty"))
         one_c_df = one_c_df.dropna(subset=["nm_id"]).copy()
         if not one_c_df.empty:
             one_c_df["nm_id"] = one_c_df["nm_id"].astype(int)
@@ -3462,6 +3514,8 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
         return pd.DataFrame(columns=empty_cols)
 
     product_df = product_df.copy()
+    if "one_c_stock_qty" in product_df.columns:
+        product_df["one_c_stock_qty"] = _clip_non_negative_numeric_series(product_df["one_c_stock_qty"])
     if "band" not in product_df.columns:
         product_df["band"] = pd.NA
 
@@ -3555,10 +3609,6 @@ def build_stock_all_size_level(
         ).dt.date
     wb_day_df = prepared_snapshot_df[prepared_snapshot_df["snapshot_date"] == snapshot_date].copy()
     one_c_day_df = (one_c_size_df.copy() if one_c_size_df is not None else pd.DataFrame())
-    if "stock_date" in one_c_day_df.columns:
-        one_c_day_df = one_c_day_df[
-            pd.to_datetime(one_c_day_df["stock_date"], errors="coerce").dt.date == snapshot_date
-        ].copy()
 
     if wb_day_df.empty and one_c_day_df.empty:
         return pd.DataFrame(columns=empty_cols)
@@ -3581,7 +3631,7 @@ def build_stock_all_size_level(
     }
 
     one_c_day_df["nm_id"] = pd.to_numeric(one_c_day_df.get("nm_id"), errors="coerce")
-    one_c_day_df["quantity"] = pd.to_numeric(one_c_day_df.get("quantity"), errors="coerce")
+    one_c_day_df["quantity"] = _clip_non_negative_numeric_series(one_c_day_df.get("quantity"))
     one_c_day_df = one_c_day_df.dropna(subset=["nm_id"]).copy()
     if not one_c_day_df.empty:
         one_c_day_df["nm_id"] = one_c_day_df["nm_id"].astype(int)
@@ -3889,7 +3939,7 @@ def build_stock_all_display_dataframe(
 
             # Прогноз остатков (Суммарный остаток = Остаток WB + Остаток 1С)
             wb_stock = pd.to_numeric(display_df["Остаток WB на складах"], errors="coerce")
-            one_c_stock = pd.to_numeric(display_df["Остаток 1С"], errors="coerce")
+            one_c_stock = _clip_non_negative_numeric_series(display_df["Остаток 1С"])
             
             total_stock = wb_stock.fillna(0) + one_c_stock.fillna(0)
             total_stock = total_stock.where(wb_stock.notna() | one_c_stock.notna(), pd.NA)
@@ -3914,7 +3964,105 @@ def build_stock_all_display_dataframe(
     return display_df[ordered_columns].copy(), numeric_cols
 
 
-def build_stock_all_size_display_dataframe(size_df: "pd.DataFrame") -> tuple["pd.DataFrame", set[str]]:
+def _resolve_size_sales_metrics_by_row(
+    size_sales_df: pd.DataFrame,
+    snapshot_date: date,
+    nm_id: object,
+    barcode: object,
+    tech_size: object,
+    size_name: object,
+) -> tuple[float | None, float | None]:
+    if size_sales_df.empty:
+        return (None, None)
+
+    resolved_nm_id = pd.to_numeric(pd.Series([nm_id]), errors="coerce").iloc[0]
+    if pd.isna(resolved_nm_id):
+        return (None, None)
+    resolved_nm_id = int(resolved_nm_id)
+    resolved_barcode = _normalize_stock_size_barcode(barcode)
+    resolved_size_key = _normalize_stock_size_name(tech_size) or _normalize_stock_size_name(size_name)
+
+    sales_df = size_sales_df.copy()
+    sales_df["date"] = pd.to_datetime(sales_df.get("date"), errors="coerce").dt.date
+    sales_df["nm_id"] = pd.to_numeric(sales_df.get("nm_id"), errors="coerce")
+    sales_df["barcode"] = sales_df.get("barcode").map(_normalize_stock_size_barcode)
+    sales_df["tech_size_key"] = sales_df.get("tech_size").map(_normalize_stock_size_name)
+    sales_df["order_count"] = pd.to_numeric(sales_df.get("order_count"), errors="coerce")
+    sales_df = sales_df.dropna(subset=["date", "nm_id"]).copy()
+    if sales_df.empty:
+        return (None, None)
+    sales_df["nm_id"] = sales_df["nm_id"].astype(int)
+    sales_df = sales_df[sales_df["nm_id"] == resolved_nm_id].copy()
+    if sales_df.empty:
+        return (None, None)
+
+    date_y2 = snapshot_date - timedelta(days=2)
+    date_from = snapshot_date - timedelta(days=7)
+    date_to = snapshot_date - timedelta(days=1)
+    y2_df = sales_df[sales_df["date"] == date_y2].copy()
+    week_df = sales_df[(sales_df["date"] >= date_from) & (sales_df["date"] <= date_to)].copy()
+
+    def _aggregate_by_barcode(df: pd.DataFrame) -> dict[tuple[int, str], float]:
+        if df.empty:
+            return {}
+        prepared = df.dropna(subset=["barcode"]).copy()
+        if prepared.empty:
+            return {}
+        grouped = prepared.groupby(["nm_id", "barcode"], dropna=False)["order_count"].sum(min_count=1)
+        return {
+            (int(group_nm_id), str(group_barcode)): float(value)
+            for (group_nm_id, group_barcode), value in grouped.items()
+            if group_barcode
+        }
+
+    def _aggregate_by_unique_tech_size(df: pd.DataFrame) -> dict[tuple[int, str], float]:
+        if df.empty:
+            return {}
+        prepared = df.dropna(subset=["tech_size_key"]).copy()
+        if prepared.empty:
+            return {}
+        result: dict[tuple[int, str], float] = {}
+        for (group_nm_id, group_tech_size), part in prepared.groupby(["nm_id", "tech_size_key"], dropna=False):
+            distinct_barcodes = {
+                _normalize_stock_size_barcode(value)
+                for value in part["barcode"].dropna().tolist()
+            }
+            distinct_barcodes.discard(None)
+            if len(distinct_barcodes) > 1:
+                continue
+            total_orders = pd.to_numeric(part["order_count"], errors="coerce").sum(min_count=1)
+            if pd.notna(total_orders):
+                result[(int(group_nm_id), str(group_tech_size))] = float(total_orders)
+        return result
+
+    barcode_y2 = _aggregate_by_barcode(y2_df)
+    barcode_week_sum = _aggregate_by_barcode(week_df)
+    tech_y2 = _aggregate_by_unique_tech_size(y2_df)
+    tech_week_sum = _aggregate_by_unique_tech_size(week_df)
+
+    if resolved_barcode:
+        return (
+            barcode_y2.get((resolved_nm_id, resolved_barcode), 0.0),
+            barcode_week_sum.get((resolved_nm_id, resolved_barcode), 0.0) / 7.0,
+        )
+
+    if resolved_size_key:
+        tech_key = (resolved_nm_id, resolved_size_key)
+        if tech_key in tech_y2 or tech_key in tech_week_sum:
+            return (
+                tech_y2.get(tech_key, 0.0),
+                tech_week_sum.get(tech_key, 0.0) / 7.0,
+            )
+
+    return (None, None)
+
+
+def build_stock_all_size_display_dataframe(
+    size_df: "pd.DataFrame",
+    *,
+    snapshot_date: "date | None" = None,
+    size_sales_df: "pd.DataFrame | None" = None,
+) -> tuple["pd.DataFrame", set[str]]:
     source_columns = [
         "band_name",
         "nm_id",
@@ -3922,6 +4070,7 @@ def build_stock_all_size_display_dataframe(size_df: "pd.DataFrame") -> tuple["pd
         "title",
         "size_name",
         "barcode",
+        "tech_size",
         "wb_size_stock_qty",
         "one_c_size_stock_qty",
         "wb_vs_one_c_size_diff",
@@ -3933,6 +4082,7 @@ def build_stock_all_size_display_dataframe(size_df: "pd.DataFrame") -> tuple["pd
         "title": "Название",
         "size_name": "Размер",
         "barcode": "Баркод",
+        "tech_size": "_tech_size",
         "wb_size_stock_qty": "Остаток WB по размеру",
         "one_c_size_stock_qty": "Остаток 1С по размеру",
         "wb_vs_one_c_size_diff": "Разница WB - 1С по размеру",
@@ -3946,13 +4096,55 @@ def build_stock_all_size_display_dataframe(size_df: "pd.DataFrame") -> tuple["pd
         "Баркод",
         "Остаток WB по размеру",
         "Остаток 1С по размеру",
+        "Скорость продаж за позавчера",
+        "Скорость продаж за прошедшую неделю",
+        "Прогноз остатков по скорости позавчера",
+        "Прогноз остатков по скорости недели",
     ]
     numeric_cols = {
         "Артикул WB",
         "Остаток WB по размеру",
         "Остаток 1С по размеру",
+        "Скорость продаж за позавчера",
+        "Скорость продаж за прошедшую неделю",
+        "Прогноз остатков по скорости позавчера",
+        "Прогноз остатков по скорости недели",
     }
     display_df = size_df.reindex(columns=source_columns).rename(columns=rename_map)
+    display_df["Скорость продаж за позавчера"] = pd.NA
+    display_df["Скорость продаж за прошедшую неделю"] = pd.NA
+    display_df["Прогноз остатков по скорости позавчера"] = pd.NA
+    display_df["Прогноз остатков по скорости недели"] = pd.NA
+
+    if snapshot_date is not None and size_sales_df is not None and not display_df.empty:
+        for row_idx, row in display_df.iterrows():
+            speed_y2, speed_week = _resolve_size_sales_metrics_by_row(
+                size_sales_df=size_sales_df,
+                snapshot_date=snapshot_date,
+                nm_id=row.get("Артикул WB"),
+                barcode=row.get("Баркод"),
+                tech_size=row.get("_tech_size"),
+                size_name=row.get("Размер"),
+            )
+            display_df.at[row_idx, "Скорость продаж за позавчера"] = speed_y2
+            display_df.at[row_idx, "Скорость продаж за прошедшую неделю"] = speed_week
+
+        wb_stock = pd.to_numeric(display_df["Остаток WB по размеру"], errors="coerce")
+        one_c_stock = _clip_non_negative_numeric_series(display_df["Остаток 1С по размеру"])
+        total_stock = wb_stock.fillna(0) + one_c_stock.fillna(0)
+        total_stock = total_stock.where(wb_stock.notna() | one_c_stock.notna(), pd.NA)
+
+        speed_y2_series = pd.to_numeric(display_df["Скорость продаж за позавчера"], errors="coerce")
+        speed_week_series = pd.to_numeric(display_df["Скорость продаж за прошедшую неделю"], errors="coerce")
+        display_df["Прогноз остатков по скорости позавчера"] = (total_stock / speed_y2_series).where(
+            (speed_y2_series > 0) & speed_y2_series.notna() & total_stock.notna(),
+            pd.NA,
+        )
+        display_df["Прогноз остатков по скорости недели"] = (total_stock / speed_week_series).where(
+            (speed_week_series > 0) & speed_week_series.notna() & total_stock.notna(),
+            pd.NA,
+        )
+
     for column_name in ordered_columns:
         if column_name not in display_df.columns:
             display_df[column_name] = pd.NA
@@ -3984,6 +4176,7 @@ def render_stock_all_tab(
     snapshot_df: "pd.DataFrame",
     settings_df: "pd.DataFrame",
     available_dates: "list[date]",
+    cache_buster: str | None = None,
 ) -> None:
     """Рендерит вкладку 'Контроль всех остатков'."""
     if False:
@@ -4014,7 +4207,7 @@ def render_stock_all_tab(
         key="stock_all_snapshot_date",
     )
 
-    one_c_product_df = load_ivan_stock_product_level_from_db(selected_snapshot_date)
+    one_c_product_df = load_ivan_stock_product_level_from_db(selected_snapshot_date, cache_buster=cache_buster)
     product_df = build_stock_all_product_level(
         snapshot_df,
         settings_df,
@@ -4063,7 +4256,7 @@ def render_stock_all_tab(
         key="stock_all_level_radio",
     )
     if level == "По размерам":
-        one_c_size_df = load_ivan_stock_size_level_from_db(selected_snapshot_date)
+        one_c_size_df = load_ivan_stock_size_level_from_db(selected_snapshot_date, cache_buster=cache_buster)
         wb_nm_ids = set(
             pd.to_numeric(
                 snapshot_df.loc[snapshot_df["snapshot_date"] == selected_snapshot_date, "nm_id"],
@@ -4076,7 +4269,11 @@ def render_stock_all_tab(
             one_c_nm_ids = set(
                 pd.to_numeric(one_c_size_df.get("nm_id"), errors="coerce").dropna().astype(int).tolist()
             )
-        product_size_df = load_dim_product_size_from_db(tuple(sorted(wb_nm_ids | one_c_nm_ids)))
+        product_size_df = load_dim_product_size_from_db(
+            tuple(sorted(wb_nm_ids | one_c_nm_ids)),
+            cache_buster=cache_buster,
+        )
+        size_sales_df = load_size_sales_speed_data_from_db(selected_snapshot_date, cache_buster=cache_buster)
         size_df = build_stock_all_size_level(
             snapshot_df,
             settings_df,
@@ -4084,7 +4281,11 @@ def render_stock_all_tab(
             one_c_size_df=one_c_size_df,
             product_size_df=product_size_df,
         )
-        display_df, numeric_cols = build_stock_all_size_display_dataframe(size_df)
+        display_df, numeric_cols = build_stock_all_size_display_dataframe(
+            size_df,
+            snapshot_date=selected_snapshot_date,
+            size_sales_df=size_sales_df,
+        )
     else:
         sales_df = load_sales_speed_data_from_db(selected_snapshot_date)
         display_df, numeric_cols = build_stock_all_display_dataframe(
@@ -4150,13 +4351,14 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         st.info("Вкладка складских остатков доступна в режиме PostgreSQL.")
         return
 
-    snapshot_df = load_stock_warehouse_snapshot_from_db()
+    cache_buster = resolve_db_dataset_cache_buster()
+    snapshot_df = load_stock_warehouse_snapshot_from_db(cache_buster)
     prepared_snapshot = prepare_stock_warehouse_snapshot_dataframe(snapshot_df)
     available_dates = sorted(d for d in prepared_snapshot["snapshot_date"].dropna().unique().tolist())
     latest_date = available_dates[-1] if available_dates else None
 
     # Загружаем settings_products один раз для обеих вкладок
-    settings_qg_df = load_settings_product_query_groups_from_db()
+    settings_qg_df = load_settings_product_query_groups_from_db(cache_buster)
 
     tab_zero, tab_all = st.tabs([
         STOCK_ZERO_POSITIONS_TAB_LABEL,
@@ -4164,7 +4366,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
     ])
 
     with tab_all:
-        render_stock_all_tab(prepared_snapshot, settings_qg_df, available_dates)
+        render_stock_all_tab(prepared_snapshot, settings_qg_df, available_dates, cache_buster=cache_buster)
 
     with tab_zero:
         if snapshot_df.empty:
@@ -6598,7 +6800,7 @@ def load_sales_speed_data_from_db(snapshot_date: date) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_size_sales_speed_data_from_db(snapshot_date: date) -> pd.DataFrame:
+def load_size_sales_speed_data_from_db(snapshot_date: date, cache_buster: str | None = None) -> pd.DataFrame:
     """
     Загружает продажи по размерам из fact_wb_statistics_order_size_day за 7 завершенных дней
     до snapshot_date (т.е. [snapshot_date - 7 days, snapshot_date - 1 day]).
@@ -6692,7 +6894,7 @@ def get_size_sales_speed_week(
 
 
 @st.cache_data(show_spinner=False)
-def load_ivan_stock_product_level_from_db(stock_date: date) -> pd.DataFrame:
+def load_ivan_stock_product_level_from_db(stock_date: date, cache_buster: str | None = None) -> pd.DataFrame:
     rows = load_ivan_stock_product_level(stock_date)
     if not rows:
         return pd.DataFrame(columns=["stock_date", "nm_id", "ivan_stock_qty", "sizes_count", "barcodes_count"])
@@ -6700,12 +6902,12 @@ def load_ivan_stock_product_level_from_db(stock_date: date) -> pd.DataFrame:
     if "nm_id" in df.columns:
         df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
     if "ivan_stock_qty" in df.columns:
-        df["ivan_stock_qty"] = pd.to_numeric(df["ivan_stock_qty"], errors="coerce")
+        df["ivan_stock_qty"] = _clip_non_negative_numeric_series(df["ivan_stock_qty"])
     return df
 
 
 @st.cache_data(show_spinner=False)
-def load_ivan_stock_size_level_from_db(stock_date: date) -> pd.DataFrame:
+def load_ivan_stock_size_level_from_db(stock_date: date, cache_buster: str | None = None) -> pd.DataFrame:
     rows = load_ivan_stock_size_level(stock_date)
     if not rows:
         return pd.DataFrame(columns=["stock_date", "nm_id", "size_name", "barcode", "quantity", "color_name", "nomenclature_raw"])
@@ -6713,12 +6915,12 @@ def load_ivan_stock_size_level_from_db(stock_date: date) -> pd.DataFrame:
     if "nm_id" in df.columns:
         df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
     if "quantity" in df.columns:
-        df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+        df["quantity"] = _clip_non_negative_numeric_series(df["quantity"])
     return df
 
 
 @st.cache_data(show_spinner=False)
-def load_dim_product_size_from_db(nm_ids: tuple[int, ...]) -> pd.DataFrame:
+def load_dim_product_size_from_db(nm_ids: tuple[int, ...], cache_buster: str | None = None) -> pd.DataFrame:
     rows = load_dim_product_size_rows(nm_ids=list(nm_ids))
     if not rows:
         return pd.DataFrame(columns=["nm_id", "chrt_id", "barcode", "size_name", "tech_size", "source_status", "updated_at"])
@@ -7461,7 +7663,6 @@ def load_ivan_stock_range_from_db(date_from: date, date_to: date) -> pd.DataFram
             FactIvanStockSheetDay.nm_id,
             FactIvanStockSheetDay.quantity
         ).where(
-            FactIvanStockSheetDay.stock_date >= date_from,
             FactIvanStockSheetDay.stock_date <= date_to
         )
         results = session.execute(stmt).all()
@@ -7476,7 +7677,13 @@ def load_ivan_stock_range_from_db(date_from: date, date_to: date) -> pd.DataFram
             for r in results
         ])
         df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
-        df["one_c_stock_qty"] = pd.to_numeric(df["one_c_stock_qty"], errors="coerce")
+        df["one_c_stock_qty"] = _clip_non_negative_numeric_series(df["one_c_stock_qty"])
+        df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce").dt.date
+        df = (
+            df.dropna(subset=["snapshot_date", "nm_id"])
+            .groupby(["snapshot_date", "nm_id"], as_index=False)["one_c_stock_qty"]
+            .sum(min_count=1)
+        )
         return df
 
 
@@ -7524,17 +7731,53 @@ def prepare_stock_speed_charts_dataframe(
     if one_c_df.empty:
         one_c_daily = pd.DataFrame(columns=["date", "nm_id", "one_c_stock_qty"])
     else:
-        one_c_daily = one_c_df.rename(columns={"snapshot_date": "date"})
+        one_c_daily = one_c_df.rename(columns={"snapshot_date": "date"}).copy()
 
     # Приводим к типу date
     if not wb_daily.empty:
         wb_daily["date"] = pd.to_datetime(wb_daily["date"]).dt.date
+        wb_daily["nm_id"] = pd.to_numeric(wb_daily["nm_id"], errors="coerce")
+        wb_daily = wb_daily.dropna(subset=["nm_id"]).copy()
+        wb_daily["nm_id"] = wb_daily["nm_id"].astype("int64")
     if not one_c_daily.empty:
         one_c_daily["date"] = pd.to_datetime(one_c_daily["date"]).dt.date
+        one_c_daily["nm_id"] = pd.to_numeric(one_c_daily["nm_id"], errors="coerce")
+        one_c_daily = one_c_daily.dropna(subset=["nm_id"]).copy()
+        one_c_daily["nm_id"] = one_c_daily["nm_id"].astype("int64")
+        one_c_daily["one_c_stock_qty"] = _clip_non_negative_numeric_series(one_c_daily["one_c_stock_qty"])
+        one_c_daily = one_c_daily.dropna(subset=["one_c_stock_qty"]).copy()
+        one_c_daily = (
+            one_c_daily.sort_values(["nm_id", "date"])
+            .drop_duplicates(subset=["nm_id", "date"], keep="last")
+            .reset_index(drop=True)
+        )
+        target_nm_ids = sorted(
+            {
+                *pd.to_numeric(wb_daily.get("nm_id"), errors="coerce").dropna().astype(int).tolist(),
+                *pd.to_numeric(one_c_daily.get("nm_id"), errors="coerce").dropna().astype(int).tolist(),
+            }
+        )
+        if target_nm_ids:
+            one_c_grid = pd.MultiIndex.from_product(
+                [target_nm_ids, pd.date_range(start=min_date, end=max_date).date],
+                names=["nm_id", "date"],
+            ).to_frame(index=False)
+            one_c_grid["nm_id"] = pd.to_numeric(one_c_grid["nm_id"], errors="coerce").astype("int64")
+            one_c_grid["date"] = pd.to_datetime(one_c_grid["date"])
+            one_c_daily["date"] = pd.to_datetime(one_c_daily["date"])
+            one_c_daily = pd.merge_asof(
+                one_c_grid.sort_values(["date", "nm_id"]),
+                one_c_daily.sort_values(["date", "nm_id"]),
+                on="date",
+                by="nm_id",
+                direction="backward",
+            )
+            one_c_daily["date"] = pd.to_datetime(one_c_daily["date"]).dt.date
 
     stocks_daily = pd.merge(wb_daily, one_c_daily, on=["date", "nm_id"], how="outer")
     wb_qty = pd.to_numeric(stocks_daily["wb_stock_qty"], errors="coerce")
-    one_c_qty = pd.to_numeric(stocks_daily["one_c_stock_qty"], errors="coerce")
+    one_c_qty = _clip_non_negative_numeric_series(stocks_daily["one_c_stock_qty"])
+    stocks_daily["one_c_stock_qty"] = one_c_qty
     stocks_daily["total_stock"] = wb_qty.fillna(0) + one_c_qty.fillna(0)
     stocks_daily["total_stock"] = stocks_daily["total_stock"].where(wb_qty.notna() | one_c_qty.notna(), pd.NA)
 

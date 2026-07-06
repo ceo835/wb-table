@@ -323,6 +323,10 @@ def test_get_db_dataset_cache_buster_includes_seller_price_state(monkeypatch) ->
             ("2026-06-29", "2026-06-29T10:10:00+00:00", 354),
             ("2026-06-29", "2026-06-29T10:15:00+00:00", 3),
             ("2026-06-29", "2026-06-29T10:20:00+00:00", 12),
+            ("2026-06-29", "2026-06-29T10:25:00+00:00", 3106),
+            ("2026-06-29", "2026-06-29T10:30:00+00:00", 84),
+            ("2026-06-29", "2026-06-29T10:35:00+00:00", 44),
+            ("2026-06-29", "2026-06-29T10:40:00+00:00", 755),
         ]
     )
 
@@ -343,6 +347,10 @@ def test_get_db_dataset_cache_buster_includes_seller_price_state(monkeypatch) ->
 
     assert "2026-06-29T10:10:00+00:00" in cache_buster
     assert "|354|" in f"|{cache_buster}|"
+    assert "2026-06-29T10:25:00+00:00" in cache_buster
+    assert "|3106|" in f"|{cache_buster}|"
+    assert "2026-06-29T10:30:00+00:00" in cache_buster
+    assert "|84|" in f"|{cache_buster}|"
 
 
 def test_load_app_dataset_db_falls_back_when_cache_buster_raises(monkeypatch) -> None:
@@ -4726,6 +4734,154 @@ def test_build_stock_all_size_level_falls_back_to_size_name_and_keeps_unmatched_
     assert pd.isna(wb_only_row["one_c_size_stock_qty"])
 
 
+def test_build_stock_all_size_display_dataframe_adds_sales_speed_and_forecasts() -> None:
+    snapshot_date = pd.Timestamp("2026-07-05").date()
+    size_df = pd.DataFrame(
+        [
+            {
+                "band_name": "Трусы женские",
+                "nm_id": 197330807,
+                "vendor_code": "BlackWOM5",
+                "title": "Трусы набор",
+                "size_name": "M",
+                "barcode": "BC-M",
+                "tech_size": "M",
+                "wb_size_stock_qty": 8,
+                "one_c_size_stock_qty": 2,
+            },
+            {
+                "band_name": "Трусы женские",
+                "nm_id": 197330807,
+                "vendor_code": "BlackWOM5",
+                "title": "Трусы набор",
+                "size_name": "S",
+                "barcode": pd.NA,
+                "tech_size": "S",
+                "wb_size_stock_qty": 4,
+                "one_c_size_stock_qty": 1,
+            },
+        ]
+    )
+    size_sales_df = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-07-03").date(),
+                "nm_id": 197330807,
+                "barcode": "BC-M",
+                "chrt_id": 101,
+                "tech_size": "M",
+                "order_count": 4,
+                "cancel_count": 0,
+            },
+            {
+                "date": pd.Timestamp("2026-07-01").date(),
+                "nm_id": 197330807,
+                "barcode": "BC-M",
+                "chrt_id": 101,
+                "tech_size": "M",
+                "order_count": 10,
+                "cancel_count": 0,
+            },
+            {
+                "date": pd.Timestamp("2026-07-03").date(),
+                "nm_id": 197330807,
+                "barcode": "BC-S-UNIQUE",
+                "chrt_id": 102,
+                "tech_size": "S",
+                "order_count": 3,
+                "cancel_count": 0,
+            },
+            {
+                "date": pd.Timestamp("2026-07-02").date(),
+                "nm_id": 197330807,
+                "barcode": "BC-S-UNIQUE",
+                "chrt_id": 102,
+                "tech_size": "S",
+                "order_count": 4,
+                "cancel_count": 0,
+            },
+        ]
+    )
+
+    display_df, numeric_cols = build_stock_all_size_display_dataframe(
+        size_df,
+        snapshot_date=snapshot_date,
+        size_sales_df=size_sales_df,
+    )
+
+    assert "Скорость продаж за позавчера" in display_df.columns
+    assert "Скорость продаж за прошедшую неделю" in display_df.columns
+    assert "Прогноз остатков по скорости позавчера" in display_df.columns
+    assert "Прогноз остатков по скорости недели" in display_df.columns
+    assert "Остаток WB по размеру" in numeric_cols
+    assert "Скорость продаж за позавчера" in numeric_cols
+
+    row_m = display_df.loc[display_df["Размер"] == "M"].iloc[0]
+    assert row_m["Скорость продаж за позавчера"] == 4
+    assert row_m["Скорость продаж за прошедшую неделю"] == 2
+    assert row_m["Прогноз остатков по скорости позавчера"] == 2.5
+    assert row_m["Прогноз остатков по скорости недели"] == 5
+
+    row_s = display_df.loc[display_df["Размер"] == "S"].iloc[0]
+    assert row_s["Скорость продаж за позавчера"] == 3
+    assert row_s["Скорость продаж за прошедшую неделю"] == 1
+    assert row_s["Прогноз остатков по скорости позавчера"] == 5 / 3
+    assert row_s["Прогноз остатков по скорости недели"] == 5
+
+
+def test_build_stock_all_size_display_dataframe_does_not_use_ambiguous_tech_size_fallback() -> None:
+    snapshot_date = pd.Timestamp("2026-07-05").date()
+    size_df = pd.DataFrame(
+        [
+            {
+                "band_name": "Трусы женские",
+                "nm_id": 197330807,
+                "vendor_code": "BlackWOM5",
+                "title": "Трусы набор",
+                "size_name": "S",
+                "barcode": pd.NA,
+                "tech_size": "S",
+                "wb_size_stock_qty": 4,
+                "one_c_size_stock_qty": 1,
+            },
+        ]
+    )
+    size_sales_df = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-07-03").date(),
+                "nm_id": 197330807,
+                "barcode": "BC-S-1",
+                "chrt_id": 102,
+                "tech_size": "S",
+                "order_count": 3,
+                "cancel_count": 0,
+            },
+            {
+                "date": pd.Timestamp("2026-07-03").date(),
+                "nm_id": 197330807,
+                "barcode": "BC-S-2",
+                "chrt_id": 103,
+                "tech_size": "S",
+                "order_count": 2,
+                "cancel_count": 0,
+            },
+        ]
+    )
+
+    display_df, _ = build_stock_all_size_display_dataframe(
+        size_df,
+        snapshot_date=snapshot_date,
+        size_sales_df=size_sales_df,
+    )
+
+    row = display_df.iloc[0]
+    assert pd.isna(row["Скорость продаж за позавчера"])
+    assert pd.isna(row["Скорость продаж за прошедшую неделю"])
+    assert pd.isna(row["Прогноз остатков по скорости позавчера"])
+    assert pd.isna(row["Прогноз остатков по скорости недели"])
+
+
 def test_build_stock_all_size_display_dataframe_uses_russian_columns() -> None:
     size_df = pd.DataFrame(
         [
@@ -4754,12 +4910,15 @@ def test_build_stock_all_size_display_dataframe_uses_russian_columns() -> None:
         "Баркод",
         "Остаток WB по размеру",
         "Остаток 1С по размеру",
-        "Разница WB - 1С по размеру",
+        "Скорость продаж за позавчера",
+        "Скорость продаж за прошедшую неделю",
+        "Прогноз остатков по скорости позавчера",
+        "Прогноз остатков по скорости недели",
     ]
     assert result.iloc[0]["Размер"] == "M"
     assert result.iloc[0]["Баркод"] == "111"
     assert "Остаток WB по размеру" in numeric_cols
-    assert "Разница WB - 1С по размеру" in numeric_cols
+    assert "Разница WB - 1С по размеру" not in numeric_cols
 
 
 def test_stock_speed_charts_calculations_and_aggregations() -> None:
@@ -4811,7 +4970,7 @@ def test_stock_speed_charts_calculations_and_aggregations() -> None:
     assert row_101_3["total_stock"] == 14
     
     row_101_4 = df_all[(df_all["nm_id"] == 101) & (df_all["date"] == date(2026, 7, 4))].iloc[0]
-    assert row_101_4["total_stock"] == 12
+    assert row_101_4["total_stock"] == 16
     
     # Проверяем скорость позавчера для 2026-07-04
     assert row_101_4["sales_speed_y2"] == 2
@@ -4822,25 +4981,148 @@ def test_stock_speed_charts_calculations_and_aggregations() -> None:
     
     art_row_4 = df_art[df_art["date"] == date(2026, 7, 4)].iloc[0]
     assert art_row_4["sales_speed"] == 2
-    assert art_row_4["forecast_months"] == 0.2
+    assert abs(art_row_4["forecast_months"] - (16.0 / 60.0)) < 1e-5
     
     # 4. Test aggregate_stock_charts_by_band
     df_band = aggregate_stock_charts_by_band(df_all, "sales_speed_y2")
     band_row_4 = df_band[(df_band["date"] == date(2026, 7, 4)) & (df_band["band_name"] == "Трусы женские")].iloc[0]
     assert band_row_4["sales_speed"] == 2
-    assert abs(band_row_4["forecast_months"] - (17.0 / 60.0)) < 1e-5
+    assert abs(band_row_4["forecast_months"] - (21.0 / 60.0)) < 1e-5
     
     # 5. Test aggregate_stock_charts_by_cabinet
     df_cab = aggregate_stock_charts_by_cabinet(df_all, "sales_speed_y2")
     cab_row_4 = df_cab[df_cab["date"] == date(2026, 7, 4)].iloc[0]
     assert cab_row_4["sales_speed"] == 2
-    assert abs(cab_row_4["forecast_months"] - (17.0 / 60.0)) < 1e-5
+    assert abs(cab_row_4["forecast_months"] - (21.0 / 60.0)) < 1e-5
     
     # 6. Test zero division safety
     df_art_102 = aggregate_stock_charts_by_article(df_all, "sales_speed_y2", "art-102 | 102 | Товар 102")
     art_102_row_4 = df_art_102[df_art_102["date"] == date(2026, 7, 4)].iloc[0]
     assert art_102_row_4["sales_speed"] == 0
     assert pd.isna(art_102_row_4["forecast_months"])
+
+
+def test_stock_speed_charts_clip_negative_one_c_stock_to_zero() -> None:
+    from datetime import date
+    from app_streamlit import prepare_stock_speed_charts_dataframe
+
+    snapshot_df = pd.DataFrame([
+        {"snapshot_date": date(2026, 7, 4), "nm_id": 101, "stock_qty": 12},
+    ])
+    one_c_df = pd.DataFrame([
+        {"snapshot_date": date(2026, 7, 4), "nm_id": 101, "one_c_stock_qty": -5},
+    ])
+    sales_df = pd.DataFrame([
+        {"nm_id": 101, "date": date(2026, 7, 2), "order_count": 2},
+    ])
+    settings_qg_df = pd.DataFrame([
+        {"nm_id": 101, "query_group": "women_underwear", "supplier_article": "art-101", "title": "Товар 101"},
+    ])
+
+    df_all = prepare_stock_speed_charts_dataframe(
+        snapshot_df=snapshot_df,
+        one_c_df=one_c_df,
+        sales_df=sales_df,
+        settings_qg_df=settings_qg_df,
+        min_date=date(2026, 7, 4),
+        max_date=date(2026, 7, 4),
+    )
+
+    row = df_all[(df_all["nm_id"] == 101) & (df_all["date"] == date(2026, 7, 4))].iloc[0]
+    assert row["total_stock"] == 12
+
+
+def test_build_stock_all_product_level_clips_negative_one_c_stock_to_zero() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 101,
+                "chrt_id": 1,
+                "warehouse_id": 1,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 8,
+                "in_way_to_client": 1,
+                "in_way_from_client": 0,
+            }
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [{"nm_id": 101, "supplier_article": "art-101", "title": "Товар 101", "query_group": "women_underwear"}]
+    )
+    one_c_df = pd.DataFrame(
+        [{"stock_date": "2026-07-04", "nm_id": 101, "ivan_stock_qty": -3}]
+    )
+
+    result = build_stock_all_product_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-07-04").date(),
+        one_c_stock_df=one_c_df,
+    )
+
+    row = result.iloc[0]
+    assert row["one_c_stock_qty"] == 0
+    assert row["wb_vs_one_c_diff"] == 8
+
+
+def test_build_stock_all_band_level_clips_negative_one_c_stock_to_zero() -> None:
+    product_df = pd.DataFrame(
+        [
+            {
+                "query_group": "women_underwear",
+                "band_name": "Трусы женские",
+                "nm_id": 101,
+                "wb_stock_qty": 10,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 10,
+                "one_c_stock_qty": -4,
+            }
+        ]
+    )
+
+    result = build_stock_all_band_level(product_df)
+
+    row = result.iloc[0]
+    assert row["one_c_stock_qty"] == 0
+    assert row["wb_vs_one_c_diff"] == 10
+
+
+def test_build_stock_all_size_level_clips_negative_one_c_stock_to_zero() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 101,
+                "chrt_id": 1,
+                "warehouse_id": 1,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 5,
+            }
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [{"nm_id": 101, "supplier_article": "art-101", "title": "Товар 101", "query_group": "women_underwear"}]
+    )
+    one_c_size_df = pd.DataFrame(
+        [{"stock_date": "2026-07-04", "nm_id": 101, "size_name": "M", "barcode": "111", "quantity": -2}]
+    )
+    product_size_df = pd.DataFrame(
+        [{"nm_id": 101, "chrt_id": 1, "barcode": "111", "size_name": "M", "tech_size": "42-44"}]
+    )
+
+    result = build_stock_all_size_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-07-04").date(),
+        one_c_size_df=one_c_size_df,
+        product_size_df=product_size_df,
+    )
+
+    row = result.iloc[0]
+    assert row["one_c_size_stock_qty"] == 0
+    assert row["wb_vs_one_c_size_diff"] == 5
 
 
 def test_render_charts_tab_contains_new_tab() -> None:
