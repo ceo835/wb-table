@@ -4,7 +4,7 @@ import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Mapping, Sequence, Optional
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 from sqlalchemy.orm import Session
 from src.config.settings import settings
 from src.clients.google_sheets_client import GoogleSheetsClient
@@ -54,6 +54,20 @@ def parse_quantity(val: Any) -> Optional[Decimal]:
         return Decimal(val_str)
     except Exception:
         return None
+
+
+def normalize_ivan_stock_quantity(val: Any) -> Decimal:
+    parsed = val if isinstance(val, Decimal) else parse_quantity(val)
+    if parsed is None:
+        return Decimal("0")
+    return parsed if parsed >= 0 else Decimal("0")
+
+
+def resolve_latest_ivan_stock_date(session: Session, target_date: Optional[date]) -> Optional[date]:
+    stmt = select(func.max(FactIvanStockSheetDay.stock_date))
+    if target_date is not None:
+        stmt = stmt.where(FactIvanStockSheetDay.stock_date <= target_date)
+    return session.execute(stmt).scalar()
 
 
 def load_ivan_stock_sheet(
@@ -147,9 +161,7 @@ def load_ivan_stock_sheet(
             skipped_no_nm_id += 1
             continue
             
-        qty = parse_quantity(col3)
-        if qty is None:
-            qty = Decimal("0")
+        qty = normalize_ivan_stock_quantity(col3)
             
         quantity_sum_total += qty
         
@@ -200,11 +212,9 @@ def load_ivan_stock_sheet(
 
 def load_ivan_stock_size_level(stock_date: Optional[date] = None) -> list[dict[str, Any]]:
     with session_scope() as session:
+        stock_date = resolve_latest_ivan_stock_date(session, stock_date)
         if stock_date is None:
-            latest_stmt = select(func.max(FactIvanStockSheetDay.stock_date))
-            stock_date = session.execute(latest_stmt).scalar()
-            if stock_date is None:
-                return []
+            return []
                 
         stmt = select(
             FactIvanStockSheetDay.stock_date,
@@ -217,32 +227,38 @@ def load_ivan_stock_size_level(stock_date: Optional[date] = None) -> list[dict[s
         ).where(FactIvanStockSheetDay.stock_date == stock_date)
         
         results = session.execute(stmt).all()
-        return [
-            {
-                "stock_date": r.stock_date,
-                "nm_id": r.nm_id,
-                "size_name": r.size_name,
-                "barcode": r.barcode,
-                "color_name": r.color_name,
-                "quantity": int(r.quantity) if r.quantity % 1 == 0 else float(r.quantity),
-                "nomenclature_raw": r.nomenclature_raw,
-            }
-            for r in results
-        ]
+        rows: list[dict[str, Any]] = []
+        for r in results:
+            normalized_quantity = normalize_ivan_stock_quantity(r.quantity)
+            rows.append(
+                {
+                    "stock_date": r.stock_date,
+                    "nm_id": r.nm_id,
+                    "size_name": r.size_name,
+                    "barcode": r.barcode,
+                    "color_name": r.color_name,
+                    "quantity": int(normalized_quantity) if normalized_quantity % 1 == 0 else float(normalized_quantity),
+                    "nomenclature_raw": r.nomenclature_raw,
+                }
+            )
+        return rows
 
 
 def load_ivan_stock_product_level(stock_date: Optional[date] = None) -> list[dict[str, Any]]:
     with session_scope() as session:
+        stock_date = resolve_latest_ivan_stock_date(session, stock_date)
         if stock_date is None:
-            latest_stmt = select(func.max(FactIvanStockSheetDay.stock_date))
-            stock_date = session.execute(latest_stmt).scalar()
-            if stock_date is None:
-                return []
+            return []
                 
         stmt = select(
             FactIvanStockSheetDay.stock_date,
             FactIvanStockSheetDay.nm_id,
-            func.sum(FactIvanStockSheetDay.quantity).label("ivan_stock_qty"),
+            func.sum(
+                case(
+                    (FactIvanStockSheetDay.quantity < 0, 0),
+                    else_=FactIvanStockSheetDay.quantity,
+                )
+            ).label("ivan_stock_qty"),
             func.count(func.distinct(FactIvanStockSheetDay.size_name)).label("sizes_count"),
             func.count(func.distinct(FactIvanStockSheetDay.barcode)).label("barcodes_count"),
         ).where(FactIvanStockSheetDay.stock_date == stock_date).group_by(
@@ -251,13 +267,16 @@ def load_ivan_stock_product_level(stock_date: Optional[date] = None) -> list[dic
         )
         
         results = session.execute(stmt).all()
-        return [
-            {
-                "stock_date": r.stock_date,
-                "nm_id": r.nm_id,
-                "ivan_stock_qty": int(r.ivan_stock_qty) if r.ivan_stock_qty % 1 == 0 else float(r.ivan_stock_qty),
-                "sizes_count": r.sizes_count,
-                "barcodes_count": r.barcodes_count,
-            }
-            for r in results
-        ]
+        rows: list[dict[str, Any]] = []
+        for r in results:
+            normalized_quantity = normalize_ivan_stock_quantity(r.ivan_stock_qty)
+            rows.append(
+                {
+                    "stock_date": r.stock_date,
+                    "nm_id": r.nm_id,
+                    "ivan_stock_qty": int(normalized_quantity) if normalized_quantity % 1 == 0 else float(normalized_quantity),
+                    "sizes_count": r.sizes_count,
+                    "barcodes_count": r.barcodes_count,
+                }
+            )
+        return rows

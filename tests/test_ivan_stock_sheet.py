@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from src.db.ivan_stock_sheet_loader import (
     parse_row_nomenclature,
     parse_quantity,
+    normalize_ivan_stock_quantity,
     load_ivan_stock_sheet,
     load_ivan_stock_size_level,
     load_ivan_stock_product_level,
@@ -22,6 +23,13 @@ def test_parse_quantity() -> None:
     assert parse_quantity("0") == Decimal("0")
     assert parse_quantity(None) is None
     assert parse_quantity("") is None
+
+
+def test_normalize_ivan_stock_quantity_clips_negative_to_zero() -> None:
+    assert normalize_ivan_stock_quantity(Decimal("-20")) == Decimal("0")
+    assert normalize_ivan_stock_quantity(Decimal("0")) == Decimal("0")
+    assert normalize_ivan_stock_quantity(Decimal("15")) == Decimal("15")
+    assert normalize_ivan_stock_quantity(None) == Decimal("0")
 
 
 def test_parse_row_nomenclature() -> None:
@@ -88,7 +96,7 @@ def test_load_ivan_stock_sheet_filters_and_parses(mock_sheets_client_cls) -> Non
     assert result["rows_with_nm_id"] == 2
     assert result["skipped_no_nm_id"] == 1
     assert result["distinct_nm_id"] == 2
-    assert result["quantity_sum_total"] == 755  # 775 - 20 = 755
+    assert result["quantity_sum_total"] == 775  # 775 + clipped(-20 -> 0)
     assert result["rows_inserted"] == 0
 
 
@@ -117,6 +125,34 @@ def test_load_ivan_stock_size_level_queries(mock_session_scope) -> None:
 
 
 @patch("src.db.ivan_stock_sheet_loader.session_scope")
+def test_load_ivan_stock_size_level_uses_latest_snapshot_not_after_selected_date(mock_session_scope) -> None:
+    mock_session = MagicMock()
+    mock_session_scope.return_value.__enter__.return_value = mock_session
+
+    max_date_result = MagicMock()
+    max_date_result.scalar.return_value = date(2026, 7, 4)
+
+    data_result = MagicMock()
+    data_row = MagicMock()
+    data_row.stock_date = date(2026, 7, 4)
+    data_row.nm_id = 111
+    data_row.size_name = "M"
+    data_row.barcode = "123"
+    data_row.color_name = None
+    data_row.quantity = Decimal("-3")
+    data_row.nomenclature_raw = "row"
+    data_result.all.return_value = [data_row]
+
+    mock_session.execute.side_effect = [max_date_result, data_result]
+
+    res = load_ivan_stock_size_level(date(2026, 7, 5))
+
+    assert len(res) == 1
+    assert res[0]["stock_date"] == date(2026, 7, 4)
+    assert res[0]["quantity"] == 0
+
+
+@patch("src.db.ivan_stock_sheet_loader.session_scope")
 def test_load_ivan_stock_product_level_aggregates(mock_session_scope) -> None:
     mock_session = MagicMock()
     mock_session_scope.return_value.__enter__.return_value = mock_session
@@ -136,3 +172,29 @@ def test_load_ivan_stock_product_level_aggregates(mock_session_scope) -> None:
     assert res[0]["nm_id"] == 134111623
     assert res[0]["ivan_stock_qty"] == 1000
     assert res[0]["sizes_count"] == 2
+
+
+@patch("src.db.ivan_stock_sheet_loader.session_scope")
+def test_load_ivan_stock_product_level_uses_latest_snapshot_not_after_selected_date(mock_session_scope) -> None:
+    mock_session = MagicMock()
+    mock_session_scope.return_value.__enter__.return_value = mock_session
+
+    max_date_result = MagicMock()
+    max_date_result.scalar.return_value = date(2026, 7, 4)
+
+    data_result = MagicMock()
+    data_row = MagicMock()
+    data_row.stock_date = date(2026, 7, 4)
+    data_row.nm_id = 222
+    data_row.ivan_stock_qty = Decimal("-7")
+    data_row.sizes_count = 1
+    data_row.barcodes_count = 1
+    data_result.all.return_value = [data_row]
+
+    mock_session.execute.side_effect = [max_date_result, data_result]
+
+    res = load_ivan_stock_product_level(date(2026, 7, 5))
+
+    assert len(res) == 1
+    assert res[0]["stock_date"] == date(2026, 7, 4)
+    assert res[0]["ivan_stock_qty"] == 0
