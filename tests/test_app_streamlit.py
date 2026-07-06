@@ -5191,6 +5191,69 @@ def test_build_stock_all_product_level_clips_negative_one_c_stock_to_zero() -> N
     assert row["wb_vs_one_c_diff"] == 8
 
 
+def test_build_stock_all_product_level_uses_tracked_allowlist_as_display_base() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 101,
+                "chrt_id": 1,
+                "warehouse_id": 1,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 8,
+                "in_way_to_client": 1,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 303,
+                "chrt_id": 3,
+                "warehouse_id": 1,
+                "warehouse_name": "Владимир WB",
+                "stock_qty": 5,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "supplier_article": "art-101", "title": "Tracked WB", "query_group": "women_underwear"},
+            {"nm_id": 202, "supplier_article": "art-202", "title": "Tracked 1C only", "query_group": "kids_underwear"},
+            {"nm_id": 303, "supplier_article": "art-303", "title": "Untracked WB", "query_group": "women_tshirts"},
+        ]
+    )
+    tracked_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "is_tracked": True, "lifecycle_status": "active", "tracked_label": "tracked-101"},
+            {"nm_id": 202, "is_tracked": True, "lifecycle_status": "sellout", "tracked_label": "tracked-202"},
+            {"nm_id": 303, "is_tracked": False, "lifecycle_status": "active", "tracked_label": "untracked-303"},
+        ]
+    )
+    one_c_df = pd.DataFrame(
+        [
+            {"stock_date": "2026-07-04", "nm_id": 202, "ivan_stock_qty": 6},
+            {"stock_date": "2026-07-04", "nm_id": 303, "ivan_stock_qty": 9},
+        ]
+    )
+
+    result = build_stock_all_product_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-07-04").date(),
+        one_c_stock_df=one_c_df,
+        tracked_df=tracked_df,
+    )
+
+    assert result["nm_id"].tolist() == [202, 101]
+    row_202 = result[result["nm_id"] == 202].iloc[0]
+    row_101 = result[result["nm_id"] == 101].iloc[0]
+    assert pd.isna(row_202["wb_stock_qty"])
+    assert row_202["one_c_stock_qty"] == 6
+    assert row_101["wb_stock_qty"] == 8
+    assert pd.isna(row_101["one_c_stock_qty"])
+
+
 def test_build_stock_all_band_level_clips_negative_one_c_stock_to_zero() -> None:
     product_df = pd.DataFrame(
         [

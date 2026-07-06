@@ -3382,6 +3382,7 @@ def build_stock_all_product_level(
     settings_df: "pd.DataFrame",
     snapshot_date: "date",
     one_c_stock_df: "pd.DataFrame | None" = None,
+    tracked_df: "pd.DataFrame | None" = None,
 ) -> "pd.DataFrame":
     """
     Агрегирует fact_stock_warehouse_snapshot до уровня nm_id за выбранную дату.
@@ -3404,8 +3405,8 @@ def build_stock_all_product_level(
     if settings_df.empty and snapshot_df.empty:
         return pd.DataFrame(columns=empty_cols)
 
-    # 1. Сбор базового фрейма из settings_df
-    base_df = pd.DataFrame(columns=["nm_id", "query_group", "supplier_article", "title"])
+    # 1. Сбор базового allowlist только из tracked_products, settings_df — лишь справочник метаданных
+    metadata_df = pd.DataFrame(columns=["nm_id", "query_group", "supplier_article", "title"])
     if not settings_df.empty:
         s = settings_df.copy()
         s["nm_id"] = pd.to_numeric(s["nm_id"], errors="coerce")
@@ -3415,7 +3416,31 @@ def build_stock_all_product_level(
         for col in ("query_group", "supplier_article", "title"):
             if col in s.columns:
                 keep.append(col)
-        base_df = s[keep].drop_duplicates(subset=["nm_id"]).copy()
+        metadata_df = s[keep].drop_duplicates(subset=["nm_id"]).copy()
+
+    base_df = pd.DataFrame(columns=["nm_id", "query_group", "supplier_article", "title", "tracked_label"])
+    if tracked_df is not None and not tracked_df.empty:
+        tracked_base = tracked_df.copy()
+        tracked_base["nm_id"] = pd.to_numeric(tracked_base.get("nm_id"), errors="coerce")
+        tracked_base = tracked_base.dropna(subset=["nm_id"]).copy()
+        tracked_base["nm_id"] = tracked_base["nm_id"].astype(int)
+        if "is_tracked" in tracked_base.columns:
+            tracked_base["is_tracked"] = tracked_base["is_tracked"].fillna(False).astype(bool)
+            tracked_base = tracked_base[tracked_base["is_tracked"]].copy()
+        if "tracked_label" not in tracked_base.columns:
+            tracked_base["tracked_label"] = pd.NA
+        tracked_base = tracked_base[["nm_id", "tracked_label"]].drop_duplicates(subset=["nm_id"]).copy()
+        if not tracked_base.empty:
+            if not metadata_df.empty:
+                base_df = tracked_base.merge(metadata_df, on="nm_id", how="left")
+            else:
+                base_df = tracked_base.copy()
+                base_df["query_group"] = pd.NA
+                base_df["supplier_article"] = pd.NA
+                base_df["title"] = pd.NA
+    elif not metadata_df.empty:
+        base_df = metadata_df.copy()
+        base_df["tracked_label"] = pd.NA
 
     # 2. Агрегация остатков WB
     if not snapshot_df.empty:
@@ -3463,6 +3488,7 @@ def build_stock_all_product_level(
         agg["query_group"] = pd.NA
         agg["supplier_article"] = pd.NA
         agg["title"] = pd.NA
+        agg["tracked_label"] = pd.NA
 
     # 4. Прикрепление остатков 1С
     agg["one_c_stock_qty"] = pd.NA
@@ -3486,6 +3512,7 @@ def build_stock_all_product_level(
     agg = agg.rename(columns={"supplier_article": "vendor_code"})
     agg["band"] = agg["query_group"]
     agg["band_name"] = agg["query_group"].map(build_stock_all_band_name)
+    agg["title"] = agg["title"].where(agg["title"].notna(), agg.get("tracked_label"))
     agg["title"] = agg["title"].where(agg["title"].notna(), agg["vendor_code"])
     agg["title"] = agg["title"].where(agg["title"].notna(), agg["nm_id"].astype(str))
     wb_stock_series = pd.to_numeric(agg["wb_stock_qty"], errors="coerce")
@@ -4227,6 +4254,7 @@ def render_stock_all_tab(
         settings_df,
         selected_snapshot_date,
         one_c_stock_df=one_c_product_df,
+        tracked_df=load_tracked_products(),
     )
 
     if product_df.empty:
