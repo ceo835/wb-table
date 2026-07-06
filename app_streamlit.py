@@ -2397,6 +2397,7 @@ def prepare_stock_warehouse_snapshot_dataframe(df: pd.DataFrame) -> pd.DataFrame
     expected_columns = [
         "snapshot_date",
         "nm_id",
+        "chrt_id",
         "warehouse_id",
         "warehouse_name",
         "region_name",
@@ -2414,16 +2415,21 @@ def prepare_stock_warehouse_snapshot_dataframe(df: pd.DataFrame) -> pd.DataFrame
 
     prepared["snapshot_date"] = pd.to_datetime(prepared["snapshot_date"], errors="coerce").dt.date
     prepared["nm_id"] = pd.to_numeric(prepared["nm_id"], errors="coerce")
+    prepared["chrt_id"] = pd.to_numeric(prepared["chrt_id"], errors="coerce")
     prepared["warehouse_id"] = pd.to_numeric(prepared["warehouse_id"], errors="coerce")
     for column in ("stock_qty", "in_way_to_client", "in_way_from_client"):
         prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
     prepared["warehouse_name"] = prepared["warehouse_name"].fillna("").astype(str).str.strip()
     prepared = prepared.dropna(subset=["snapshot_date", "nm_id"]).copy()
     prepared["nm_id"] = prepared["nm_id"].astype(int)
+    if prepared["chrt_id"].notna().any():
+        prepared.loc[prepared["chrt_id"].notna(), "chrt_id"] = prepared.loc[
+            prepared["chrt_id"].notna(), "chrt_id"
+        ].astype(int)
 
     aggregated = (
         prepared.groupby(
-            ["snapshot_date", "nm_id", "warehouse_id", "warehouse_name", "region_name"],
+            ["snapshot_date", "nm_id", "chrt_id", "warehouse_id", "warehouse_name", "region_name"],
             dropna=False,
             as_index=False,
         )[["stock_qty", "in_way_to_client", "in_way_from_client"]]
@@ -4308,6 +4314,7 @@ def render_stock_all_tab(
         if null_col in display_df.columns and null_col in display_df_raw.columns:
             display_df[null_col] = display_df_raw[null_col].where(display_df_raw[null_col].notna(), "нет данных")
 
+    display_df.attrs = {}
     st.dataframe(
         sanitize_dataframe_for_streamlit_display(display_df, numeric_columns=numeric_cols),
         width="stretch",

@@ -68,6 +68,7 @@ from app_streamlit import (
     merge_ivan_manual_ads_into_chart_scope,
     prepare_dataframe_for_streamlit_display,
     prepare_stock_warehouse_history_snapshot_dataframe,
+    prepare_stock_warehouse_snapshot_dataframe,
     prepare_stock_warehouse_table_for_display,
     resolve_data_source,
     resolve_streamlit_display_min_date,
@@ -4732,6 +4733,63 @@ def test_build_stock_all_size_level_falls_back_to_size_name_and_keeps_unmatched_
     assert wb_only_row["match_source"] == "wb_only"
     assert wb_only_row["wb_size_stock_qty"] == 3
     assert pd.isna(wb_only_row["one_c_size_stock_qty"])
+
+
+def test_prepare_stock_warehouse_snapshot_dataframe_preserves_chrt_id_for_size_mode() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-07-05",
+                "nm_id": 197330807,
+                "chrt_id": 101,
+                "warehouse_id": 1,
+                "warehouse_name": "Коледино",
+                "region_name": "МО",
+                "stock_qty": 4,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+            {
+                "snapshot_date": "2026-07-05",
+                "nm_id": 197330807,
+                "chrt_id": 102,
+                "warehouse_id": 1,
+                "warehouse_name": "Коледино",
+                "region_name": "МО",
+                "stock_qty": 5,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            },
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 197330807,
+                "supplier_article": "BlackWOM5",
+                "title": "Трусы набор",
+                "query_group": "women_underwear",
+            }
+        ]
+    )
+    product_size_df = pd.DataFrame(
+        [
+            {"nm_id": 197330807, "chrt_id": 101, "barcode": "111", "size_name": "M", "tech_size": "42-44"},
+            {"nm_id": 197330807, "chrt_id": 102, "barcode": "222", "size_name": "L", "tech_size": "46-48"},
+        ]
+    )
+
+    prepared_snapshot = prepare_stock_warehouse_snapshot_dataframe(snapshot_df)
+    result = build_stock_all_size_level(
+        prepared_snapshot,
+        settings_df,
+        pd.Timestamp("2026-07-05").date(),
+        one_c_size_df=pd.DataFrame(columns=["stock_date", "nm_id", "size_name", "barcode", "quantity"]),
+        product_size_df=product_size_df,
+    )
+
+    assert sorted(result["barcode"].dropna().tolist()) == ["111", "222"]
+    assert sorted(pd.to_numeric(result["wb_size_stock_qty"], errors="coerce").dropna().astype(int).tolist()) == [4, 5]
 
 
 def test_build_stock_all_size_display_dataframe_adds_sales_speed_and_forecasts() -> None:
