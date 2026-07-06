@@ -176,6 +176,7 @@ def test_settings_products_contains_discovery_fields():
         "report_mode",
         "group_name",
         "query_group",
+        "analytics_active",
         "item_type",
         "source_list",
         "first_seen_at",

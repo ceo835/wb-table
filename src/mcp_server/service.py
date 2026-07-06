@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from src.db.models import DimProduct, FactWbSitePriceAlert, FactWbSitePriceSnapshot, MartTotalReport, SettingsProducts
 from src.mcp_server.schemas import (
+    ActiveProductsItemResponse,
+    ActiveProductsRequest,
+    ActiveProductsResponse,
     DashboardSummaryRequest,
     DashboardSummaryResponse,
     DataQualityResponse,
@@ -30,6 +33,7 @@ from src.mcp_server.schemas import (
     ProductSummaryResponse,
 )
 from src.mcp_server.settings import McpServiceSettings
+from src.tracked_products import load_tracked_products
 
 
 ACTIVE_ALERT_STATUS = "PRICE_CHANGED_50"
@@ -40,6 +44,10 @@ SETTINGS_PRODUCTS_TABLE_NAME = "settings_products"
 DIM_PRODUCT_TABLE_NAME = "dim_product"
 PRICE_SNAPSHOT_TABLE_NAME = "fact_wb_site_price_snapshot"
 PRICE_ALERT_TABLE_NAME = "fact_wb_site_price_alert"
+CORE_SCOPE = "core"
+ALL_TRACKED_SCOPE = "all_tracked"
+PRICE_MONITOR_SCOPE = "price_monitor"
+SUPPORTED_PRODUCT_SCOPES = {CORE_SCOPE, ALL_TRACKED_SCOPE, PRICE_MONITOR_SCOPE}
 
 MART_REQUIRED_ALIASES: dict[str, tuple[str, ...]] = {
     "report_date": ("report_date", "date"),
@@ -97,6 +105,7 @@ class McpRepository(Protocol):
     def get_dashboard_summary(self, payload: DashboardSummaryRequest) -> DashboardSummaryResponse: ...
     def get_product_metrics(self, payload: ProductMetricsRequest) -> ProductMetricsResponse: ...
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse: ...
+    def get_active_products(self, payload: ActiveProductsRequest) -> ActiveProductsResponse: ...
 
 
 def _safe_divide(numerator: Decimal | None, denominator: Decimal | None, multiplier: Decimal | None = None) -> Decimal | None:
@@ -152,6 +161,22 @@ def validate_date_window(
         raise ValueError("date_to must be greater than or equal to date_from.")
     if (end - start).days + 1 > max_days:
         raise ValueError(f"Date range must not exceed {max_days} days.")
+
+
+def normalize_product_scope(
+    scope: str | None,
+    *,
+    only_tracked: bool = True,
+    scope_was_explicit: bool = True,
+) -> str | None:
+    normalized = (scope or "").strip().lower() or None
+    if normalized is not None and normalized not in SUPPORTED_PRODUCT_SCOPES:
+        raise ValueError(
+            "scope must be one of: core, all_tracked, price_monitor."
+        )
+    if not scope_was_explicit and not only_tracked:
+        return None
+    return normalized or CORE_SCOPE
 
 
 def resolve_column_aliases(
@@ -629,6 +654,63 @@ class PostgresMcpRepository:
             ),
         )
 
+    def _load_price_monitor_metadata(self) -> dict[int, dict[str, Any]]:
+        tracked_df = load_tracked_products()
+        if tracked_df.empty or "nm_id" not in tracked_df.columns:
+            return {}
+        if "is_tracked" in tracked_df.columns:
+            tracked_df = tracked_df.loc[tracked_df["is_tracked"]].copy()
+        result: dict[int, dict[str, Any]] = {}
+        for _, row in tracked_df.iterrows():
+            try:
+                nm_id = int(row["nm_id"])
+            except (TypeError, ValueError):
+                continue
+            result[nm_id] = {
+                "tracked_label": row.get("tracked_label") or row.get("item_label") or None,
+                "lifecycle_status": row.get("lifecycle_status") or None,
+                "source": row.get("source") or None,
+            }
+        return result
+
+    def _load_scope_nm_ids(
+        self,
+        session: Session,
+        scope_name: str | None,
+    ) -> tuple[list[int] | None, bool]:
+        if scope_name is None:
+            return None, False
+
+        price_monitor_metadata = self._load_price_monitor_metadata()
+        price_monitor_nm_ids = set(price_monitor_metadata.keys())
+
+        if scope_name == PRICE_MONITOR_SCOPE:
+            return sorted(price_monitor_nm_ids), False
+
+        settings_active_nm_ids = set(
+            int(nm_id)
+            for nm_id in session.execute(
+                select(SettingsProducts.nm_id).where(SettingsProducts.active.is_(True))
+            ).scalars()
+            if nm_id is not None
+        )
+        if scope_name == ALL_TRACKED_SCOPE:
+            return sorted(settings_active_nm_ids | price_monitor_nm_ids), False
+
+        analytics_active_available = "analytics_active" in self._get_table_columns(session, SETTINGS_PRODUCTS_TABLE_NAME)
+        if analytics_active_available:
+            analytics_active_nm_ids = set(
+                int(nm_id)
+                for nm_id in session.execute(
+                    select(SettingsProducts.nm_id).where(SettingsProducts.analytics_active.is_(True))
+                ).scalars()
+                if nm_id is not None
+            )
+            if analytics_active_nm_ids:
+                return sorted(analytics_active_nm_ids), False
+
+        return sorted(price_monitor_nm_ids), True
+
     def get_db_health(self) -> DbHealthResponse:
         with self.readonly_session() as session:
             stmt = select(
@@ -668,7 +750,17 @@ class PostgresMcpRepository:
 
             join_sql = ""
             notes: list[str] = []
-            if payload.only_tracked:
+            scope_name = normalize_product_scope(
+                payload.scope,
+                only_tracked=payload.only_tracked,
+                scope_was_explicit="scope" in payload.model_fields_set,
+            )
+            scope_nm_ids, scope_used_price_monitor_fallback = self._load_scope_nm_ids(session, scope_name)
+            if scope_name is not None:
+                notes.append(f"Product scope applied: {scope_name}.")
+                if scope_used_price_monitor_fallback and scope_name == CORE_SCOPE:
+                    notes.append("Core scope fallback used tracked price-monitor list because analytics_active is not seeded yet.")
+            elif payload.only_tracked:
                 settings_columns = self._get_table_columns(session, SETTINGS_PRODUCTS_TABLE_NAME)
                 if {"nm_id", "active"}.issubset(settings_columns):
                     join_sql = (
@@ -686,6 +778,30 @@ class PostgresMcpRepository:
                 else:
                     notes.append("Tracked filter not applied: settings_products schema is incomplete.")
 
+            scope_where_sql = ""
+            params: dict[str, Any] = {"date_from": payload.date_from, "date_to": payload.date_to}
+            if scope_nm_ids is not None:
+                if not scope_nm_ids:
+                    return build_dashboard_summary_response(
+                        payload=payload,
+                        aggregate_row={
+                            "rows": 0,
+                            "nm_count": 0,
+                            "card_clicks": None,
+                            "cart_count": None,
+                            "order_count": None,
+                            "order_sum": None,
+                            "ad_spend": None,
+                            "ad_atbs": None,
+                            "ad_orders": None,
+                        },
+                        partial_rows=0,
+                        empty_rows=0,
+                        notes=notes,
+                    )
+                scope_where_sql = f" and m.{_quote_ident(nm_id_column)} = any(:scope_nm_ids)"
+                params["scope_nm_ids"] = scope_nm_ids
+
             aggregate_sql = f"""
                 select
                     count(*) as rows,
@@ -701,10 +817,11 @@ class PostgresMcpRepository:
                 {join_sql}
                 where m.{_quote_ident(date_column)} >= :date_from
                   and m.{_quote_ident(date_column)} <= :date_to
+                  {scope_where_sql}
             """
             aggregate_row = session.execute(
                 text(aggregate_sql),
-                {"date_from": payload.date_from, "date_to": payload.date_to},
+                params,
             ).mappings().one()
 
             data_status_column = resolved.get("data_status")
@@ -717,10 +834,11 @@ class PostgresMcpRepository:
                     {join_sql}
                     where m.{_quote_ident(date_column)} >= :date_from
                       and m.{_quote_ident(date_column)} <= :date_to
+                      {scope_where_sql}
                 """
                 status_row = session.execute(
                     text(status_sql),
-                    {"date_from": payload.date_from, "date_to": payload.date_to},
+                    params,
                 ).mappings().one()
             else:
                 status_row = {"partial_rows": 0, "empty_rows": 0}
@@ -739,6 +857,11 @@ class PostgresMcpRepository:
     def get_product_metrics(self, payload: ProductMetricsRequest) -> ProductMetricsResponse:
         validate_date_window(payload.date_from, payload.date_to, max_days=self.settings.max_date_range_days)
         with self.readonly_session() as session:
+            scope_name = normalize_product_scope(payload.scope)
+            scope_nm_ids, _ = self._load_scope_nm_ids(session, scope_name)
+            if scope_nm_ids is not None and int(payload.nm_id) not in set(scope_nm_ids):
+                return build_product_metrics_response(payload, [], [])
+
             mart_resolved, _missing = self._resolve_table_aliases(session, MART_TABLE_NAME, MART_REQUIRED_ALIASES)
             date_column = mart_resolved.get("report_date")
             nm_id_column = mart_resolved.get("nm_id")
@@ -803,13 +926,103 @@ class PostgresMcpRepository:
         price_payload_rows = [dict(row) for row in price_rows]
         return build_product_metrics_response(payload, mart_payload_rows, price_payload_rows)
 
+    def get_active_products(self, payload: ActiveProductsRequest) -> ActiveProductsResponse:
+        scope_name = normalize_product_scope(payload.scope)
+        with self.readonly_session() as session:
+            scope_nm_ids, core_fallback_used = self._load_scope_nm_ids(session, scope_name)
+            if not scope_nm_ids:
+                return ActiveProductsResponse(scope=scope_name or CORE_SCOPE, rows=0, items=[])
+
+            settings_rows = (
+                session.execute(
+                    select(SettingsProducts)
+                    .where(SettingsProducts.nm_id.in_(scope_nm_ids))
+                    .order_by(SettingsProducts.nm_id.asc())
+                )
+                .scalars()
+                .all()
+            )
+            dim_rows = (
+                session.execute(
+                    select(DimProduct)
+                    .where(DimProduct.nm_id.in_(scope_nm_ids))
+                    .order_by(DimProduct.nm_id.asc())
+                )
+                .scalars()
+                .all()
+            )
+
+        settings_by_nm = {int(row.nm_id): row for row in settings_rows}
+        dim_by_nm = {int(row.nm_id): row for row in dim_rows}
+        price_monitor_metadata = self._load_price_monitor_metadata()
+
+        items: list[ActiveProductsItemResponse] = []
+        for nm_id in scope_nm_ids:
+            settings_row = settings_by_nm.get(int(nm_id))
+            dim_row = dim_by_nm.get(int(nm_id))
+            tracked_meta = price_monitor_metadata.get(int(nm_id), {})
+            analytics_active = bool(getattr(settings_row, "analytics_active", False)) if settings_row is not None else False
+            price_monitor_enabled = int(nm_id) in price_monitor_metadata
+            if analytics_active and price_monitor_enabled:
+                reason = "price_monitor_seed"
+            elif analytics_active:
+                reason = "analytics_active_flag"
+            elif core_fallback_used and scope_name == CORE_SCOPE and price_monitor_enabled:
+                reason = "price_monitor_seed_pending_backfill"
+            elif price_monitor_enabled:
+                reason = "price_monitor_list"
+            elif settings_row is not None and bool(settings_row.active):
+                reason = "settings_products_active"
+            else:
+                reason = None
+
+            items.append(
+                ActiveProductsItemResponse(
+                    nm_id=int(nm_id),
+                    supplier_article=(
+                        (settings_row.supplier_article if settings_row is not None else None)
+                        or (dim_row.supplier_article if dim_row is not None else None)
+                    ),
+                    title=(
+                        (settings_row.title if settings_row is not None else None)
+                        or (dim_row.title if dim_row is not None else None)
+                        or tracked_meta.get("tracked_label")
+                    ),
+                    brand=(
+                        (settings_row.brand if settings_row is not None else None)
+                        or (dim_row.brand if dim_row is not None else None)
+                    ),
+                    category=dim_row.category if dim_row is not None else None,
+                    subject=(
+                        (settings_row.subject if settings_row is not None else None)
+                        or (dim_row.subject if dim_row is not None else None)
+                    ),
+                    analytics_active=analytics_active,
+                    price_monitor_enabled=price_monitor_enabled,
+                    lifecycle_status=tracked_meta.get("lifecycle_status"),
+                    reason=reason,
+                )
+            )
+
+        return ActiveProductsResponse(scope=scope_name or CORE_SCOPE, rows=len(items), items=items)
+
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse:
         with self.readonly_session() as session:
+            scope_name = normalize_product_scope(payload.scope)
+            scope_nm_ids, _ = self._load_scope_nm_ids(session, scope_name)
             snapshot_resolved, _ = self._resolve_table_aliases(session, PRICE_SNAPSHOT_TABLE_NAME, PRICE_SNAPSHOT_ALIASES)
             snapshot_date_column = snapshot_resolved.get("snapshot_date")
             snapshot_nm_column = snapshot_resolved.get("nm_id")
             if snapshot_date_column is None or snapshot_nm_column is None:
                 return PriceMonitorResponse(snapshot_date=payload.snapshot_date, rows=0, alerts=0, items=[])
+
+            scope_where_sql = ""
+            current_params: dict[str, Any] = {"snapshot_date": payload.snapshot_date}
+            if scope_nm_ids is not None:
+                if not scope_nm_ids:
+                    return PriceMonitorResponse(snapshot_date=payload.snapshot_date, rows=0, alerts=0, items=[])
+                scope_where_sql = f" and p.{_quote_ident(snapshot_nm_column)} = any(:scope_nm_ids)"
+                current_params["scope_nm_ids"] = scope_nm_ids
 
             current_sql = f"""
                 select
@@ -822,9 +1035,10 @@ class PostgresMcpRepository:
                     {_select_expr(snapshot_resolved, "fetch_status", table_alias="p")}
                 from {PRICE_SNAPSHOT_TABLE_NAME} p
                 where p.{_quote_ident(snapshot_date_column)} = :snapshot_date
+                  {scope_where_sql}
                 order by p.{_quote_ident(snapshot_nm_column)} asc
             """
-            current_rows = session.execute(text(current_sql), {"snapshot_date": payload.snapshot_date}).mappings().all()
+            current_rows = session.execute(text(current_sql), current_params).mappings().all()
             if len(current_rows) > self.settings.max_rows:
                 raise ValueError(f"Result exceeds MCP_MAX_ROWS={self.settings.max_rows}.")
 

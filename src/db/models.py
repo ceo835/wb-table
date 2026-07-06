@@ -213,6 +213,7 @@ class SettingsProducts(Base, TimestampMixin):
     __tablename__ = "settings_products"
     __table_args__ = (
         Index("idx_settings_products_active", "active"),
+        Index("idx_settings_products_analytics_active", "analytics_active"),
         Index("idx_settings_products_group_name", "group_name"),
         Index("idx_settings_products_report_mode", "report_mode"),
     )
@@ -226,6 +227,7 @@ class SettingsProducts(Base, TimestampMixin):
     query_group: Mapped[str | None] = mapped_column(String(64), nullable=True)
     item_type: Mapped[str] = mapped_column(String(32), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    analytics_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_new: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     report_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="main")
     source_list: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1146,4 +1148,3 @@ class FactIvanStockSheetDay(Base, TimestampMixin):
     nomenclature_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_sheet: Mapped[str] = mapped_column(Text, nullable=False, default="Остатки", server_default="Остатки")
     raw_row: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
-

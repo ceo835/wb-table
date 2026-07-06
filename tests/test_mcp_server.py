@@ -7,6 +7,9 @@ from fastapi.testclient import TestClient
 
 from src.mcp_server.app import create_app
 from src.mcp_server.schemas import (
+    ActiveProductsItemResponse,
+    ActiveProductsRequest,
+    ActiveProductsResponse,
     DashboardSummaryRequest,
     DashboardSummaryResponse,
     DataQualityResponse,
@@ -30,6 +33,7 @@ from src.mcp_server.settings import McpServiceSettings
 class FakeRepository:
     def get_dashboard_summary(self, payload: DashboardSummaryRequest) -> DashboardSummaryResponse:
         assert payload.only_tracked is True
+        assert payload.scope == "core"
         return DashboardSummaryResponse(
             date_from=payload.date_from,
             date_to=payload.date_to,
@@ -51,6 +55,7 @@ class FakeRepository:
         )
 
     def get_product_metrics(self, payload: ProductMetricsRequest) -> ProductMetricsResponse:
+        assert payload.scope == "core"
         if payload.nm_id == 999:
             return ProductMetricsResponse(
                 found=False,
@@ -182,6 +187,7 @@ class FakeRepository:
         )
 
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse:
+        assert payload.scope == "core"
         items = [
             PriceMonitorItemResponse(
                 nm_id=91470767,
@@ -219,6 +225,39 @@ class FakeRepository:
             items=items,
         )
 
+    def get_active_products(self, payload: ActiveProductsRequest) -> ActiveProductsResponse:
+        assert payload.scope == "core"
+        return ActiveProductsResponse(
+            scope="core",
+            rows=2,
+            items=[
+                ActiveProductsItemResponse(
+                    nm_id=91470767,
+                    supplier_article="avokadogirl",
+                    title="Трусы детские",
+                    brand="BANDE",
+                    category=None,
+                    subject="Трусы",
+                    analytics_active=True,
+                    price_monitor_enabled=True,
+                    lifecycle_status="active",
+                    reason="price_monitor_seed",
+                ),
+                ActiveProductsItemResponse(
+                    nm_id=197330807,
+                    supplier_article="BlackWOM5",
+                    title="Набор 5 штук",
+                    brand="BANDE",
+                    category=None,
+                    subject="Трусы",
+                    analytics_active=True,
+                    price_monitor_enabled=True,
+                    lifecycle_status="active",
+                    reason="price_monitor_seed",
+                ),
+            ],
+        )
+
     def get_db_health(self) -> DbHealthResponse:
         return DbHealthResponse(
             ok=True,
@@ -240,6 +279,38 @@ class FakeRepository:
 class EmptyPriceMonitorRepository(FakeRepository):
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse:
         return PriceMonitorResponse(snapshot_date=payload.snapshot_date, rows=0, alerts=0, items=[])
+
+
+class ScopeCaptureRepository(FakeRepository):
+    def __init__(self) -> None:
+        self.dashboard_scope: str | None = None
+        self.active_products_scope: str | None = None
+
+    def get_dashboard_summary(self, payload: DashboardSummaryRequest) -> DashboardSummaryResponse:
+        self.dashboard_scope = payload.scope
+        return DashboardSummaryResponse(
+            date_from=payload.date_from,
+            date_to=payload.date_to,
+            rows=1,
+            nm_count=1,
+            card_clicks=None,
+            cart_count=None,
+            order_count=None,
+            order_sum=None,
+            ad_spend=None,
+            ad_atbs=None,
+            ad_orders=None,
+            cpo_total=None,
+            cpo_ad=None,
+            cost_per_cart_total=None,
+            cost_per_cart_ad=None,
+            drr=None,
+            data_quality=DataQualityResponse(partial_rows=0, empty_rows=0, notes=[]),
+        )
+
+    def get_active_products(self, payload: ActiveProductsRequest) -> ActiveProductsResponse:
+        self.active_products_scope = payload.scope
+        return ActiveProductsResponse(scope=payload.scope, rows=0, items=[])
 
 
 def build_test_client(*, mcp_public_mode: bool = False, repository=None) -> TestClient:
@@ -283,6 +354,18 @@ def test_tools_work_with_token() -> None:
     assert payload["rows"] == 12
     assert payload["nm_count"] == 3
     assert payload["data_quality"]["partial_rows"] == 2
+
+
+def test_dashboard_summary_scope_can_be_overridden_to_all_tracked() -> None:
+    repository = ScopeCaptureRepository()
+    client = build_test_client(repository=repository)
+    response = client.post(
+        "/tools/get_dashboard_summary",
+        headers={"Authorization": "Bearer test-token"},
+        json={"date_from": "2026-06-07", "date_to": "2026-06-18", "scope": "all_tracked"},
+    )
+    assert response.status_code == 200
+    assert repository.dashboard_scope == "all_tracked"
 
 
 def test_get_product_metrics_handles_unknown_nm_id() -> None:
@@ -388,6 +471,7 @@ def test_mcp_tools_list_exposes_registered_tools() -> None:
         "get_dashboard_summary",
         "get_product_metrics",
         "get_price_monitor",
+        "get_active_products",
     ]
     assert "PostgreSQL" in payload["result"]["tools"][0]["description"]
     assert "реальную схему таблицы mart_total_report" in payload["result"]["tools"][1]["description"]
@@ -543,6 +627,62 @@ def test_mcp_tools_call_price_monitor_returns_human_readable_content() -> None:
     assert "alerts: 1" in text
     assert "rows_tsv:" in text
     assert "91470767\tavokadogirl\t799\t799\t0\tsuccess\tfalse\thttps://www.wildberries.ru/catalog/91470767/detail.aspx" in text
+
+
+def test_get_active_products_default_scope_is_core() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/tools/get_active_products",
+        headers={"Authorization": "Bearer test-token"},
+        json={},
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["scope"] == "core"
+    assert payload["rows"] == 2
+    assert payload["items"][0]["analytics_active"] is True
+    assert payload["items"][0]["price_monitor_enabled"] is True
+
+
+def test_get_active_products_scope_can_be_overridden_to_price_monitor() -> None:
+    repository = ScopeCaptureRepository()
+    client = build_test_client(repository=repository)
+    response = client.post(
+        "/tools/get_active_products",
+        headers={"Authorization": "Bearer test-token"},
+        json={"scope": "price_monitor"},
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["scope"] == "price_monitor"
+    assert repository.active_products_scope == "price_monitor"
+
+
+def test_mcp_tools_call_get_active_products_returns_human_readable_content() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "get_active_products",
+                "arguments": {},
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["structuredContent"]["scope"] == "core"
+    assert payload["result"]["structuredContent"]["rows"] == 2
+    text = payload["result"]["content"][0]["text"]
+    assert "active_products:" in text
+    assert "scope: core" in text
+    assert "rows: 2" in text
+    assert "rows_tsv:" in text
+    assert "91470767\tavokadogirl\tТрусы детские\tBANDE\tТрусы\ttrue\ttrue\tactive\tprice_monitor_seed" in text
 
 
 def test_mcp_tools_call_price_monitor_returns_empty_response_without_500() -> None:

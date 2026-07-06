@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.mcp_server.schemas import (
+    ActiveProductsRequest,
+    ActiveProductsResponse,
     DashboardSummaryRequest,
     DashboardSummaryResponse,
     DbHealthResponse,
@@ -93,6 +95,14 @@ def build_mcp_tools_catalog() -> list[dict]:
                 "только проблемные строки."
             ),
             "inputSchema": _tool_schema(PriceMonitorRequest),
+        },
+        {
+            "name": "get_active_products",
+            "description": (
+                "Возвращает список активных товаров по scope core, all_tracked или price_monitor. "
+                "Использовать для проверки, какой список товаров применяется в аналитике по умолчанию."
+            ),
+            "inputSchema": _tool_schema(ActiveProductsRequest),
         },
     ]
 
@@ -379,6 +389,33 @@ def _format_price_monitor_content(tool_result: PriceMonitorResponse) -> str:
     return "\n".join(lines)
 
 
+def _format_active_products_content(tool_result: ActiveProductsResponse) -> str:
+    lines = [
+        "active_products:",
+        f"scope: {tool_result.scope}",
+        f"rows: {tool_result.rows}",
+        "rows_tsv:",
+        "nm_id\tsupplier_article\ttitle\tbrand\tsubject\tanalytics_active\tprice_monitor_enabled\tlifecycle_status\treason",
+    ]
+    for item in tool_result.items:
+        lines.append(
+            "\t".join(
+                [
+                    str(item.nm_id),
+                    item.supplier_article or "null",
+                    item.title or "null",
+                    item.brand or "null",
+                    item.subject or item.category or "null",
+                    _format_bool(item.analytics_active),
+                    _format_bool(item.price_monitor_enabled),
+                    item.lifecycle_status or "null",
+                    item.reason or "null",
+                ]
+            )
+        )
+    return "\n".join(lines)
+
+
 def _format_tool_content(tool_result) -> str:
     if isinstance(tool_result, DbHealthResponse):
         return _format_db_health_content(tool_result)
@@ -390,6 +427,8 @@ def _format_tool_content(tool_result) -> str:
         return _format_product_metrics_content(tool_result)
     if isinstance(tool_result, PriceMonitorResponse):
         return _format_price_monitor_content(tool_result)
+    if isinstance(tool_result, ActiveProductsResponse):
+        return _format_active_products_content(tool_result)
     return json.dumps(tool_result.model_dump(mode="json"), ensure_ascii=False)
 
 
@@ -423,6 +462,8 @@ def _execute_mcp_tool(name: str, arguments: dict, repository: McpRepository) -> 
         result = repository.get_product_metrics(ProductMetricsRequest.model_validate(arguments))
     elif name == "get_price_monitor":
         result = repository.get_price_monitor(PriceMonitorRequest.model_validate(arguments))
+    elif name == "get_active_products":
+        result = repository.get_active_products(ActiveProductsRequest.model_validate(arguments))
     else:
         raise KeyError(name)
     return _build_tool_result_payload(result)
@@ -632,6 +673,20 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except Exception:
             logger.exception("MCP tool failed: get_price_monitor")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
+
+    @app.post(
+        "/tools/get_active_products",
+        response_model=ActiveProductsResponse,
+        dependencies=[Depends(require_auth)],
+    )
+    async def get_active_products(payload: ActiveProductsRequest) -> ActiveProductsResponse:
+        try:
+            return resolved_repository.get_active_products(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except Exception:
+            logger.exception("MCP tool failed: get_active_products")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error.")
 
     return app

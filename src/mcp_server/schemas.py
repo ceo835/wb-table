@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,21 +18,31 @@ class ToolBaseRequest(ApiModel):
     model_config = ConfigDict(extra="forbid")
 
 
+ProductScope = Literal["core", "all_tracked", "price_monitor"]
+
+
 class DashboardSummaryRequest(ToolBaseRequest):
     date_from: date
     date_to: date
     only_tracked: bool = True
+    scope: ProductScope = "core"
 
 
 class ProductMetricsRequest(ToolBaseRequest):
     nm_id: int
     date_from: date
     date_to: date
+    scope: ProductScope = "core"
 
 
 class PriceMonitorRequest(ToolBaseRequest):
     snapshot_date: date
     alerts_only: bool = False
+    scope: ProductScope = "core"
+
+
+class ActiveProductsRequest(ToolBaseRequest):
+    scope: ProductScope = "core"
 
 
 class HealthResponse(ApiModel):
@@ -168,6 +178,25 @@ class PriceMonitorResponse(ApiModel):
     rows: int
     alerts: int
     items: list[PriceMonitorItemResponse]
+
+
+class ActiveProductsItemResponse(ApiModel):
+    nm_id: int
+    supplier_article: str | None = None
+    title: str | None = None
+    brand: str | None = None
+    category: str | None = None
+    subject: str | None = None
+    analytics_active: bool
+    price_monitor_enabled: bool
+    lifecycle_status: str | None = None
+    reason: str | None = None
+
+
+class ActiveProductsResponse(ApiModel):
+    scope: ProductScope
+    rows: int
+    items: list[ActiveProductsItemResponse]
 
 
 class ErrorResponse(ApiModel):
