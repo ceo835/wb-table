@@ -3572,15 +3572,23 @@ def build_stock_all_band_level(product_df: "pd.DataFrame") -> "pd.DataFrame":
 def _normalize_stock_size_barcode(value: object) -> str | None:
     if value is None or pd.isna(value):
         return None
-    text = str(value).strip().replace(" ", "")
+    text = str(value).strip().replace(" ", "").replace("\xa0", "")
+    if "." in text:
+        integer_part, dot, fractional_part = text.partition(".")
+        if dot and integer_part.isdigit() and fractional_part and set(fractional_part) == {"0"}:
+            text = integer_part
     return text or None
 
 
 def _normalize_stock_size_name(value: object) -> str | None:
     if value is None or pd.isna(value):
         return None
-    text = str(value).strip()
-    return text.lower() or None
+    text = str(value).strip().lower()
+    text = " ".join(text.split())
+    text = text.replace(" / ", "/").replace("/ ", "/").replace(" /", "/")
+    if text == "sm":
+        text = "s/m"
+    return text or None
 
 
 def build_stock_all_size_level(

@@ -4735,6 +4735,73 @@ def test_build_stock_all_size_level_falls_back_to_size_name_and_keeps_unmatched_
     assert pd.isna(wb_only_row["one_c_size_stock_qty"])
 
 
+def test_build_stock_all_size_level_keeps_one_c_only_rows_with_barcode_normalization() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-07-04",
+                "nm_id": 197330807,
+                "chrt_id": 101,
+                "warehouse_id": 1,
+                "warehouse_name": "Коледино",
+                "stock_qty": 7,
+            },
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 197330807,
+                "supplier_article": "BlackWOM5",
+                "title": "Трусы набор",
+                "query_group": "women_underwear",
+            }
+        ]
+    )
+    one_c_size_df = pd.DataFrame(
+        [
+            {
+                "stock_date": "2026-07-04",
+                "nm_id": 197330807,
+                "size_name": "SM",
+                "barcode": "111.0",
+                "quantity": 5,
+            },
+            {
+                "stock_date": "2026-07-04",
+                "nm_id": 197330807,
+                "size_name": "XL",
+                "barcode": "999.0",
+                "quantity": 3,
+            },
+        ]
+    )
+    product_size_df = pd.DataFrame(
+        [
+            {"nm_id": 197330807, "chrt_id": 101, "barcode": "111", "size_name": "S/M", "tech_size": "SM"},
+        ]
+    )
+
+    result = build_stock_all_size_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-07-04").date(),
+        one_c_size_df=one_c_size_df,
+        product_size_df=product_size_df,
+    )
+
+    matched_row = result.loc[result["barcode"] == "111"].iloc[0]
+    one_c_only_row = result.loc[result["barcode"] == "999"].iloc[0]
+
+    assert matched_row["match_source"] in {"barcode", "size_name"}
+    assert matched_row["wb_size_stock_qty"] == 7
+    assert matched_row["one_c_size_stock_qty"] == 5
+
+    assert one_c_only_row["match_source"] == "one_c_only"
+    assert pd.isna(one_c_only_row["wb_size_stock_qty"])
+    assert one_c_only_row["one_c_size_stock_qty"] == 3
+
+
 def test_prepare_stock_warehouse_snapshot_dataframe_preserves_chrt_id_for_size_mode() -> None:
     snapshot_df = pd.DataFrame(
         [
