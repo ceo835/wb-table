@@ -9075,16 +9075,7 @@ def render_entry_point_charts(
             article_filtered["nm_id"] = pd.to_numeric(article_filtered["nm_id"], errors="coerce")
             article_filtered = article_filtered[article_filtered["nm_id"].isin(selected_nm_ids)].copy()
         article_options, _ = get_product_options(article_filtered)
-        article_options = ["Топ артикулов по корзинам"] + article_options
         if preselected_product_label not in article_options:
-            selected_article_label = "Топ артикулов по корзинам"
-        selected_article_label = st.selectbox(
-            "Артикул для графиков",
-            options=article_options,
-            index=max(article_options.index(selected_article_label), 0) if selected_article_label in article_options else 0,
-            key="entry_point_chart_article_filter",
-        )
-        if selected_article_label == "Топ артикулов по корзинам":
             selected_article_label = None
 
     if analysis_level == ENTRY_POINT_LEVEL_BAND and detail_level == ENTRY_POINT_DETAIL_DETAILED:

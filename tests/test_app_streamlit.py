@@ -6182,6 +6182,76 @@ def test_render_entry_point_charts_renders_three_graphs_from_limited_daily_table
     app_streamlit.render_entry_point_charts(filtered, None)
 
     assert len(chart_calls) == 3
+
+
+def test_render_entry_point_charts_uses_global_product_filter_without_second_selectbox(monkeypatch) -> None:
+    filtered = pd.DataFrame(
+        [
+            {"report_date": pd.Timestamp("2026-07-01").date(), "nm_id": 101, "supplier_article": "art-101", "title": "Товар 101"},
+            {"report_date": pd.Timestamp("2026-07-02").date(), "nm_id": 101, "supplier_article": "art-101", "title": "Товар 101"},
+        ]
+    )
+    display_df = pd.DataFrame(
+        [
+            {
+                "Дата": pd.Timestamp("2026-07-01").date(),
+                "Артикул продавца": "art-101",
+                "Артикул WB": 101,
+                "Название": "Товар 101",
+                "Точка входа": "Поиск",
+                "Добавления в корзину": 10,
+                "Конверсия в корзину": 20.0,
+                "Конверсия в заказ": 10.0,
+            }
+        ]
+    )
+
+    class _FakeColumn:
+        def __init__(self, value: str) -> None:
+            self._value = value
+
+        def radio(self, *_args, **_kwargs):
+            return self._value
+
+    limiter_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(app_streamlit.st, "subheader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "altair_chart", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app_streamlit.st,
+        "columns",
+        lambda _count: [_FakeColumn("Артикулы"), _FakeColumn("Укрупнённо")],
+    )
+
+    def _unexpected_selectbox(*_args, **_kwargs):
+        raise AssertionError("local product selectbox should not be rendered in entry-point charts")
+
+    monkeypatch.setattr(app_streamlit.st, "selectbox", _unexpected_selectbox)
+    monkeypatch.setattr(app_streamlit, "resolve_db_dataset_cache_buster", lambda: "entry-chart-buster")
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_entry_point_day_range_from_db",
+        lambda *args, **kwargs: pd.DataFrame([{"nm_id": 101, "section": "Поиск", "entry_point": "Выдача"}]),
+    )
+    monkeypatch.setattr(app_streamlit, "build_entry_point_metadata", lambda _filtered: pd.DataFrame())
+    monkeypatch.setattr(app_streamlit, "build_entry_point_analytics_table", lambda *args, **kwargs: display_df)
+
+    def _limit(df, **kwargs):
+        limiter_calls.append(kwargs)
+        return df, {"mode": "selected_article", "message": None, "selected_article": kwargs.get("selected_article_label")}
+
+    monkeypatch.setattr(app_streamlit, "limit_entry_point_analytics_table", _limit)
+    monkeypatch.setattr(app_streamlit, "build_entry_point_line_chart", lambda **kwargs: object())
+
+    selected_label = "art-101 | 101 | Товар 101"
+    app_streamlit.render_entry_point_charts(filtered, selected_label)
+
+    assert limiter_calls
+    assert limiter_calls[0]["selected_article_label"] == selected_label
 def test_render_stock_speed_charts_passes_cache_buster_to_range_loaders(monkeypatch) -> None:
     from unittest.mock import patch
 
