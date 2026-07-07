@@ -92,6 +92,7 @@ from app_streamlit import (
     build_stock_all_product_level,
     build_stock_warehouse_display_dataframe,
     build_stock_warehouse_summary_metrics,
+    render_entry_point_analytics_tab,
     style_entry_point_analytics_table,
     format_summary_rub,
     resolve_stock_warehouse_default_snapshot_date,
@@ -311,6 +312,135 @@ def test_style_entry_point_analytics_table_highlights_low_cart_count_conversion(
     html = styled.to_html()
     assert "#fef3c7" in html
     assert "Конверсия в корзину" in html
+
+
+def test_render_entry_point_analytics_tab_adds_xlsx_download_button(monkeypatch) -> None:
+    filtered = pd.DataFrame(
+        [
+            {"report_date": pd.Timestamp("2026-07-01").date(), "nm_id": 101},
+        ]
+    )
+    display_df = pd.DataFrame(
+        [
+            {
+                "Точка входа": "Поиск",
+                "Показы": 100,
+                "Переходы в карточку": 20,
+                "Добавления в корзину": 10,
+                "Конверсия в корзину": 50.0,
+                "Заказы": 2,
+                "Конверсия в заказ": 20.0,
+            }
+        ]
+    )
+
+    class _FakeColumn:
+        def __init__(self, value: str) -> None:
+            self._value = value
+
+        def radio(self, *_args, **_kwargs):
+            return self._value
+
+    download_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(app_streamlit, "resolve_db_dataset_cache_buster", lambda: "entry-buster")
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_entry_point_day_range_from_db",
+        lambda *args, **kwargs: pd.DataFrame([{"nm_id": 101, "section": "Поиск", "entry_point": "Выдача"}]),
+    )
+    monkeypatch.setattr(app_streamlit, "build_entry_point_metadata", lambda _filtered: pd.DataFrame())
+    monkeypatch.setattr(app_streamlit, "build_entry_point_analytics_table", lambda *args, **kwargs: display_df)
+    monkeypatch.setattr(app_streamlit, "style_entry_point_analytics_table", lambda df: df)
+    monkeypatch.setattr(app_streamlit, "build_excel_export_bytes", lambda df: b"PK-entry-point")
+    monkeypatch.setattr(app_streamlit.st, "subheader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app_streamlit.st,
+        "columns",
+        lambda _count: [_FakeColumn("Кабинет"), _FakeColumn("Укрупнённо")],
+    )
+    monkeypatch.setattr(
+        app_streamlit.st,
+        "download_button",
+        lambda label, **kwargs: download_calls.append({"label": label, **kwargs}),
+    )
+    monkeypatch.setattr(app_streamlit.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "info", lambda *args, **kwargs: None)
+
+    render_entry_point_analytics_tab(filtered)
+
+    assert len(download_calls) == 1
+    assert download_calls[0]["label"] == "Скачать XLSX"
+    assert download_calls[0]["data"] == b"PK-entry-point"
+    assert str(download_calls[0]["file_name"]).endswith(".xlsx")
+    assert download_calls[0]["mime"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def test_render_ad_campaign_product_tab_adds_xlsx_download_button(monkeypatch) -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "report_date": pd.Timestamp("2026-07-01").date(),
+                "supplier_article": "art-101",
+                "nm_id": 101,
+                "title": "Товар 101",
+                "brand": "Brand",
+                "subject": "Трусы",
+                "advert_id": 501,
+                "campaign_name": "Campaign",
+                "campaign_type": "auction",
+                "conversion_type": "Прямая",
+                "campaign_spend": 123.45,
+                "ad_spend_share": 10.0,
+                "ad_views": 1000,
+                "ad_clicks": 100,
+                "ad_ctr": 10.0,
+                "ad_cpc": 1.23,
+                "ad_atbs": 12,
+                "ad_orders": 5,
+                "ad_cr": 5.0,
+                "ad_cpo": 24.69,
+            }
+        ]
+    )
+
+    class _FilterColumn:
+        def multiselect(self, *_args, **_kwargs):
+            return []
+
+        def checkbox(self, *_args, **_kwargs):
+            return False
+
+        def metric(self, *_args, **_kwargs):
+            return None
+
+    download_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(app_streamlit.st, "subheader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app_streamlit.st,
+        "columns",
+        lambda count: [_FilterColumn() for _ in range(count)],
+    )
+    monkeypatch.setattr(
+        app_streamlit.st,
+        "download_button",
+        lambda label, **kwargs: download_calls.append({"label": label, **kwargs}),
+    )
+    monkeypatch.setattr(app_streamlit.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit, "build_excel_export_bytes", lambda df: b"PK-ad-campaign")
+
+    app_streamlit.render_ad_campaign_product_tab(df, "db")
+
+    xlsx_calls = [call for call in download_calls if str(call["file_name"]).endswith(".xlsx")]
+    assert len(xlsx_calls) == 1
+    assert xlsx_calls[0]["label"] == "Скачать XLSX"
+    assert xlsx_calls[0]["data"] == b"PK-ad-campaign"
+    assert xlsx_calls[0]["mime"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def test_spp_columns_are_exposed_in_main_streamlit_views() -> None:
@@ -5527,6 +5657,77 @@ def test_build_stock_all_product_level_uses_tracked_allowlist_as_display_base() 
     assert row_202["one_c_stock_qty"] == 6
     assert row_101["wb_stock_qty"] == 8
     assert pd.isna(row_101["one_c_stock_qty"])
+
+
+def test_render_stock_all_tab_adds_xlsx_download_button_for_current_main_table(monkeypatch) -> None:
+    snapshot_df = pd.DataFrame([{"snapshot_date": pd.Timestamp("2026-07-04").date(), "nm_id": 101}])
+    settings_df = pd.DataFrame([{"nm_id": 101, "supplier_article": "art-101", "title": "Товар 101"}])
+    available_dates = [pd.Timestamp("2026-07-04").date()]
+    product_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 101,
+                "band_name": "Трусы женские",
+                "wb_stock_qty": 5,
+                "wb_in_way_to_client": 1,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 6,
+                "one_c_stock_qty": 2,
+                "wb_vs_one_c_diff": 3,
+            }
+        ]
+    )
+    display_df = pd.DataFrame(
+        [
+            {
+                "Банда": "Трусы женские",
+                "Артикул WB": 101,
+                "Артикул продавца": "art-101",
+                "Название": "Товар 101",
+                "Остаток WB": 5,
+                "Остаток 1С": 2,
+            }
+        ]
+    )
+
+    class _Column:
+        def markdown(self, *_args, **_kwargs):
+            return None
+
+    download_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(app_streamlit.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "date_input", lambda *args, **kwargs: available_dates[0])
+    monkeypatch.setattr(app_streamlit.st, "radio", lambda *args, **kwargs: "По товарам")
+    monkeypatch.setattr(app_streamlit.st, "columns", lambda count: [_Column() for _ in range(count)])
+    monkeypatch.setattr(
+        app_streamlit.st,
+        "download_button",
+        lambda label, **kwargs: download_calls.append({"label": label, **kwargs}),
+    )
+    monkeypatch.setattr(app_streamlit.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit, "load_ivan_stock_product_level_from_db", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(app_streamlit, "load_tracked_products", lambda: pd.DataFrame())
+    monkeypatch.setattr(app_streamlit, "build_stock_all_product_level", lambda *args, **kwargs: product_df)
+    monkeypatch.setattr(app_streamlit, "load_sales_speed_data_from_db", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(
+        app_streamlit,
+        "build_stock_all_display_dataframe",
+        lambda *args, **kwargs: (display_df.copy(), ["Остаток WB", "Остаток 1С"]),
+    )
+    monkeypatch.setattr(app_streamlit, "sanitize_dataframe_for_streamlit_display", lambda df, **kwargs: df)
+    monkeypatch.setattr(app_streamlit, "build_excel_export_bytes", lambda df: b"PK-stock-all")
+
+    app_streamlit.render_stock_all_tab(snapshot_df, settings_df, available_dates, cache_buster="stock-buster")
+
+    assert len(download_calls) == 1
+    assert download_calls[0]["label"] == "Скачать XLSX"
+    assert download_calls[0]["data"] == b"PK-stock-all"
+    assert str(download_calls[0]["file_name"]).endswith(".xlsx")
+    assert download_calls[0]["mime"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def test_build_stock_all_band_level_clips_negative_one_c_stock_to_zero() -> None:

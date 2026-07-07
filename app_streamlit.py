@@ -4730,6 +4730,14 @@ def render_stock_all_tab(
         if null_col in display_df.columns and null_col in display_df_raw.columns:
             display_df[null_col] = display_df_raw[null_col].where(display_df_raw[null_col].notna(), "нет данных")
 
+    st.download_button(
+        "Скачать XLSX",
+        data=build_excel_export_bytes(display_df.copy()),
+        file_name=build_stock_all_export_filename(selected_snapshot_date, level),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"stock_all_xlsx_download_{level}",
+    )
+
     display_df.attrs = {}
     st.dataframe(
         sanitize_dataframe_for_streamlit_display(display_df, numeric_columns=numeric_cols),
@@ -5650,6 +5658,16 @@ def build_filtered_table_export_filename(table_df: pd.DataFrame, extension: str)
     return f"wb_table_filtered_{min_date}_{max_date}.{extension}"
 
 
+def build_stock_all_export_filename(snapshot_date: date, level: str) -> str:
+    level_slug_map = {
+        "По товарам": "products",
+        "По бандам": "bands",
+        "По размерам": "sizes",
+    }
+    level_slug = level_slug_map.get(level, "table")
+    return f"stock_all_{level_slug}_{snapshot_date.isoformat()}.xlsx"
+
+
 def get_product_options(filtered: pd.DataFrame) -> tuple[list[str], dict[str, dict[str, object]]]:
     product_rows = (
         filtered.sort_values(["supplier_article", "nm_id", "title"], na_position="last")
@@ -5807,6 +5825,20 @@ def render_entry_point_analytics_tab(filtered: pd.DataFrame) -> None:
     if display_df.empty:
         st.info("После агрегации данных для выбранного режима не осталось строк.")
         return
+
+    export_file_name = (
+        f"entry_point_analytics_{selected_dates[0].isoformat()}_{selected_dates[-1].isoformat()}.xlsx"
+        if selected_dates
+        else "entry_point_analytics.xlsx"
+    )
+    export_bytes = build_excel_export_bytes(display_df)
+    st.download_button(
+        "Скачать XLSX",
+        data=export_bytes,
+        file_name=export_file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="entry_point_analytics_xlsx_download",
+    )
 
     st.dataframe(
         style_entry_point_analytics_table(display_df),
@@ -9042,6 +9074,21 @@ def render_ad_campaign_product_tab(
         data=csv_bytes,
         file_name="streamlit_ad_campaign_product_dataset_filtered.csv",
         mime="text/csv",
+    )
+
+    report_dates = pd.to_datetime(filtered["report_date"], errors="coerce").dt.date.dropna()
+    if report_dates.empty:
+        xlsx_file_name = "ad_campaign_product_filtered.xlsx"
+    else:
+        xlsx_file_name = (
+            f"ad_campaign_product_{report_dates.min().isoformat()}_{report_dates.max().isoformat()}.xlsx"
+        )
+    st.download_button(
+        "Скачать XLSX",
+        data=build_excel_export_bytes(download_df),
+        file_name=xlsx_file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="ad_campaign_product_xlsx_download",
     )
 
     st.dataframe(
