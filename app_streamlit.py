@@ -10,7 +10,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
-from xml.etree import ElementTree as ET
 
 import altair as alt
 import pandas as pd
@@ -4498,17 +4497,13 @@ def render_stock_warehouse_tab(data_source: str) -> None:
 
         st.write("**Проблемные товары**")
         problem_display = build_stock_warehouse_display_dataframe(problem_table, problem_table=True)
-        problem_xml_bytes = build_xml_export_bytes(
-            problem_display,
-            root_tag="problem_products",
-            row_tag="product",
-        )
+        problem_excel_bytes = build_excel_export_bytes(problem_display)
         st.download_button(
-            "Скачать XML",
-            data=problem_xml_bytes,
-            file_name=f"stock_problem_products_{selected_snapshot_date.isoformat()}.xml",
-            mime="application/xml",
-            key="stock_problem_products_xml_download",
+            "Скачать XLSX",
+            data=problem_excel_bytes,
+            file_name=f"stock_problem_products_{selected_snapshot_date.isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="stock_problem_products_xlsx_download",
         )
         st.dataframe(
             prepare_stock_warehouse_table_for_display(problem_display, []),
@@ -4538,17 +4533,13 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         warehouse_display_columns = [warehouse_name for warehouse_name in selected_warehouses if warehouse_name in table_display.columns]
 
         st.write("**Остатки по складам**")
-        warehouse_xml_bytes = build_xml_export_bytes(
-            table_display,
-            root_tag="warehouse_stock_rows",
-            row_tag="product",
-        )
+        warehouse_excel_bytes = build_excel_export_bytes(table_display)
         st.download_button(
-            "Скачать XML",
-            data=warehouse_xml_bytes,
-            file_name=f"stock_warehouses_{selected_snapshot_date.isoformat()}.xml",
-            mime="application/xml",
-            key="stock_warehouses_xml_download",
+            "Скачать XLSX",
+            data=warehouse_excel_bytes,
+            file_name=f"stock_warehouses_{selected_snapshot_date.isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="stock_warehouses_xlsx_download",
         )
         st.dataframe(
             prepare_stock_warehouse_table_for_display(table_display, warehouse_display_columns),
@@ -5280,22 +5271,6 @@ def build_excel_export_bytes(export_df: pd.DataFrame) -> bytes:
         export_df.to_excel(writer, index=False, sheet_name="Итого")
     buffer.seek(0)
     return buffer.getvalue()
-
-
-def build_xml_export_bytes(
-    export_df: pd.DataFrame,
-    *,
-    root_tag: str = "rows",
-    row_tag: str = "row",
-) -> bytes:
-    normalized_df = export_df.where(pd.notna(export_df), "—").copy()
-    root = ET.Element(root_tag)
-    for row in normalized_df.to_dict(orient="records"):
-        row_element = ET.SubElement(root, row_tag)
-        for column_name, value in row.items():
-            field_element = ET.SubElement(row_element, "field", name=str(column_name))
-            field_element.text = str(value)
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def build_filtered_table_export_filename(table_df: pd.DataFrame, extension: str) -> str:

@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
-from xml.etree import ElementTree as ET
 
 import app_streamlit
 import pandas as pd
@@ -40,7 +39,6 @@ from app_streamlit import (
     build_chart_scope_rows,
     build_threshold_breaches_table,
     build_excel_export_bytes,
-    build_xml_export_bytes,
     build_export_dataframe,
     build_data_quality_label,
     build_overview_export_tables,
@@ -3930,7 +3928,7 @@ def test_build_excel_export_bytes_creates_xlsx_from_current_table() -> None:
     assert restored.to_dict(orient="records") == export_df.to_dict(orient="records")
 
 
-def test_build_xml_export_bytes_creates_xml_from_current_table() -> None:
+def test_build_excel_export_bytes_keeps_problem_table_columns() -> None:
     export_df = pd.DataFrame(
         [
             {
@@ -3942,38 +3940,29 @@ def test_build_xml_export_bytes_creates_xml_from_current_table() -> None:
         ]
     )
 
-    payload = build_xml_export_bytes(export_df, root_tag="problem_products", row_tag="product")
-    root = ET.fromstring(payload.decode("utf-8"))
+    payload = build_excel_export_bytes(export_df)
+    restored = pd.read_excel(BytesIO(payload))
 
-    assert root.tag == "problem_products"
-    product = root.find("product")
-    assert product is not None
-    fields = {(field.attrib.get("name") or ""): (field.text or "") for field in product.findall("field")}
-    assert fields == {
-        "Дата snapshot": "2026-06-18",
-        "Артикул WB": "202",
-        "Артикул продавца": "kept-row",
-        "Статус": "OK",
-    }
+    assert payload[:2] == b"PK"
+    assert restored.to_dict(orient="records") == export_df.to_dict(orient="records")
 
 
-def test_build_xml_export_bytes_replaces_missing_values_with_dash() -> None:
+def test_build_excel_export_bytes_keeps_stock_table_columns() -> None:
     export_df = pd.DataFrame(
         [
             {
                 "Артикул WB": 202,
-                "Склад": pd.NA,
+                "Склад": "Владимир WB",
+                "Статус остатка": "Нет данных",
             }
         ]
     )
 
-    payload = build_xml_export_bytes(export_df)
-    root = ET.fromstring(payload.decode("utf-8"))
-    row = root.find("row")
-    assert row is not None
-    fields = {(field.attrib.get("name") or ""): (field.text or "") for field in row.findall("field")}
-    assert fields["Артикул WB"] == "202"
-    assert fields["Склад"] == "—"
+    payload = build_excel_export_bytes(export_df)
+    restored = pd.read_excel(BytesIO(payload))
+
+    assert payload[:2] == b"PK"
+    assert restored.to_dict(orient="records") == export_df.to_dict(orient="records")
 
 
 def test_prepare_stock_warehouse_history_snapshot_dataframe_keeps_latest_loaded_at_per_day_nm_warehouse() -> None:
