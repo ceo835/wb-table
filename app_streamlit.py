@@ -185,6 +185,11 @@ ENTRY_POINT_GROUP_ORDER = [
     ENTRY_POINT_GROUP_TOTAL,
 ]
 ENTRY_POINT_CONVERSION_HIGHLIGHT = "#fef3c7"
+ENTRY_POINT_CART_SPIKE_HIGHLIGHT = "#fee2e2"
+ENTRY_POINT_DEFAULT_TOP_N_ARTICLES = 20
+ENTRY_POINT_DEFAULT_TOP_N_DETAILED_ARTICLES = 10
+ENTRY_POINT_DEFAULT_TOP_N_DETAILED_BANDS = 10
+ENTRY_POINT_MAX_DETAILED_ROWS = 500
 UNKNOWN_WB_TYPE_LABEL = "Неизвестный тип WB 64"
 UNKNOWN_WB_TYPE_HELP_TEXT = (
     "Тип WB 64 пришёл из рекламного API WB, но в публичной документации код не расшифрован. "
@@ -2396,6 +2401,146 @@ def _compute_entry_point_conversion(numerator: pd.Series, denominator: pd.Series
     return result.where(denominator_numeric.gt(0))
 
 
+def _apply_entry_point_cart_conversion_fallback(
+    grouped: pd.DataFrame,
+    *,
+    group_columns: list[str],
+) -> pd.DataFrame:
+    if grouped.empty:
+        grouped["Конверсия в корзину"] = pd.Series(dtype="float64")
+        return grouped
+
+    result = grouped.copy()
+    result["Конверсия в корзину"] = _compute_entry_point_conversion(
+        result["Добавления в корзину"],
+        result["Переходы в карточку"],
+    )
+    result["__entry_point_conversion_fallback_7d"] = False
+    base_group_columns = [column for column in group_columns if column != "Дата"]
+
+    def _apply_group_fallback(group_df: pd.DataFrame) -> pd.DataFrame:
+        local = group_df.sort_values("Дата", kind="stable").copy()
+        local["Дата"] = pd.to_datetime(local["Дата"], errors="coerce")
+        local["__cart_numeric"] = pd.to_numeric(local["Добавления в корзину"], errors="coerce")
+        local["__clicks_numeric"] = pd.to_numeric(local["Переходы в карточку"], errors="coerce")
+
+        rolling_indexed = local.set_index("Дата")
+        rolling_cart = rolling_indexed["__cart_numeric"].rolling("7D", min_periods=1).sum()
+        rolling_clicks = rolling_indexed["__clicks_numeric"].rolling("7D", min_periods=1).sum()
+        rolling_conversion = (rolling_cart / rolling_clicks) * 100.0
+        rolling_conversion = rolling_conversion.where(rolling_clicks.gt(0))
+
+        fallback_mask = local["__cart_numeric"].lt(50).fillna(False)
+        local["Конверсия в корзину"] = local["Конверсия в корзину"].where(
+            ~fallback_mask,
+            rolling_conversion.to_numpy(),
+        )
+        local["__entry_point_conversion_fallback_7d"] = fallback_mask
+        local["Дата"] = local["Дата"].dt.date
+        return local.drop(columns=["__cart_numeric", "__clicks_numeric"])
+
+    if base_group_columns:
+        grouped_frames = [
+            _apply_group_fallback(group_df)
+            for _group_key, group_df in result.groupby(base_group_columns, dropna=False, sort=False)
+        ]
+        return pd.concat(grouped_frames, ignore_index=True) if grouped_frames else result
+    return _apply_group_fallback(result).reset_index(drop=True)
+
+
+def _extract_nm_id_from_entry_point_article_label(label: str | None) -> int | None:
+    if not label:
+        return None
+    parts = [part.strip() for part in str(label).split("|")]
+    candidates = parts[1:2] if len(parts) >= 2 else parts
+    for candidate in candidates:
+        parsed = pd.to_numeric(pd.Series([candidate]), errors="coerce").iloc[0]
+        if pd.notna(parsed):
+            return int(parsed)
+    return None
+
+
+def limit_entry_point_analytics_table(
+    display_df: pd.DataFrame,
+    *,
+    analysis_level: str,
+    detail_level: str,
+    selected_article_label: str | None = None,
+    selected_band: str | None = None,
+    top_n_articles: int = ENTRY_POINT_DEFAULT_TOP_N_ARTICLES,
+    top_n_detailed_articles: int = ENTRY_POINT_DEFAULT_TOP_N_DETAILED_ARTICLES,
+    top_n_detailed_bands: int = ENTRY_POINT_DEFAULT_TOP_N_DETAILED_BANDS,
+    max_detailed_rows: int = ENTRY_POINT_MAX_DETAILED_ROWS,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    context: dict[str, object] = {
+        "mode": "all",
+        "message": None,
+        "selected_article": selected_article_label,
+        "selected_band": selected_band,
+    }
+    if display_df.empty:
+        return display_df, context
+
+    result = display_df.copy()
+    cart_column = "Добавления в корзину"
+
+    def _select_top_by_group(df: pd.DataFrame, group_columns: list[str], limit: int) -> pd.DataFrame:
+        if not group_columns or any(column not in df.columns for column in group_columns):
+            return df
+        totals = (
+            df.assign(__cart_numeric=pd.to_numeric(df[cart_column], errors="coerce").fillna(0.0))
+            .groupby(group_columns, dropna=False)["__cart_numeric"]
+            .sum()
+            .sort_values(ascending=False, kind="stable")
+        )
+        top_keys = totals.head(limit).index.tolist()
+        if len(group_columns) == 1:
+            return df[df[group_columns[0]].isin(top_keys)].copy()
+        top_key_frame = pd.DataFrame(top_keys, columns=group_columns)
+        return df.merge(top_key_frame, on=group_columns, how="inner")
+
+    if analysis_level == ENTRY_POINT_LEVEL_ARTICLE:
+        selected_nm_id = _extract_nm_id_from_entry_point_article_label(selected_article_label)
+        if selected_nm_id is not None and "Артикул WB" in result.columns:
+            result = result[result["Артикул WB"] == selected_nm_id].copy()
+            context["mode"] = "selected_article"
+        else:
+            limit = top_n_articles if detail_level == ENTRY_POINT_DETAIL_COARSE else top_n_detailed_articles
+            result = _select_top_by_group(result, ["Артикул WB"], limit)
+            context["mode"] = "top_n_articles"
+            context["message"] = (
+                f"Показаны топ-{limit} артикулов по добавлениям в корзину за выбранный период. "
+                "Для полной детализации выберите конкретный артикул."
+            )
+
+    if analysis_level == ENTRY_POINT_LEVEL_BAND and detail_level == ENTRY_POINT_DETAIL_DETAILED:
+        if selected_band and selected_band != "Все банды" and "Банда" in result.columns:
+            result = result[result["Банда"] == selected_band].copy()
+            context["mode"] = "selected_band"
+        elif "Банда" in result.columns and result["Банда"].nunique(dropna=True) > top_n_detailed_bands:
+            result = _select_top_by_group(result, ["Банда"], top_n_detailed_bands)
+            context["mode"] = "top_n_bands"
+            context["message"] = (
+                f"Показаны топ-{top_n_detailed_bands} банд по добавлениям в корзину за выбранный период. "
+                "Для полной детализации выберите конкретную банду."
+            )
+
+    if detail_level == ENTRY_POINT_DETAIL_DETAILED:
+        sort_columns = [column for column in ("Дата", cart_column) if column in result.columns]
+        ascending = [False, False][: len(sort_columns)]
+        if sort_columns:
+            result = result.sort_values(sort_columns, ascending=ascending, na_position="last", kind="stable")
+        if len(result) > max_detailed_rows:
+            result = result.head(max_detailed_rows).copy()
+            if not context.get("message"):
+                context["message"] = (
+                    f"Показаны первые {max_detailed_rows} строк после сортировки по дате и добавлениям в корзину."
+                )
+            context["mode"] = "row_limit"
+
+    return result.reset_index(drop=True), context
+
+
 def build_entry_point_analytics_table(
     entry_df: pd.DataFrame,
     metadata_df: pd.DataFrame,
@@ -2406,14 +2551,14 @@ def build_entry_point_analytics_table(
     metric_columns = ["impressions", "card_clicks", "cart_count", "order_count"]
     if entry_df.empty:
         if analysis_level == ENTRY_POINT_LEVEL_CABINET:
-            base_columns = ["Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Точка входа"]
+            base_columns = ["Дата", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Дата", "Точка входа"]
         elif analysis_level == ENTRY_POINT_LEVEL_BAND:
-            base_columns = ["Банда", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Банда", "Точка входа"]
+            base_columns = ["Дата", "Банда", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Дата", "Банда", "Точка входа"]
         else:
             base_columns = (
-                ["Артикул продавца", "Артикул WB", "Название", "Раздел", "Точка входа"]
+                ["Дата", "Артикул продавца", "Артикул WB", "Название", "Раздел", "Точка входа"]
                 if detail_level == ENTRY_POINT_DETAIL_DETAILED
-                else ["Артикул продавца", "Артикул WB", "Название", "Точка входа"]
+                else ["Дата", "Артикул продавца", "Артикул WB", "Название", "Точка входа"]
             )
         return pd.DataFrame(
             columns=base_columns
@@ -2431,9 +2576,14 @@ def build_entry_point_analytics_table(
     for column in ("nm_id", *metric_columns):
         if column not in df.columns:
             df[column] = pd.NA
+    if "date" not in df.columns:
+        df["date"] = pd.NaT
     df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
     df = df.dropna(subset=["nm_id"]).copy()
     df["nm_id"] = df["nm_id"].astype(int)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    df = df.dropna(subset=["date"]).copy()
+    df["Дата"] = df["date"]
     for column in metric_columns:
         df[column] = pd.to_numeric(df[column], errors="coerce")
 
@@ -2479,15 +2629,15 @@ def build_entry_point_analytics_table(
         df["Точка входа"] = df["entry_point"].replace("", "Без точки входа")
 
     if analysis_level == ENTRY_POINT_LEVEL_CABINET:
-        group_columns = ["Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Точка входа"]
+        group_columns = ["Дата", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Дата", "Точка входа"]
     elif analysis_level == ENTRY_POINT_LEVEL_BAND:
-        group_columns = ["Банда", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Банда", "Точка входа"]
+        group_columns = ["Дата", "Банда", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Дата", "Банда", "Точка входа"]
         df["Банда"] = df["band_name"].replace("", "Без банды")
     else:
         group_columns = (
-            ["Артикул продавца", "Артикул WB", "Название", "Раздел", "Точка входа"]
+            ["Дата", "Артикул продавца", "Артикул WB", "Название", "Раздел", "Точка входа"]
             if detail_level == ENTRY_POINT_DETAIL_DETAILED
-            else ["Артикул продавца", "Артикул WB", "Название", "Точка входа"]
+            else ["Дата", "Артикул продавца", "Артикул WB", "Название", "Точка входа"]
         )
         df["Артикул WB"] = df["nm_id"]
         df["Артикул продавца"] = df["supplier_article"].replace("", "—")
@@ -2506,42 +2656,36 @@ def build_entry_point_analytics_table(
             }
         )
     )
-    grouped["Конверсия в корзину"] = _compute_entry_point_conversion(
-        grouped["Добавления в корзину"],
-        grouped["Переходы в карточку"],
-    )
+    if analysis_level == ENTRY_POINT_LEVEL_CABINET and detail_level == ENTRY_POINT_DETAIL_COARSE:
+        total_rows: list[dict[str, object]] = []
+        for report_date, date_rows in grouped.groupby("Дата", dropna=False, sort=True):
+            total_row = {
+                "Дата": report_date,
+                "Точка входа": ENTRY_POINT_GROUP_TOTAL,
+                "Показы": date_rows["Показы"].sum(min_count=1),
+                "Переходы в карточку": date_rows["Переходы в карточку"].sum(min_count=1),
+                "Добавления в корзину": date_rows["Добавления в корзину"].sum(min_count=1),
+                "Заказы": date_rows["Заказы"].sum(min_count=1),
+            }
+            total_rows.append(total_row)
+        grouped = pd.concat([grouped, pd.DataFrame(total_rows)], ignore_index=True)
     grouped["Конверсия в заказ"] = _compute_entry_point_conversion(
         grouped["Заказы"],
         grouped["Добавления в корзину"],
     )
+    grouped = _apply_entry_point_cart_conversion_fallback(grouped, group_columns=group_columns)
 
     if analysis_level == ENTRY_POINT_LEVEL_CABINET and detail_level == ENTRY_POINT_DETAIL_COARSE:
-        total_row = {
-            "Точка входа": ENTRY_POINT_GROUP_TOTAL,
-            "Показы": grouped["Показы"].sum(min_count=1),
-            "Переходы в карточку": grouped["Переходы в карточку"].sum(min_count=1),
-            "Добавления в корзину": grouped["Добавления в корзину"].sum(min_count=1),
-            "Заказы": grouped["Заказы"].sum(min_count=1),
-        }
-        total_row["Конверсия в корзину"] = _compute_entry_point_conversion(
-            pd.Series([total_row["Добавления в корзину"]]),
-            pd.Series([total_row["Переходы в карточку"]]),
-        ).iloc[0]
-        total_row["Конверсия в заказ"] = _compute_entry_point_conversion(
-            pd.Series([total_row["Заказы"]]),
-            pd.Series([total_row["Добавления в корзину"]]),
-        ).iloc[0]
-        grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
         grouped["__entry_sort"] = grouped["Точка входа"].map(
             {label: index for index, label in enumerate(ENTRY_POINT_GROUP_ORDER)}
         ).fillna(len(ENTRY_POINT_GROUP_ORDER))
-        grouped = grouped.sort_values(["__entry_sort", "Точка входа"], kind="stable").drop(columns=["__entry_sort"])
+        grouped = grouped.sort_values(["Дата", "__entry_sort", "Точка входа"], kind="stable").drop(columns=["__entry_sort"])
     elif detail_level == ENTRY_POINT_DETAIL_COARSE:
-        sort_columns = ["Точка входа"]
+        sort_columns = ["Дата", "Точка входа"]
         if analysis_level == ENTRY_POINT_LEVEL_BAND:
-            sort_columns = ["Банда", "Точка входа"]
+            sort_columns = ["Дата", "Банда", "Точка входа"]
         elif analysis_level == ENTRY_POINT_LEVEL_ARTICLE:
-            sort_columns = ["Артикул продавца", "Артикул WB", "Точка входа"]
+            sort_columns = ["Дата", "Артикул продавца", "Артикул WB", "Точка входа"]
         grouped["__entry_sort"] = grouped["Точка входа"].map(
             {label: index for index, label in enumerate(ENTRY_POINT_GROUP_ORDER)}
         ).fillna(len(ENTRY_POINT_GROUP_ORDER))
@@ -2559,19 +2703,183 @@ def style_entry_point_analytics_table(display_df: pd.DataFrame):
     required_columns = {"Добавления в корзину", "Конверсия в корзину"}
     if display_df.empty or not required_columns.issubset(display_df.columns):
         return display_df
-    if len(display_df.index) * len(display_df.columns) > STYLER_MAX_CELLS:
-        return display_df
 
-    conversion_column_index = display_df.columns.get_loc("Конверсия в корзину")
+    fallback_column = "__entry_point_conversion_fallback_7d"
+    style_source = display_df.copy()
+    visible_df = style_source.drop(columns=[fallback_column], errors="ignore")
+    if len(visible_df.index) * len(visible_df.columns) > STYLER_MAX_CELLS:
+        return visible_df
+
+    cart_column_index = visible_df.columns.get_loc("Добавления в корзину")
+    conversion_column_index = visible_df.columns.get_loc("Конверсия в корзину")
+    metric_columns = {"Показы", "Переходы в карточку", "Добавления в корзину", "Конверсия в корзину", "Заказы", "Конверсия в заказ"}
+    comparison_columns = [column for column in visible_df.columns if column not in metric_columns and column != "Дата"]
+    cart_numeric = pd.to_numeric(visible_df["Добавления в корзину"], errors="coerce")
+    if comparison_columns:
+        avg_cart = (
+            visible_df.assign(__cart_numeric=cart_numeric)
+            .groupby(comparison_columns, dropna=False)["__cart_numeric"]
+            .transform("mean")
+        )
+    else:
+        avg_cart = pd.Series(cart_numeric.mean(), index=visible_df.index)
+    fallback_mask_series = (
+        style_source[fallback_column].astype(bool)
+        if fallback_column in style_source.columns
+        else cart_numeric.lt(50).fillna(False)
+    )
 
     def _highlight_low_cart_conversion(row: pd.Series) -> list[str]:
-        styles = [""] * len(display_df.columns)
+        styles = [""] * len(visible_df.columns)
         cart_value = pd.to_numeric(pd.Series([row.get("Добавления в корзину")]), errors="coerce").iloc[0]
-        if pd.notna(cart_value) and float(cart_value) < 50:
+        average_cart_value = avg_cart.loc[row.name] if row.name in avg_cart.index else pd.NA
+        if (
+            pd.notna(cart_value)
+            and pd.notna(average_cart_value)
+            and float(cart_value) >= 50
+            and float(cart_value) >= float(average_cart_value) * 1.5
+        ):
+            styles[cart_column_index] = f"background-color: {ENTRY_POINT_CART_SPIKE_HIGHLIGHT}"
+        if bool(fallback_mask_series.loc[row.name]) if row.name in fallback_mask_series.index else False:
             styles[conversion_column_index] = f"background-color: {ENTRY_POINT_CONVERSION_HIGHLIGHT}"
         return styles
 
-    return display_df.style.apply(_highlight_low_cart_conversion, axis=1)
+    return visible_df.style.apply(_highlight_low_cart_conversion, axis=1)
+
+
+def build_entry_point_chart_dataframe(
+    display_df: pd.DataFrame,
+    *,
+    analysis_level: str,
+    detail_level: str,
+) -> pd.DataFrame:
+    expected_columns = [
+        "report_date",
+        "series_name",
+        "cart_count",
+        "cart_conversion",
+        "order_conversion",
+    ]
+    if display_df.empty:
+        return pd.DataFrame(columns=expected_columns)
+
+    chart_df = display_df.drop(columns=["__entry_point_conversion_fallback_7d"], errors="ignore").copy()
+    if "Дата" not in chart_df.columns:
+        return pd.DataFrame(columns=expected_columns)
+
+    chart_df["report_date"] = pd.to_datetime(chart_df["Дата"], errors="coerce")
+    chart_df = chart_df.dropna(subset=["report_date"]).copy()
+    if chart_df.empty:
+        return pd.DataFrame(columns=expected_columns)
+
+    if analysis_level == ENTRY_POINT_LEVEL_CABINET and "Точка входа" in chart_df.columns:
+        chart_df = chart_df[chart_df["Точка входа"] != ENTRY_POINT_GROUP_TOTAL].copy()
+    if chart_df.empty:
+        return pd.DataFrame(columns=expected_columns)
+
+    if analysis_level == ENTRY_POINT_LEVEL_CABINET:
+        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {"Раздел", "Точка входа"}.issubset(chart_df.columns):
+            chart_df["series_name"] = chart_df["Раздел"].astype(str) + " · " + chart_df["Точка входа"].astype(str)
+        else:
+            chart_df["series_name"] = chart_df.get("Точка входа", pd.Series(index=chart_df.index, dtype=object)).astype(str)
+    elif analysis_level == ENTRY_POINT_LEVEL_BAND:
+        band_series = chart_df.get("Банда", pd.Series("Без банды", index=chart_df.index)).fillna("Без банды").astype(str)
+        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {"Раздел", "Точка входа"}.issubset(chart_df.columns):
+            chart_df["series_name"] = (
+                band_series
+                + " · "
+                + chart_df["Раздел"].astype(str)
+                + " · "
+                + chart_df["Точка входа"].astype(str)
+            )
+        else:
+            chart_df["series_name"] = band_series + " · " + chart_df.get(
+                "Точка входа", pd.Series(index=chart_df.index, dtype=object)
+            ).astype(str)
+    else:
+        article_series = (
+            chart_df.get("Артикул продавца", pd.Series("—", index=chart_df.index))
+            .fillna("—")
+            .astype(str)
+            + " | "
+            + chart_df.get("Артикул WB", pd.Series("—", index=chart_df.index)).fillna("—").astype(str)
+        )
+        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {"Раздел", "Точка входа"}.issubset(chart_df.columns):
+            chart_df["series_name"] = (
+                article_series
+                + " · "
+                + chart_df["Раздел"].astype(str)
+                + " · "
+                + chart_df["Точка входа"].astype(str)
+            )
+        else:
+            chart_df["series_name"] = article_series + " · " + chart_df.get(
+                "Точка входа", pd.Series(index=chart_df.index, dtype=object)
+            ).astype(str)
+
+    chart_df["cart_count"] = pd.to_numeric(chart_df.get("Добавления в корзину"), errors="coerce")
+    chart_df["cart_conversion"] = pd.to_numeric(chart_df.get("Конверсия в корзину"), errors="coerce")
+    chart_df["order_conversion"] = pd.to_numeric(chart_df.get("Конверсия в заказ"), errors="coerce")
+
+    result = chart_df[expected_columns].copy()
+    return result.sort_values(["report_date", "series_name"], kind="stable").reset_index(drop=True)
+
+
+def build_entry_point_line_chart(
+    *,
+    chart_df: pd.DataFrame,
+    value_column: str,
+    y_title: str,
+    tooltip_value_title: str,
+    value_format: str,
+    threshold: float | None = None,
+    threshold_label: str | None = None,
+) -> alt.Chart | None:
+    if chart_df.empty or value_column not in chart_df.columns:
+        return None
+
+    prepared = chart_df.dropna(subset=["report_date", "series_name", value_column]).copy()
+    if prepared.empty:
+        return None
+
+    unique_dates_count = len(prepared["report_date"].unique())
+    base = alt.Chart(prepared).encode(
+        x=alt.X(
+            "report_date:T",
+            title="Дата",
+            axis=alt.Axis(format="%d.%m", labelAngle=0, tickCount=min(max(unique_dates_count, 2), 10)),
+        ),
+        y=alt.Y(
+            f"{value_column}:Q",
+            title=y_title,
+            axis=alt.Axis(format=value_format),
+            scale=alt.Scale(zero=True, nice=True),
+        ),
+        color=alt.Color("series_name:N", title="Серия"),
+        tooltip=[
+            alt.Tooltip("report_date:T", title="Дата", format="%d.%m.%Y"),
+            alt.Tooltip("series_name:N", title="Серия"),
+            alt.Tooltip(f"{value_column}:Q", title=tooltip_value_title, format=value_format),
+        ],
+    )
+
+    layers: list[alt.Chart] = [
+        base.mark_line(strokeWidth=3),
+        base.mark_circle(size=45),
+    ]
+
+    if threshold is not None and threshold_label:
+        threshold_df = pd.DataFrame({"threshold": [threshold], "label": [threshold_label]})
+        layers.append(
+            alt.Chart(threshold_df).mark_rule(color="#dc2626", strokeDash=[6, 4]).encode(y="threshold:Q")
+        )
+        layers.append(
+            alt.Chart(threshold_df)
+            .mark_text(color="#dc2626", align="left", dx=8, dy=-6, fontSize=12)
+            .encode(x=alt.value(8), y="threshold:Q", text="label:N")
+        )
+
+    return alt.layer(*layers).resolve_scale(color="shared").properties(height=320)
 
 
 @st.cache_data(show_spinner=False)
@@ -5826,12 +6134,59 @@ def render_entry_point_analytics_tab(filtered: pd.DataFrame) -> None:
         st.info("После агрегации данных для выбранного режима не осталось строк.")
         return
 
+    selected_article_label: str | None = None
+    selected_band: str | None = None
+
+    if analysis_level == ENTRY_POINT_LEVEL_ARTICLE:
+        article_filtered = filtered.copy()
+        if "nm_id" in article_filtered.columns:
+            article_filtered["nm_id"] = pd.to_numeric(article_filtered["nm_id"], errors="coerce")
+            article_filtered = article_filtered[article_filtered["nm_id"].isin(selected_nm_ids)].copy()
+        article_options, _ = get_product_options(article_filtered)
+        article_options = ["Топ артикулов по корзинам"] + article_options
+        selected_article_label = st.selectbox(
+            "Артикул для детализации",
+            options=article_options,
+            key="entry_point_article_filter",
+        )
+        if selected_article_label == "Топ артикулов по корзинам":
+            selected_article_label = None
+
+    if analysis_level == ENTRY_POINT_LEVEL_BAND and detail_level == ENTRY_POINT_DETAIL_DETAILED:
+        band_options = ["Все банды"]
+        if "band_name" in metadata_df.columns:
+            band_values = sorted(
+                value
+                for value in metadata_df["band_name"].dropna().astype(str).unique().tolist()
+                if value.strip()
+            )
+            band_options.extend(band_values)
+        selected_band = st.selectbox(
+            "Банда для детализации",
+            options=band_options,
+            key="entry_point_band_filter",
+        )
+
+    display_df, limit_context = limit_entry_point_analytics_table(
+        display_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+        selected_article_label=selected_article_label,
+        selected_band=selected_band,
+    )
+    if display_df.empty:
+        st.info("После применения ограничений для выбранного режима не осталось строк.")
+        return
+    if limit_context.get("message"):
+        st.caption(str(limit_context["message"]))
+
+    export_display_df = display_df.drop(columns=["__entry_point_conversion_fallback_7d"], errors="ignore")
     export_file_name = (
         f"entry_point_analytics_{selected_dates[0].isoformat()}_{selected_dates[-1].isoformat()}.xlsx"
         if selected_dates
         else "entry_point_analytics.xlsx"
     )
-    export_bytes = build_excel_export_bytes(display_df)
+    export_bytes = build_excel_export_bytes(export_display_df)
     st.download_button(
         "Скачать XLSX",
         data=export_bytes,
@@ -5846,6 +6201,7 @@ def render_entry_point_analytics_tab(filtered: pd.DataFrame) -> None:
         hide_index=True,
         height=720,
         column_config={
+            "Дата": st.column_config.DateColumn("Дата"),
             "Артикул WB": st.column_config.NumberColumn("Артикул WB", format="%d"),
             "Показы": st.column_config.NumberColumn("Показы", format="%.0f"),
             "Переходы в карточку": st.column_config.NumberColumn("Переходы в карточку", format="%.0f"),
@@ -5856,8 +6212,8 @@ def render_entry_point_analytics_tab(filtered: pd.DataFrame) -> None:
         },
     )
     st.caption(
-        "*Конверсия при количестве корзин менее 50 подсвечивается жёлтым цветом. "
-        "Такой показатель рассчитан корректно, но имеет пониженную статистическую достоверность.*"
+        "* Если за день менее 50 корзин, конверсия в корзину считается за последние 7 дней и подсвечивается жёлтым цветом. "
+        "Всплески добавлений в корзину относительно среднего по этой группе подсвечиваются красным.*"
     )
 
 
@@ -8527,7 +8883,7 @@ def build_stock_speed_chart_altair(
 
 
 def render_stock_speed_charts(filtered: pd.DataFrame, preselected_product_label: str | None) -> None:
-    st.subheader("Остатки и скорость продаж")
+    st.subheader("Остатки и скорость заказов")
 
     unique_dates = sorted(d for d in filtered["report_date"].dropna().unique().tolist())
     if not unique_dates:
@@ -8643,7 +8999,9 @@ def render_charts_tab(
     option_map: dict[str, dict[str, object]],
     ad_campaign_product_df: pd.DataFrame | None = None,
 ) -> None:
-    tab_eff, tab_vbro, tab_stock = st.tabs(["Эффективность рекламы", "VVBromo", "Остатки и скорость продаж"])
+    tab_eff, tab_vbro, tab_stock, tab_entry = st.tabs(
+        ["Эффективность рекламы", "VVBromo", "Остатки и скорость продаж", "Точки входа"]
+    )
     with tab_eff:
         render_efficiency_charts(
             filtered=filtered,
@@ -8655,6 +9013,157 @@ def render_charts_tab(
         render_vvbromo_charts(filtered)
     with tab_stock:
         render_stock_speed_charts(filtered, preselected_product_label)
+    with tab_entry:
+        render_entry_point_charts(filtered, preselected_product_label)
+
+
+def render_entry_point_charts(
+    filtered: pd.DataFrame,
+    preselected_product_label: str | None,
+) -> None:
+    st.subheader("Точки входа")
+
+    selected_dates = sorted(d for d in filtered.get("report_date", pd.Series(dtype=object)).dropna().unique().tolist())
+    selected_nm_ids = sorted(
+        pd.to_numeric(filtered.get("nm_id", pd.Series(dtype=object)), errors="coerce")
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist()
+    )
+    if not selected_dates or not selected_nm_ids:
+        st.info("Нет выбранных дат или товаров для графиков точки входа.")
+        return
+
+    selector_columns = st.columns(2)
+    analysis_level = selector_columns[0].radio(
+        "Уровень анализа",
+        options=[ENTRY_POINT_LEVEL_CABINET, ENTRY_POINT_LEVEL_BAND, ENTRY_POINT_LEVEL_ARTICLE],
+        horizontal=True,
+        key="entry_point_chart_analysis_level",
+    )
+    detail_level = selector_columns[1].radio(
+        "Детализация",
+        options=[ENTRY_POINT_DETAIL_COARSE, ENTRY_POINT_DETAIL_DETAILED],
+        horizontal=True,
+        key="entry_point_chart_detail_level",
+    )
+
+    cache_buster = resolve_db_dataset_cache_buster()
+    entry_df = load_entry_point_day_range_from_db(tuple(selected_dates), tuple(selected_nm_ids), cache_buster=cache_buster)
+    if entry_df.empty:
+        st.info("В выбранном периоде нет данных из fact_entry_point_day для графиков.")
+        return
+
+    metadata_df = build_entry_point_metadata(filtered)
+    display_df = build_entry_point_analytics_table(
+        entry_df,
+        metadata_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+    )
+    if display_df.empty:
+        st.info("После агрегации данных для графиков точки входа не осталось строк.")
+        return
+
+    selected_article_label: str | None = preselected_product_label
+    selected_band: str | None = None
+
+    if analysis_level == ENTRY_POINT_LEVEL_ARTICLE:
+        article_filtered = filtered.copy()
+        if "nm_id" in article_filtered.columns:
+            article_filtered["nm_id"] = pd.to_numeric(article_filtered["nm_id"], errors="coerce")
+            article_filtered = article_filtered[article_filtered["nm_id"].isin(selected_nm_ids)].copy()
+        article_options, _ = get_product_options(article_filtered)
+        article_options = ["Топ артикулов по корзинам"] + article_options
+        if preselected_product_label not in article_options:
+            selected_article_label = "Топ артикулов по корзинам"
+        selected_article_label = st.selectbox(
+            "Артикул для графиков",
+            options=article_options,
+            index=max(article_options.index(selected_article_label), 0) if selected_article_label in article_options else 0,
+            key="entry_point_chart_article_filter",
+        )
+        if selected_article_label == "Топ артикулов по корзинам":
+            selected_article_label = None
+
+    if analysis_level == ENTRY_POINT_LEVEL_BAND and detail_level == ENTRY_POINT_DETAIL_DETAILED:
+        band_options = ["Все банды"]
+        if "band_name" in metadata_df.columns:
+            band_values = sorted(
+                value
+                for value in metadata_df["band_name"].dropna().astype(str).unique().tolist()
+                if value.strip()
+            )
+            band_options.extend(band_values)
+        selected_band = st.selectbox(
+            "Банда для графиков",
+            options=band_options,
+            key="entry_point_chart_band_filter",
+        )
+
+    display_df, limit_context = limit_entry_point_analytics_table(
+        display_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+        selected_article_label=selected_article_label,
+        selected_band=selected_band,
+    )
+    if display_df.empty:
+        st.info("После применения ограничений для выбранного режима не осталось строк для графиков.")
+        return
+    if limit_context.get("message"):
+        st.caption(str(limit_context["message"]))
+
+    chart_df = build_entry_point_chart_dataframe(
+        display_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+    )
+    if chart_df.empty:
+        st.info("После подготовки данных графики точки входа не построены: нет отображаемых рядов.")
+        return
+
+    st.markdown("### Добавления в корзину по дням")
+    cart_chart = build_entry_point_line_chart(
+        chart_df=chart_df,
+        value_column="cart_count",
+        y_title="Добавления в корзину",
+        tooltip_value_title="Добавления в корзину",
+        value_format=".0f",
+    )
+    if cart_chart is None:
+        st.info("Нет данных для графика добавлений в корзину.")
+    else:
+        st.altair_chart(cart_chart, width="stretch")
+
+    st.markdown("### Конверсия в корзину по дням")
+    cart_conversion_chart = build_entry_point_line_chart(
+        chart_df=chart_df,
+        value_column="cart_conversion",
+        y_title="Конверсия в корзину, %",
+        tooltip_value_title="Конверсия в корзину",
+        value_format=".2f",
+    )
+    if cart_conversion_chart is None:
+        st.info("Нет данных для графика конверсии в корзину.")
+    else:
+        st.altair_chart(cart_conversion_chart, width="stretch")
+
+    st.markdown("### Конверсия в заказ по дням")
+    order_conversion_chart = build_entry_point_line_chart(
+        chart_df=chart_df,
+        value_column="order_conversion",
+        y_title="Конверсия в заказ, %",
+        tooltip_value_title="Конверсия в заказ",
+        value_format=".2f",
+        threshold=35.0,
+        threshold_label="Порог 35%",
+    )
+    if order_conversion_chart is None:
+        st.info("Нет данных для графика конверсии в заказ.")
+    else:
+        st.altair_chart(order_conversion_chart, width="stretch")
 
 
 def build_vvbromo_chart(
