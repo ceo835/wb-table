@@ -30,6 +30,7 @@ from src.db.mart_total_report_builder import build_mart_total_report
 from src.db.models import (
     DimProduct,
     DimProductSize,
+    FactEntryPointDay,
     FactStockWarehouseSnapshot,
     FactIvanAdsWideDay,
     FactWbSitePriceAlert,
@@ -84,6 +85,7 @@ DEFAULT_DATA_SOURCE = "csv"
 STOCK_WAREHOUSE_TAB_LABEL = "Остатки по складам"
 STOCK_ZERO_POSITIONS_TAB_LABEL = "Контроль нулевых позиций"
 STOCK_ALL_POSITIONS_TAB_LABEL = "Контроль всех остатков"
+ENTRY_POINT_ANALYTICS_TAB_LABEL = "Аналитика точки входа"
 WAREHOUSE_SCOPE_MAIN = "Основные склады"
 WAREHOUSE_SCOPE_ALL = "Все склады"
 STOCK_STATUS_OK = "OK"
@@ -165,6 +167,24 @@ DISPLAY_NUMERIC_PLACEHOLDERS = {
 CHART_ALL_CATEGORIES_LABEL = "Все категории"
 CHART_ALL_BANDS_LABEL = "Все банды"
 CHART_ALL_CONVERSION_TYPES_LABEL = "Все типы WB"
+ENTRY_POINT_LEVEL_CABINET = "Кабинет"
+ENTRY_POINT_LEVEL_BAND = "Банды"
+ENTRY_POINT_LEVEL_ARTICLE = "Артикулы"
+ENTRY_POINT_DETAIL_COARSE = "Укрупнённо"
+ENTRY_POINT_DETAIL_DETAILED = "Детально"
+ENTRY_POINT_GROUP_SEARCH = "Поиск"
+ENTRY_POINT_GROUP_CATALOG = "Каталог"
+ENTRY_POINT_GROUP_RECOMMENDATION = "Рекомендательные полки"
+ENTRY_POINT_GROUP_OTHER = "Остальное"
+ENTRY_POINT_GROUP_TOTAL = "Итого"
+ENTRY_POINT_GROUP_ORDER = [
+    ENTRY_POINT_GROUP_SEARCH,
+    ENTRY_POINT_GROUP_CATALOG,
+    ENTRY_POINT_GROUP_RECOMMENDATION,
+    ENTRY_POINT_GROUP_OTHER,
+    ENTRY_POINT_GROUP_TOTAL,
+]
+ENTRY_POINT_CONVERSION_HIGHLIGHT = "#fef3c7"
 UNKNOWN_WB_TYPE_LABEL = "Неизвестный тип WB 64"
 UNKNOWN_WB_TYPE_HELP_TEXT = (
     "Тип WB 64 пришёл из рекламного API WB, но в публичной документации код не расшифрован. "
@@ -937,6 +957,13 @@ def get_db_dataset_cache_buster() -> str:
                 func.count(),
             )
         ).one()
+        entry_point_state = session.execute(
+            select(
+                func.max(FactEntryPointDay.date),
+                func.max(FactEntryPointDay.loaded_at),
+                func.count(),
+            )
+        ).one()
         try:
             from src.db.models import FactVvbromoProductDay
             vvbromo_state = session.execute(
@@ -997,6 +1024,7 @@ def get_db_dataset_cache_buster() -> str:
             *price_state,
             *seller_price_state,
             *alert_state,
+            *entry_point_state,
             *vvbromo_state,
             *stock_warehouse_state,
             *dim_product_size_state,
@@ -1023,6 +1051,19 @@ def resolve_data_source() -> str:
     if os.getenv("DATABASE_URL") or settings.database_url:
         return "db"
     return DEFAULT_DATA_SOURCE
+
+
+def build_main_tab_labels() -> list[str]:
+    return [
+        "ИТОГО",
+        ENTRY_POINT_ANALYTICS_TAB_LABEL,
+        AD_CAMPAIGN_PRODUCT_LABEL,
+        "Карточка товара",
+        "Графики",
+        WB_SITE_PRICE_TAB_LABEL,
+        STOCK_WAREHOUSE_TAB_LABEL,
+        UPLOAD_TAB_TITLE,
+    ]
 
 
 def get_app_password() -> str | None:
@@ -2223,6 +2264,317 @@ def load_settings_product_query_groups_from_db(cache_buster: str | None = None) 
 
 
 @st.cache_data(show_spinner=False)
+def load_entry_point_day_range_from_db(
+    report_dates: tuple[date, ...],
+    nm_ids: tuple[int, ...],
+    cache_buster: str | None = None,
+) -> pd.DataFrame:
+    columns = [
+        "date",
+        "nm_id",
+        "section",
+        "entry_point",
+        "supplier_article",
+        "title",
+        "subject",
+        "brand",
+        "impressions",
+        "card_clicks",
+        "cart_count",
+        "order_count",
+    ]
+    if not report_dates or not nm_ids:
+        return pd.DataFrame(columns=columns)
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(
+                    FactEntryPointDay.date,
+                    FactEntryPointDay.nm_id,
+                    FactEntryPointDay.section,
+                    FactEntryPointDay.entry_point,
+                    FactEntryPointDay.supplier_article,
+                    FactEntryPointDay.title,
+                    FactEntryPointDay.subject,
+                    FactEntryPointDay.brand,
+                    FactEntryPointDay.impressions,
+                    FactEntryPointDay.card_clicks,
+                    FactEntryPointDay.cart_count,
+                    FactEntryPointDay.order_count,
+                )
+                .where(
+                    FactEntryPointDay.date.in_(report_dates),
+                    FactEntryPointDay.nm_id.in_(nm_ids),
+                )
+                .order_by(
+                    FactEntryPointDay.date.asc(),
+                    FactEntryPointDay.nm_id.asc(),
+                    FactEntryPointDay.section.asc(),
+                    FactEntryPointDay.entry_point.asc(),
+                )
+            ).all()
+    except Exception:
+        logger.exception("Failed to load fact_entry_point_day for entry point analytics tab")
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(
+        [
+            {
+                "date": row.date,
+                "nm_id": row.nm_id,
+                "section": row.section,
+                "entry_point": row.entry_point,
+                "supplier_article": row.supplier_article,
+                "title": row.title,
+                "subject": row.subject,
+                "brand": row.brand,
+                "impressions": row.impressions,
+                "card_clicks": row.card_clicks,
+                "cart_count": row.cart_count,
+                "order_count": row.order_count,
+            }
+            for row in rows
+        ],
+        columns=columns,
+    )
+
+
+def build_entry_point_metadata(filtered: pd.DataFrame) -> pd.DataFrame:
+    columns = ["nm_id", "supplier_article", "title", "brand", "subject", "band_name"]
+    if filtered.empty or "nm_id" not in filtered.columns:
+        return pd.DataFrame(columns=columns)
+
+    metadata = filtered.copy()
+    if "band_name" not in metadata.columns:
+        metadata = apply_product_bands(metadata)
+
+    for column in columns:
+        if column not in metadata.columns:
+            metadata[column] = pd.NA
+    if "report_date" in metadata.columns:
+        metadata["report_date"] = pd.to_datetime(metadata["report_date"], errors="coerce").dt.date
+        metadata = metadata.sort_values(["report_date", "nm_id"], ascending=[False, True], na_position="last")
+
+    metadata["nm_id"] = pd.to_numeric(metadata["nm_id"], errors="coerce")
+    metadata = metadata.dropna(subset=["nm_id"]).copy()
+    metadata["nm_id"] = metadata["nm_id"].astype(int)
+    return metadata[columns].drop_duplicates(subset=["nm_id"], keep="first").reset_index(drop=True)
+
+
+def classify_entry_point_bucket(section: object, entry_point: object) -> str:
+    combined = " ".join(
+        part.strip().lower()
+        for part in (str(section or ""), str(entry_point or ""))
+        if str(part or "").strip()
+    )
+    if any(keyword in combined for keyword in ("поиск", "search", "выдача")):
+        return ENTRY_POINT_GROUP_SEARCH
+    if any(keyword in combined for keyword in ("каталог", "catalog", "катег", "category")):
+        return ENTRY_POINT_GROUP_CATALOG
+    if any(
+        keyword in combined
+        for keyword in (
+            "рекомен",
+            "полк",
+            "похож",
+            "similar",
+            "recommend",
+            "related",
+            "с этим товаром",
+            "смотрите также",
+            "подборк",
+        )
+    ):
+        return ENTRY_POINT_GROUP_RECOMMENDATION
+    return ENTRY_POINT_GROUP_OTHER
+
+
+def _compute_entry_point_conversion(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    numerator_numeric = pd.to_numeric(numerator, errors="coerce")
+    denominator_numeric = pd.to_numeric(denominator, errors="coerce")
+    result = (numerator_numeric / denominator_numeric) * 100.0
+    return result.where(denominator_numeric.gt(0))
+
+
+def build_entry_point_analytics_table(
+    entry_df: pd.DataFrame,
+    metadata_df: pd.DataFrame,
+    *,
+    analysis_level: str,
+    detail_level: str,
+) -> pd.DataFrame:
+    metric_columns = ["impressions", "card_clicks", "cart_count", "order_count"]
+    if entry_df.empty:
+        if analysis_level == ENTRY_POINT_LEVEL_CABINET:
+            base_columns = ["Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Точка входа"]
+        elif analysis_level == ENTRY_POINT_LEVEL_BAND:
+            base_columns = ["Банда", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Банда", "Точка входа"]
+        else:
+            base_columns = (
+                ["Артикул продавца", "Артикул WB", "Название", "Раздел", "Точка входа"]
+                if detail_level == ENTRY_POINT_DETAIL_DETAILED
+                else ["Артикул продавца", "Артикул WB", "Название", "Точка входа"]
+            )
+        return pd.DataFrame(
+            columns=base_columns
+            + [
+                "Показы",
+                "Переходы в карточку",
+                "Добавления в корзину",
+                "Конверсия в корзину",
+                "Заказы",
+                "Конверсия в заказ",
+            ]
+        )
+
+    df = entry_df.copy()
+    for column in ("nm_id", *metric_columns):
+        if column not in df.columns:
+            df[column] = pd.NA
+    df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+    df = df.dropna(subset=["nm_id"]).copy()
+    df["nm_id"] = df["nm_id"].astype(int)
+    for column in metric_columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    if not metadata_df.empty:
+        meta = metadata_df.copy()
+        if "nm_id" not in meta.columns:
+            meta["nm_id"] = pd.NA
+        meta["nm_id"] = pd.to_numeric(meta["nm_id"], errors="coerce")
+        meta = meta.dropna(subset=["nm_id"]).copy()
+        meta["nm_id"] = meta["nm_id"].astype(int)
+        keep_columns = [column for column in ("nm_id", "supplier_article", "title", "brand", "subject", "band_name") if column in meta.columns]
+        meta = meta[keep_columns].drop_duplicates(subset=["nm_id"], keep="first")
+        df = df.merge(meta, on="nm_id", how="left", suffixes=("", "_meta"))
+        for column in ("supplier_article", "title", "brand", "subject", "band_name"):
+            meta_column = f"{column}_meta"
+            if meta_column not in df.columns:
+                continue
+            if column in df.columns:
+                df[column] = df[column].where(df[column].notna() & df[column].astype(str).ne(""), df[meta_column])
+            else:
+                df[column] = df[meta_column]
+            df = df.drop(columns=[meta_column])
+
+    for column in ("supplier_article", "title", "section", "entry_point"):
+        if column not in df.columns:
+            df[column] = pd.NA
+    if "band_name" not in df.columns:
+        df["band_name"] = pd.NA
+
+    df["supplier_article"] = df["supplier_article"].fillna("").astype(str)
+    df["title"] = df["title"].fillna("").astype(str)
+    df["section"] = df["section"].fillna("").astype(str)
+    df["entry_point"] = df["entry_point"].fillna("").astype(str)
+    df["band_name"] = df["band_name"].fillna("Без банды").astype(str)
+
+    if detail_level == ENTRY_POINT_DETAIL_COARSE:
+        df["Точка входа"] = df.apply(
+            lambda row: classify_entry_point_bucket(row.get("section"), row.get("entry_point")),
+            axis=1,
+        )
+    else:
+        df["Раздел"] = df["section"].replace("", "Без раздела")
+        df["Точка входа"] = df["entry_point"].replace("", "Без точки входа")
+
+    if analysis_level == ENTRY_POINT_LEVEL_CABINET:
+        group_columns = ["Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Точка входа"]
+    elif analysis_level == ENTRY_POINT_LEVEL_BAND:
+        group_columns = ["Банда", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Банда", "Точка входа"]
+        df["Банда"] = df["band_name"].replace("", "Без банды")
+    else:
+        group_columns = (
+            ["Артикул продавца", "Артикул WB", "Название", "Раздел", "Точка входа"]
+            if detail_level == ENTRY_POINT_DETAIL_DETAILED
+            else ["Артикул продавца", "Артикул WB", "Название", "Точка входа"]
+        )
+        df["Артикул WB"] = df["nm_id"]
+        df["Артикул продавца"] = df["supplier_article"].replace("", "—")
+        df["Название"] = df["title"].replace("", "—")
+
+    aggregations = {column: (lambda series: series.sum(min_count=1)) for column in metric_columns}
+    grouped = (
+        df.groupby(group_columns, as_index=False, dropna=False)[metric_columns]
+        .agg(aggregations)
+        .rename(
+            columns={
+                "impressions": "Показы",
+                "card_clicks": "Переходы в карточку",
+                "cart_count": "Добавления в корзину",
+                "order_count": "Заказы",
+            }
+        )
+    )
+    grouped["Конверсия в корзину"] = _compute_entry_point_conversion(
+        grouped["Добавления в корзину"],
+        grouped["Переходы в карточку"],
+    )
+    grouped["Конверсия в заказ"] = _compute_entry_point_conversion(
+        grouped["Заказы"],
+        grouped["Добавления в корзину"],
+    )
+
+    if analysis_level == ENTRY_POINT_LEVEL_CABINET and detail_level == ENTRY_POINT_DETAIL_COARSE:
+        total_row = {
+            "Точка входа": ENTRY_POINT_GROUP_TOTAL,
+            "Показы": grouped["Показы"].sum(min_count=1),
+            "Переходы в карточку": grouped["Переходы в карточку"].sum(min_count=1),
+            "Добавления в корзину": grouped["Добавления в корзину"].sum(min_count=1),
+            "Заказы": grouped["Заказы"].sum(min_count=1),
+        }
+        total_row["Конверсия в корзину"] = _compute_entry_point_conversion(
+            pd.Series([total_row["Добавления в корзину"]]),
+            pd.Series([total_row["Переходы в карточку"]]),
+        ).iloc[0]
+        total_row["Конверсия в заказ"] = _compute_entry_point_conversion(
+            pd.Series([total_row["Заказы"]]),
+            pd.Series([total_row["Добавления в корзину"]]),
+        ).iloc[0]
+        grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
+        grouped["__entry_sort"] = grouped["Точка входа"].map(
+            {label: index for index, label in enumerate(ENTRY_POINT_GROUP_ORDER)}
+        ).fillna(len(ENTRY_POINT_GROUP_ORDER))
+        grouped = grouped.sort_values(["__entry_sort", "Точка входа"], kind="stable").drop(columns=["__entry_sort"])
+    elif detail_level == ENTRY_POINT_DETAIL_COARSE:
+        sort_columns = ["Точка входа"]
+        if analysis_level == ENTRY_POINT_LEVEL_BAND:
+            sort_columns = ["Банда", "Точка входа"]
+        elif analysis_level == ENTRY_POINT_LEVEL_ARTICLE:
+            sort_columns = ["Артикул продавца", "Артикул WB", "Точка входа"]
+        grouped["__entry_sort"] = grouped["Точка входа"].map(
+            {label: index for index, label in enumerate(ENTRY_POINT_GROUP_ORDER)}
+        ).fillna(len(ENTRY_POINT_GROUP_ORDER))
+        grouped = grouped.sort_values(
+            [column for column in sort_columns if column != "Точка входа"] + ["__entry_sort", "Точка входа"],
+            kind="stable",
+        ).drop(columns=["__entry_sort"])
+    else:
+        grouped = grouped.sort_values(group_columns, kind="stable")
+
+    return grouped.reset_index(drop=True)
+
+
+def style_entry_point_analytics_table(display_df: pd.DataFrame):
+    required_columns = {"Добавления в корзину", "Конверсия в корзину"}
+    if display_df.empty or not required_columns.issubset(display_df.columns):
+        return display_df
+    if len(display_df.index) * len(display_df.columns) > STYLER_MAX_CELLS:
+        return display_df
+
+    conversion_column_index = display_df.columns.get_loc("Конверсия в корзину")
+
+    def _highlight_low_cart_conversion(row: pd.Series) -> list[str]:
+        styles = [""] * len(display_df.columns)
+        cart_value = pd.to_numeric(pd.Series([row.get("Добавления в корзину")]), errors="coerce").iloc[0]
+        if pd.notna(cart_value) and float(cart_value) < 50:
+            styles[conversion_column_index] = f"background-color: {ENTRY_POINT_CONVERSION_HIGHLIGHT}"
+        return styles
+
+    return display_df.style.apply(_highlight_low_cart_conversion, axis=1)
+
+
+@st.cache_data(show_spinner=False)
 def load_search_queries_by_date_from_db(snapshot_date: date, cache_buster: str | None = None) -> dict[str, int]:
     try:
         with session_scope() as session:
@@ -3146,6 +3498,8 @@ def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataF
         return pd.DataFrame(
             columns=[
                 "nm_id", "tracked_label", "query_group", "lifecycle_status",
+                "total_main_warehouses", "warehouses_with_stock",
+                "zero_warehouses_count", "no_data_warehouses_count",
                 "zero_warehouses", "no_data_warehouses",
                 "search_queries", "zone_share_pct", "conversion_pct",
                 "profit_per_order", "lost_orders", "lost_profit_rub",
@@ -3157,6 +3511,8 @@ def build_stock_warehouse_problem_table(product_table: pd.DataFrame) -> pd.DataF
         product_table[status_column].ne(STOCK_STATUS_OK),
         [
             "nm_id", "tracked_label", "query_group", "lifecycle_status",
+            "total_main_warehouses", "warehouses_with_stock",
+            "zero_warehouses_count", "no_data_warehouses_count",
             "zero_warehouses", "no_data_warehouses",
             "search_queries", "zone_share_pct", "conversion_pct",
             "profit_per_order", "lost_orders", "lost_profit_rub",
@@ -3210,6 +3566,10 @@ def build_stock_warehouse_display_dataframe(
                 "tracked_label": "Название",
                 "query_group": "Товарная группа",
                 "lifecycle_status": "Статус товара",
+                "total_main_warehouses": "Итого по осн. складам",
+                "warehouses_with_stock": "Складов в наличии",
+                "zero_warehouses_count": "Складов с нулём",
+                "no_data_warehouses_count": "Складов без данных",
                 "zero_warehouses": "Нулевые склады",
                 "no_data_warehouses": "Склады без данных",
                 "search_queries": "Поисковые запросы",
@@ -3226,6 +3586,10 @@ def build_stock_warehouse_display_dataframe(
                 "Название",
                 "Товарная группа",
                 "Статус товара",
+                "Итого по осн. складам",
+                "Складов в наличии",
+                "Складов с нулём",
+                "Складов без данных",
                 "Нулевые склады",
                 "Склады без данных",
                 "Поисковые запросы",
@@ -5396,6 +5760,73 @@ def build_warnings(row: pd.Series, previous_row: pd.Series | None = None) -> lis
                 warnings.append("Остаток снизился")
 
     return warnings
+
+
+def render_entry_point_analytics_tab(filtered: pd.DataFrame) -> None:
+    st.subheader(ENTRY_POINT_ANALYTICS_TAB_LABEL)
+
+    selected_dates = sorted(d for d in filtered.get("report_date", pd.Series(dtype=object)).dropna().unique().tolist())
+    selected_nm_ids = sorted(
+        pd.to_numeric(filtered.get("nm_id", pd.Series(dtype=object)), errors="coerce")
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist()
+    )
+    if not selected_dates or not selected_nm_ids:
+        st.info("Нет выбранных дат или товаров для аналитики точки входа.")
+        return
+
+    selector_columns = st.columns(2)
+    analysis_level = selector_columns[0].radio(
+        "Уровень анализа",
+        options=[ENTRY_POINT_LEVEL_CABINET, ENTRY_POINT_LEVEL_BAND, ENTRY_POINT_LEVEL_ARTICLE],
+        horizontal=True,
+        key="entry_point_analysis_level",
+    )
+    detail_level = selector_columns[1].radio(
+        "Детализация",
+        options=[ENTRY_POINT_DETAIL_COARSE, ENTRY_POINT_DETAIL_DETAILED],
+        horizontal=True,
+        key="entry_point_detail_level",
+    )
+
+    cache_buster = resolve_db_dataset_cache_buster()
+    entry_df = load_entry_point_day_range_from_db(tuple(selected_dates), tuple(selected_nm_ids), cache_buster=cache_buster)
+    if entry_df.empty:
+        st.info("В выбранном периоде нет данных из fact_entry_point_day.")
+        return
+
+    metadata_df = build_entry_point_metadata(filtered)
+    display_df = build_entry_point_analytics_table(
+        entry_df,
+        metadata_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+    )
+    if display_df.empty:
+        st.info("После агрегации данных для выбранного режима не осталось строк.")
+        return
+
+    st.dataframe(
+        style_entry_point_analytics_table(display_df),
+        width="stretch",
+        hide_index=True,
+        height=720,
+        column_config={
+            "Артикул WB": st.column_config.NumberColumn("Артикул WB", format="%d"),
+            "Показы": st.column_config.NumberColumn("Показы", format="%.0f"),
+            "Переходы в карточку": st.column_config.NumberColumn("Переходы в карточку", format="%.0f"),
+            "Добавления в корзину": st.column_config.NumberColumn("Добавления в корзину", format="%.0f"),
+            "Конверсия в корзину": st.column_config.NumberColumn("Конверсия в корзину", format="%.2f"),
+            "Заказы": st.column_config.NumberColumn("Заказы", format="%.0f"),
+            "Конверсия в заказ": st.column_config.NumberColumn("Конверсия в заказ", format="%.2f"),
+        },
+    )
+    st.caption(
+        "*Конверсия при количестве корзин менее 50 подсвечивается жёлтым цветом. "
+        "Такой показатель рассчитан корректно, но имеет пониженную статистическую достоверность.*"
+    )
 
 
 def render_overview_tab(
@@ -8687,19 +9118,13 @@ def main() -> None:
     detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
     default_detail_date = detail_dates[0]
 
-    tab_overview, tab_ad_campaign, tab_product, tab_charts, tab_price_monitor, tab_stock_warehouse, tab_upload = st.tabs(
-        [
-            "ИТОГО",
-            AD_CAMPAIGN_PRODUCT_LABEL,
-            "Карточка товара",
-            "Графики",
-            WB_SITE_PRICE_TAB_LABEL,
-            STOCK_WAREHOUSE_TAB_LABEL,
-            UPLOAD_TAB_TITLE,
-        ]
+    tab_overview, tab_entry_point, tab_ad_campaign, tab_product, tab_charts, tab_price_monitor, tab_stock_warehouse, tab_upload = st.tabs(
+        build_main_tab_labels()
     )
     with tab_overview:
         render_overview_tab(filtered, filter_debug_trace, display_coverage)
+    with tab_entry_point:
+        render_entry_point_analytics_tab(filtered)
     with tab_ad_campaign:
         render_ad_campaign_product_tab(
             ad_campaign_product_df,

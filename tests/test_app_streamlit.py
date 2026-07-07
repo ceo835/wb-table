@@ -25,6 +25,7 @@ from app_streamlit import (
     build_streamlit_display_min_date_caption,
     build_band_summary_table,
     build_category_summary_table,
+    build_entry_point_analytics_table,
     build_chart_series_dataframe,
     build_display_coverage_summary,
     build_debug_snapshot,
@@ -51,6 +52,7 @@ from app_streamlit import (
     build_grouped_by_date_dataset,
     build_import_format_error,
     build_last_upload_result,
+    build_main_tab_labels,
     build_upload_tab_sections,
     build_latest_snapshot_dataset,
     build_pipeline_status_messages,
@@ -90,6 +92,7 @@ from app_streamlit import (
     build_stock_all_product_level,
     build_stock_warehouse_display_dataframe,
     build_stock_warehouse_summary_metrics,
+    style_entry_point_analytics_table,
     format_summary_rub,
     resolve_stock_warehouse_default_snapshot_date,
     resolve_effective_import_date,
@@ -123,6 +126,191 @@ def test_build_chart_kpi_card_html_uses_fixed_height_layout() -> None:
     assert "justify-content:space-between" in html
     assert "min-height:32px" in html
     assert "min-height:28px" in html
+
+
+def test_build_main_tab_labels_includes_entry_point_tab_next_to_overview() -> None:
+    labels = build_main_tab_labels()
+
+    assert labels[0] == "ИТОГО"
+    assert labels[1] == "Аналитика точки входа"
+
+
+def test_build_entry_point_analytics_table_cabinet_coarse_groups_and_total() -> None:
+    entry_df = pd.DataFrame(
+        [
+            {
+                "date": "2026-07-01",
+                "nm_id": 101,
+                "section": "Поиск",
+                "entry_point": "Выдача",
+                "impressions": 100,
+                "card_clicks": 20,
+                "cart_count": 10,
+                "order_count": 2,
+            },
+            {
+                "date": "2026-07-01",
+                "nm_id": 102,
+                "section": "Каталог",
+                "entry_point": "Рубрика",
+                "impressions": 50,
+                "card_clicks": 10,
+                "cart_count": 5,
+                "order_count": 1,
+            },
+            {
+                "date": "2026-07-01",
+                "nm_id": 103,
+                "section": "Похожие товары",
+                "entry_point": "Полка",
+                "impressions": 30,
+                "card_clicks": 6,
+                "cart_count": 3,
+                "order_count": 1,
+            },
+        ]
+    )
+
+    result = build_entry_point_analytics_table(
+        entry_df,
+        pd.DataFrame(),
+        analysis_level="Кабинет",
+        detail_level="Укрупнённо",
+    )
+
+    assert result["Точка входа"].tolist() == ["Поиск", "Каталог", "Рекомендательные полки", "Итого"]
+    total_row = result[result["Точка входа"] == "Итого"].iloc[0]
+    assert total_row["Показы"] == 180
+    assert total_row["Переходы в карточку"] == 36
+    assert total_row["Добавления в корзину"] == 18
+    assert total_row["Заказы"] == 4
+    assert round(float(total_row["Конверсия в корзину"]), 2) == 50.0
+    assert round(float(total_row["Конверсия в заказ"]), 2) == 22.22
+
+
+def test_build_entry_point_analytics_table_article_detailed_keeps_real_section_and_entry_point() -> None:
+    entry_df = pd.DataFrame(
+        [
+            {
+                "date": "2026-07-01",
+                "nm_id": 101,
+                "section": "Поиск",
+                "entry_point": "Выдача",
+                "supplier_article": "art-101",
+                "title": "Товар 101",
+                "impressions": 100,
+                "card_clicks": 20,
+                "cart_count": 10,
+                "order_count": 2,
+            },
+            {
+                "date": "2026-07-01",
+                "nm_id": 101,
+                "section": "Каталог",
+                "entry_point": "Рубрика",
+                "supplier_article": "art-101",
+                "title": "Товар 101",
+                "impressions": 50,
+                "card_clicks": 10,
+                "cart_count": 4,
+                "order_count": 1,
+            },
+        ]
+    )
+    metadata_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 101,
+                "supplier_article": "art-101",
+                "title": "Товар 101",
+                "band_name": "Банда А",
+            }
+        ]
+    )
+
+    result = build_entry_point_analytics_table(
+        entry_df,
+        metadata_df,
+        analysis_level="Артикулы",
+        detail_level="Детально",
+    )
+
+    assert result[["Раздел", "Точка входа"]].to_dict(orient="records") == [
+        {"Раздел": "Каталог", "Точка входа": "Рубрика"},
+        {"Раздел": "Поиск", "Точка входа": "Выдача"},
+    ]
+    assert result["Артикул WB"].tolist() == [101, 101]
+    assert result["Артикул продавца"].tolist() == ["art-101", "art-101"]
+    assert result["Название"].tolist() == ["Товар 101", "Товар 101"]
+
+
+def test_build_entry_point_analytics_table_band_coarse_uses_band_names() -> None:
+    entry_df = pd.DataFrame(
+        [
+            {
+                "date": "2026-07-01",
+                "nm_id": 101,
+                "section": "Поиск",
+                "entry_point": "Выдача",
+                "impressions": 100,
+                "card_clicks": 20,
+                "cart_count": 10,
+                "order_count": 2,
+            },
+            {
+                "date": "2026-07-01",
+                "nm_id": 102,
+                "section": "Каталог",
+                "entry_point": "Рубрика",
+                "impressions": 50,
+                "card_clicks": 10,
+                "cart_count": 5,
+                "order_count": 1,
+            },
+        ]
+    )
+    metadata_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "band_name": "Трусы женские"},
+            {"nm_id": 102, "band_name": "Футболки"},
+        ]
+    )
+
+    result = build_entry_point_analytics_table(
+        entry_df,
+        metadata_df,
+        analysis_level="Банды",
+        detail_level="Укрупнённо",
+    )
+
+    assert result[["Банда", "Точка входа"]].to_dict(orient="records") == [
+        {"Банда": "Трусы женские", "Точка входа": "Поиск"},
+        {"Банда": "Футболки", "Точка входа": "Каталог"},
+    ]
+
+
+def test_style_entry_point_analytics_table_highlights_low_cart_count_conversion() -> None:
+    display_df = pd.DataFrame(
+        [
+            {
+                "Точка входа": "Поиск",
+                "Добавления в корзину": 49,
+                "Конверсия в корзину": 12.5,
+            },
+            {
+                "Точка входа": "Каталог",
+                "Добавления в корзину": 50,
+                "Конверсия в корзину": 15.0,
+            },
+        ]
+    )
+
+    styled = style_entry_point_analytics_table(display_df)
+
+    assert isinstance(styled, Styler)
+    html = styled.to_html()
+    assert "#fef3c7" in html
+    assert "Конверсия в корзину" in html
 
 
 def test_spp_columns_are_exposed_in_main_streamlit_views() -> None:
@@ -323,13 +511,14 @@ def test_get_db_dataset_cache_buster_includes_seller_price_state(monkeypatch) ->
             ("2026-06-29", "2026-06-29T10:05:00+00:00", 59),
             ("2026-06-29", "2026-06-29T10:10:00+00:00", 354),
             ("2026-06-29", "2026-06-29T10:15:00+00:00", 3),
-            ("2026-06-29", "2026-06-29T10:20:00+00:00", 12),
-            ("2026-06-29", "2026-06-29T10:25:00+00:00", 3106),
-            ("2026-06-29", "2026-06-29T10:30:00+00:00", 84),
-            ("2026-06-29", "2026-06-29T10:35:00+00:00", 44),
-            ("2026-06-29", "2026-06-29T10:40:00+00:00", 755),
-            ("2026-06-29", "2026-06-29T10:45:00+00:00", 2647),
-            ("2026-06-29", "2026-06-29T10:50:00+00:00", 273),
+            ("2026-06-29", "2026-06-29T10:20:00+00:00", 77),
+            ("2026-06-29", "2026-06-29T10:25:00+00:00", 12),
+            ("2026-06-29", "2026-06-29T10:30:00+00:00", 3106),
+            ("2026-06-29", "2026-06-29T10:35:00+00:00", 84),
+            ("2026-06-29", "2026-06-29T10:40:00+00:00", 44),
+            ("2026-06-29", "2026-06-29T10:45:00+00:00", 755),
+            ("2026-06-29", "2026-06-29T10:50:00+00:00", 2647),
+            ("2026-06-29", "2026-06-29T10:55:00+00:00", 273),
         ]
     )
 
@@ -350,13 +539,15 @@ def test_get_db_dataset_cache_buster_includes_seller_price_state(monkeypatch) ->
 
     assert "2026-06-29T10:10:00+00:00" in cache_buster
     assert "|354|" in f"|{cache_buster}|"
-    assert "2026-06-29T10:25:00+00:00" in cache_buster
-    assert "|3106|" in f"|{cache_buster}|"
+    assert "2026-06-29T10:20:00+00:00" in cache_buster
+    assert "|77|" in f"|{cache_buster}|"
     assert "2026-06-29T10:30:00+00:00" in cache_buster
+    assert "|3106|" in f"|{cache_buster}|"
+    assert "2026-06-29T10:35:00+00:00" in cache_buster
     assert "|84|" in f"|{cache_buster}|"
-    assert "2026-06-29T10:45:00+00:00" in cache_buster
-    assert "|2647|" in f"|{cache_buster}|"
     assert "2026-06-29T10:50:00+00:00" in cache_buster
+    assert "|2647|" in f"|{cache_buster}|"
+    assert "2026-06-29T10:55:00+00:00" in cache_buster
     assert "|273|" in f"|{cache_buster}|"
 
 
@@ -941,6 +1132,10 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
         "Название",
         "Товарная группа",
         "Статус товара",
+        "Итого по осн. складам",
+        "Складов в наличии",
+        "Складов с нулём",
+        "Складов без данных",
         "Нулевые склады",
         "Склады без данных",
         "Поисковые запросы",
@@ -951,8 +1146,45 @@ def test_build_stock_warehouse_display_dataframe_maps_human_labels_for_main_and_
         "Потенц. прибыль, ₽",
         "Проблема",
     ]
+    assert problem_display.loc[0, "Итого по осн. складам"] == 0
+    assert problem_display.loc[0, "Складов в наличии"] == 0
+    assert problem_display.loc[0, "Складов с нулём"] == 1
+    assert problem_display.loc[0, "Складов без данных"] == 1
     assert problem_display.loc[0, "Проблема"] == "Есть нулевые остатки"
     assert problem_display.loc[0, "Товарная группа"] == "Не определена"
+
+
+def test_build_stock_warehouse_problem_table_keeps_wb_stock_summary_columns() -> None:
+    product_table = pd.DataFrame(
+        [
+            {
+                "nm_id": 101,
+                "tracked_label": "Товар 101",
+                "query_group": "women_underwear",
+                "lifecycle_status": "active",
+                "total_main_warehouses": 7,
+                "warehouses_with_stock": 2,
+                "zero_warehouses_count": 1,
+                "no_data_warehouses_count": 0,
+                "zero_warehouses": "Тула",
+                "no_data_warehouses": "—",
+                "search_queries": pd.NA,
+                "zone_share_pct": pd.NA,
+                "conversion_pct": pd.NA,
+                "profit_per_order": 100.0,
+                "lost_orders": pd.NA,
+                "lost_profit_rub": pd.NA,
+                "problem_status": "ZERO_ON_MAIN_WAREHOUSES",
+            }
+        ]
+    )
+
+    result = app_streamlit.build_stock_warehouse_problem_table(product_table)
+
+    assert result.loc[0, "total_main_warehouses"] == 7
+    assert result.loc[0, "warehouses_with_stock"] == 2
+    assert result.loc[0, "zero_warehouses_count"] == 1
+    assert result.loc[0, "no_data_warehouses_count"] == 0
 
 
 def test_prepare_stock_warehouse_table_for_display_formats_new_lost_profit_columns() -> None:
