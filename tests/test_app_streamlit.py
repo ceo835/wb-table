@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
+from xml.etree import ElementTree as ET
 
 import app_streamlit
 import pandas as pd
@@ -39,6 +40,7 @@ from app_streamlit import (
     build_chart_scope_rows,
     build_threshold_breaches_table,
     build_excel_export_bytes,
+    build_xml_export_bytes,
     build_export_dataframe,
     build_data_quality_label,
     build_overview_export_tables,
@@ -328,6 +330,8 @@ def test_get_db_dataset_cache_buster_includes_seller_price_state(monkeypatch) ->
             ("2026-06-29", "2026-06-29T10:30:00+00:00", 84),
             ("2026-06-29", "2026-06-29T10:35:00+00:00", 44),
             ("2026-06-29", "2026-06-29T10:40:00+00:00", 755),
+            ("2026-06-29", "2026-06-29T10:45:00+00:00", 2647),
+            ("2026-06-29", "2026-06-29T10:50:00+00:00", 273),
         ]
     )
 
@@ -352,6 +356,10 @@ def test_get_db_dataset_cache_buster_includes_seller_price_state(monkeypatch) ->
     assert "|3106|" in f"|{cache_buster}|"
     assert "2026-06-29T10:30:00+00:00" in cache_buster
     assert "|84|" in f"|{cache_buster}|"
+    assert "2026-06-29T10:45:00+00:00" in cache_buster
+    assert "|2647|" in f"|{cache_buster}|"
+    assert "2026-06-29T10:50:00+00:00" in cache_buster
+    assert "|273|" in f"|{cache_buster}|"
 
 
 def test_load_app_dataset_db_falls_back_when_cache_buster_raises(monkeypatch) -> None:
@@ -3922,6 +3930,52 @@ def test_build_excel_export_bytes_creates_xlsx_from_current_table() -> None:
     assert restored.to_dict(orient="records") == export_df.to_dict(orient="records")
 
 
+def test_build_xml_export_bytes_creates_xml_from_current_table() -> None:
+    export_df = pd.DataFrame(
+        [
+            {
+                "Дата snapshot": "2026-06-18",
+                "Артикул WB": 202,
+                "Артикул продавца": "kept-row",
+                "Статус": "OK",
+            }
+        ]
+    )
+
+    payload = build_xml_export_bytes(export_df, root_tag="problem_products", row_tag="product")
+    root = ET.fromstring(payload.decode("utf-8"))
+
+    assert root.tag == "problem_products"
+    product = root.find("product")
+    assert product is not None
+    fields = {(field.attrib.get("name") or ""): (field.text or "") for field in product.findall("field")}
+    assert fields == {
+        "Дата snapshot": "2026-06-18",
+        "Артикул WB": "202",
+        "Артикул продавца": "kept-row",
+        "Статус": "OK",
+    }
+
+
+def test_build_xml_export_bytes_replaces_missing_values_with_dash() -> None:
+    export_df = pd.DataFrame(
+        [
+            {
+                "Артикул WB": 202,
+                "Склад": pd.NA,
+            }
+        ]
+    )
+
+    payload = build_xml_export_bytes(export_df)
+    root = ET.fromstring(payload.decode("utf-8"))
+    row = root.find("row")
+    assert row is not None
+    fields = {(field.attrib.get("name") or ""): (field.text or "") for field in row.findall("field")}
+    assert fields["Артикул WB"] == "202"
+    assert fields["Склад"] == "—"
+
+
 def test_prepare_stock_warehouse_history_snapshot_dataframe_keeps_latest_loaded_at_per_day_nm_warehouse() -> None:
     raw = pd.DataFrame(
         [
@@ -5338,3 +5392,79 @@ def test_render_charts_tab_contains_new_tab() -> None:
             mock_tabs.assert_called_once()
             args, kwargs = mock_tabs.call_args
             assert "Остатки и скорость продаж" in args[0]
+def test_render_stock_speed_charts_passes_cache_buster_to_range_loaders(monkeypatch) -> None:
+    from unittest.mock import patch
+
+    d1 = pd.Timestamp("2026-07-01").date()
+    d2 = pd.Timestamp("2026-07-02").date()
+    filtered = pd.DataFrame({"report_date": [d1, d2]})
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(app_streamlit, "resolve_db_dataset_cache_buster", lambda: "buster-stock")
+
+    def fake_load_stock_warehouse_snapshot_range_from_db(date_from, date_to, cache_buster=None):
+        calls["snapshot"] = (date_from, date_to, cache_buster)
+        return pd.DataFrame([{"snapshot_date": d1, "nm_id": 101, "stock_qty": 5}])
+
+    def fake_load_ivan_stock_range_from_db(date_from, date_to, cache_buster=None):
+        calls["ivan"] = (date_from, date_to, cache_buster)
+        return pd.DataFrame([{"snapshot_date": d1, "nm_id": 101, "one_c_stock_qty": 2}])
+
+    def fake_load_funnel_sales_range_from_db(date_from, date_to, cache_buster=None):
+        calls["funnel"] = (date_from, date_to, cache_buster)
+        return pd.DataFrame([{"date": pd.Timestamp("2026-06-30").date(), "nm_id": 101, "order_count": 1}])
+
+    def fake_load_settings_product_query_groups_from_db(cache_buster=None):
+        calls["settings"] = cache_buster
+        return pd.DataFrame(
+            [{"nm_id": 101, "query_group": "women_underwear", "supplier_article": "art-101", "title": "Товар 101"}]
+        )
+
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_stock_warehouse_snapshot_range_from_db",
+        fake_load_stock_warehouse_snapshot_range_from_db,
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_ivan_stock_range_from_db",
+        fake_load_ivan_stock_range_from_db,
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_funnel_sales_range_from_db",
+        fake_load_funnel_sales_range_from_db,
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_settings_product_query_groups_from_db",
+        fake_load_settings_product_query_groups_from_db,
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "prepare_stock_speed_charts_dataframe",
+        lambda **kwargs: pd.DataFrame(
+            [{"date": d1, "sales_speed": 1.0, "forecast_months": 1.0, "band_name": "Трусы женские"}]
+        ),
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "aggregate_stock_charts_by_cabinet",
+        lambda df_all, speed_col: pd.DataFrame(
+            [{"date": d1, "sales_speed": 1.0, "forecast_months": 1.0, "band_name": "Кабинет"}]
+        ),
+    )
+    monkeypatch.setattr(app_streamlit, "build_stock_speed_chart_altair", lambda **kwargs: object())
+
+    with patch("streamlit.subheader"), \
+         patch("streamlit.warning"), \
+         patch("streamlit.info"), \
+         patch("streamlit.markdown"), \
+         patch("streamlit.altair_chart"), \
+         patch("streamlit.radio", side_effect=["За кабинет", "Позавчера"]):
+        app_streamlit.render_stock_speed_charts(filtered, None)
+
+    assert calls["snapshot"] == (d1, d2, "buster-stock")
+    assert calls["ivan"] == (d1, d2, "buster-stock")
+    assert calls["funnel"] == (pd.Timestamp("2026-06-24").date(), d1, "buster-stock")
+    assert calls["settings"] == "buster-stock"

@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
+from xml.etree import ElementTree as ET
 
 import altair as alt
 import pandas as pd
@@ -976,6 +977,20 @@ def get_db_dataset_cache_buster() -> str:
                 func.count(),
             )
         ).one()
+        funnel_state = session.execute(
+            select(
+                func.max(FactFunnelDay.date),
+                func.max(FactFunnelDay.loaded_at),
+                func.count(),
+            )
+        ).one()
+        settings_products_state = session.execute(
+            select(
+                func.max(SettingsProducts.loaded_at),
+                func.count(func.distinct(SettingsProducts.nm_id)),
+                func.count(),
+            )
+        ).one()
     return "|".join(
         "" if value is None else str(value) 
         for value in (
@@ -988,6 +1003,8 @@ def get_db_dataset_cache_buster() -> str:
             *dim_product_size_state,
             *size_sales_state,
             *ivan_stock_state,
+            *funnel_state,
+            *settings_products_state,
         )
     )
 
@@ -4329,7 +4346,7 @@ def render_stock_all_tab(
             size_sales_df=size_sales_df,
         )
     else:
-        sales_df = load_sales_speed_data_from_db(selected_snapshot_date)
+        sales_df = load_sales_speed_data_from_db(selected_snapshot_date, cache_buster=cache_buster)
         display_df, numeric_cols = build_stock_all_display_dataframe(
             product_df,
             level=level,
@@ -4481,6 +4498,18 @@ def render_stock_warehouse_tab(data_source: str) -> None:
 
         st.write("**Проблемные товары**")
         problem_display = build_stock_warehouse_display_dataframe(problem_table, problem_table=True)
+        problem_xml_bytes = build_xml_export_bytes(
+            problem_display,
+            root_tag="problem_products",
+            row_tag="product",
+        )
+        st.download_button(
+            "Скачать XML",
+            data=problem_xml_bytes,
+            file_name=f"stock_problem_products_{selected_snapshot_date.isoformat()}.xml",
+            mime="application/xml",
+            key="stock_problem_products_xml_download",
+        )
         st.dataframe(
             prepare_stock_warehouse_table_for_display(problem_display, []),
             width="stretch",
@@ -4509,6 +4538,18 @@ def render_stock_warehouse_tab(data_source: str) -> None:
         warehouse_display_columns = [warehouse_name for warehouse_name in selected_warehouses if warehouse_name in table_display.columns]
 
         st.write("**Остатки по складам**")
+        warehouse_xml_bytes = build_xml_export_bytes(
+            table_display,
+            root_tag="warehouse_stock_rows",
+            row_tag="product",
+        )
+        st.download_button(
+            "Скачать XML",
+            data=warehouse_xml_bytes,
+            file_name=f"stock_warehouses_{selected_snapshot_date.isoformat()}.xml",
+            mime="application/xml",
+            key="stock_warehouses_xml_download",
+        )
         st.dataframe(
             prepare_stock_warehouse_table_for_display(table_display, warehouse_display_columns),
             width="stretch",
@@ -5239,6 +5280,22 @@ def build_excel_export_bytes(export_df: pd.DataFrame) -> bytes:
         export_df.to_excel(writer, index=False, sheet_name="Итого")
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def build_xml_export_bytes(
+    export_df: pd.DataFrame,
+    *,
+    root_tag: str = "rows",
+    row_tag: str = "row",
+) -> bytes:
+    normalized_df = export_df.where(pd.notna(export_df), "—").copy()
+    root = ET.Element(root_tag)
+    for row in normalized_df.to_dict(orient="records"):
+        row_element = ET.SubElement(root, row_tag)
+        for column_name, value in row.items():
+            field_element = ET.SubElement(row_element, "field", name=str(column_name))
+            field_element.text = str(value)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def build_filtered_table_export_filename(table_df: pd.DataFrame, extension: str) -> str:
@@ -6810,7 +6867,7 @@ def build_threshold_breaches_table(chart_df: pd.DataFrame, context: dict[str, ob
 
 
 @st.cache_data(show_spinner=False)
-def load_sales_speed_data_from_db(snapshot_date: date) -> pd.DataFrame:
+def load_sales_speed_data_from_db(snapshot_date: date, cache_buster: str | None = None) -> pd.DataFrame:
     """
     Загружает nm_id, date и order_count из fact_funnel_day за 7 завершенных дней
     до snapshot_date (т.е. [snapshot_date - 7 days, snapshot_date - 1 day]).
@@ -7673,7 +7730,11 @@ def render_efficiency_charts(
 
 
 @st.cache_data(show_spinner=False)
-def load_stock_warehouse_snapshot_range_from_db(date_from: date, date_to: date) -> pd.DataFrame:
+def load_stock_warehouse_snapshot_range_from_db(
+    date_from: date,
+    date_to: date,
+    cache_buster: str | None = None,
+) -> pd.DataFrame:
     with session_scope() as session:
         rows = session.execute(
             select(FactStockWarehouseSnapshot)
@@ -7699,7 +7760,11 @@ def load_stock_warehouse_snapshot_range_from_db(date_from: date, date_to: date) 
 
 
 @st.cache_data(show_spinner=False)
-def load_ivan_stock_range_from_db(date_from: date, date_to: date) -> pd.DataFrame:
+def load_ivan_stock_range_from_db(
+    date_from: date,
+    date_to: date,
+    cache_buster: str | None = None,
+) -> pd.DataFrame:
     with session_scope() as session:
         stmt = select(
             FactIvanStockSheetDay.stock_date,
@@ -7731,7 +7796,11 @@ def load_ivan_stock_range_from_db(date_from: date, date_to: date) -> pd.DataFram
 
 
 @st.cache_data(show_spinner=False)
-def load_funnel_sales_range_from_db(date_from: date, date_to: date) -> pd.DataFrame:
+def load_funnel_sales_range_from_db(
+    date_from: date,
+    date_to: date,
+    cache_buster: str | None = None,
+) -> pd.DataFrame:
     with session_scope() as session:
         stmt = select(
             FactFunnelDay.nm_id,
@@ -8035,10 +8104,22 @@ def render_stock_speed_charts(filtered: pd.DataFrame, preselected_product_label:
     speed_method = st.radio("Метод скорости", options=["Позавчера", "Прошедшая неделя"], horizontal=True, key="stock_charts_speed_method")
 
     # Загрузка
-    snapshot_df = load_stock_warehouse_snapshot_range_from_db(min_date, max_date)
-    one_c_df = load_ivan_stock_range_from_db(min_date, max_date)
-    sales_df = load_funnel_sales_range_from_db(min_date - timedelta(days=7), max_date - timedelta(days=1))
-    settings_qg_df = load_settings_product_query_groups_from_db()
+    snapshot_df = load_stock_warehouse_snapshot_range_from_db(
+        min_date,
+        max_date,
+        cache_buster=resolve_db_dataset_cache_buster(),
+    )
+    one_c_df = load_ivan_stock_range_from_db(
+        min_date,
+        max_date,
+        cache_buster=resolve_db_dataset_cache_buster(),
+    )
+    sales_df = load_funnel_sales_range_from_db(
+        min_date - timedelta(days=7),
+        max_date - timedelta(days=1),
+        cache_buster=resolve_db_dataset_cache_buster(),
+    )
+    settings_qg_df = load_settings_product_query_groups_from_db(resolve_db_dataset_cache_buster())
 
     if snapshot_df.empty and one_c_df.empty:
         st.info("Нет данных об остатках за выбранный период.")
