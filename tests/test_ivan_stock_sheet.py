@@ -57,27 +57,33 @@ def test_parse_row_nomenclature() -> None:
     assert color == "розовый"
     assert barcode == ""
 
-    # No size, no color, just barcode at the end
+    # No explicit label, but size is still parsed from the tail
     size, color, barcode = parse_row_nomenclature(
         "Подарочный набор мужской 58-60 , 2042976833877"
     )
-    assert size == ""
+    assert size == "58-60"
     assert color is None
     assert barcode == "2042976833877"
+
+
+def test_parse_row_nomenclature_extracts_tail_size_without_label() -> None:
+    size, color, barcode = parse_row_nomenclature("Трусы женские 2XL (46-48), 2039783061487")
+    assert size == "2XL (46-48)"
+    assert color is None
+    assert barcode == "2039783061487"
+
+    size, color, barcode = parse_row_nomenclature("Трусы женские 48-50")
+    assert size == "48-50"
+    assert color is None
+    assert barcode == ""
 
 
 @patch("src.db.ivan_stock_sheet_loader.GoogleSheetsClient")
 def test_load_ivan_stock_sheet_filters_and_parses(mock_sheets_client_cls) -> None:
     mock_client = MagicMock()
     mock_sheets_client_cls.return_value = mock_client
-    
+
     mock_client.get_worksheet_titles.return_value = ["Остатки"]
-    # Mock row data:
-    # Row 0: Date
-    # Row 1: Header
-    # Row 2: Valid row
-    # Row 3: Skip row (no nm_id)
-    # Row 4: Valid row (negative qty)
     mock_client.read_range.return_value = [
         ["04.07.2026"],
         ["Номенклатура, Штрихкод", "Номенклатура.Артикул", "Количество"],
@@ -86,26 +92,65 @@ def test_load_ivan_stock_sheet_filters_and_parses(mock_sheets_client_cls) -> Non
         ["Трусы детские Размер: 00 Цвет: черные детские СОБАКИ, 2050852961309", "134111625", "-20"],
     ]
 
-    # Run with write_db=False (dry-run)
     result = load_ivan_stock_sheet(write_db=False)
-    
+
     assert result["success"] is True
     assert result["stock_date"] == date(2026, 7, 4)
     assert result["total_rows"] == 5
-    assert result["data_rows"] == 3  # rows after header
+    assert result["data_rows"] == 3
     assert result["rows_with_nm_id"] == 2
     assert result["skipped_no_nm_id"] == 1
     assert result["distinct_nm_id"] == 2
-    assert result["quantity_sum_total"] == 775  # 775 + clipped(-20 -> 0)
+    assert result["quantity_sum_total"] == 775
     assert result["rows_inserted"] == 0
+
+
+@patch("src.db.ivan_stock_sheet_loader.GoogleSheetsClient")
+def test_load_ivan_stock_sheet_keeps_distinct_no_barcode_sizes(mock_sheets_client_cls) -> None:
+    mock_client = MagicMock()
+    mock_sheets_client_cls.return_value = mock_client
+    mock_client.get_worksheet_titles.return_value = ["Остатки"]
+    mock_client.read_range.return_value = [
+        ["04.07.2026"],
+        ["Номенклатура, Штрихкод", "Номенклатура.Артикул", "Количество"],
+        ["Трусы женские 2XL (46-48)", "222043180", "81"],
+        ["Трусы женские 48-50", "222043180", "51"],
+    ]
+
+    result = load_ivan_stock_sheet(write_db=False)
+
+    assert result["rows_with_nm_id"] == 2
+    assert result["distinct_nm_id"] == 1
+    assert result["distinct_nm_id_size"] == 2
+
+
+@patch("src.db.ivan_stock_sheet_loader.GoogleSheetsClient")
+def test_load_ivan_stock_sheet_uses_latest_date_block(mock_sheets_client_cls) -> None:
+    mock_client = MagicMock()
+    mock_sheets_client_cls.return_value = mock_client
+    mock_client.get_worksheet_titles.return_value = ["Остатки"]
+    mock_client.read_range.return_value = [
+        ["04.07.2026"],
+        ["Номенклатура, Штрихкод", "Номенклатура.Артикул", "Количество"],
+        ["Трусы женские 48-50", "222043180", "51"],
+        [],
+        ["07.07.2026"],
+        ["Номенклатура", "Номенклатура. Артикул", "Кол-во на всех складах"],
+        ["Трусы женские 50-52", "222043180", "26"],
+    ]
+
+    result = load_ivan_stock_sheet(write_db=False)
+
+    assert result["stock_date"] == date(2026, 7, 7)
+    assert result["rows_with_nm_id"] == 1
+    assert result["quantity_sum_total"] == 26
 
 
 @patch("src.db.ivan_stock_sheet_loader.session_scope")
 def test_load_ivan_stock_size_level_queries(mock_session_scope) -> None:
     mock_session = MagicMock()
     mock_session_scope.return_value.__enter__.return_value = mock_session
-    
-    # Mock query result
+
     mock_row = MagicMock()
     mock_row.stock_date = date(2026, 7, 4)
     mock_row.nm_id = 134111623
@@ -114,11 +159,11 @@ def test_load_ivan_stock_size_level_queries(mock_session_scope) -> None:
     mock_row.color_name = "Mix животные"
     mock_row.quantity = Decimal("775.000")
     mock_row.nomenclature_raw = "Nomenclature"
-    
+
     mock_session.execute.return_value.all.return_value = [mock_row]
-    
+
     res = load_ivan_stock_size_level(date(2026, 7, 4))
-    
+
     assert len(res) == 1
     assert res[0]["nm_id"] == 134111623
     assert res[0]["quantity"] == 775
@@ -156,18 +201,18 @@ def test_load_ivan_stock_size_level_uses_latest_snapshot_not_after_selected_date
 def test_load_ivan_stock_product_level_aggregates(mock_session_scope) -> None:
     mock_session = MagicMock()
     mock_session_scope.return_value.__enter__.return_value = mock_session
-    
+
     mock_row = MagicMock()
     mock_row.stock_date = date(2026, 7, 4)
     mock_row.nm_id = 134111623
     mock_row.ivan_stock_qty = Decimal("1000")
     mock_row.sizes_count = 2
     mock_row.barcodes_count = 2
-    
+
     mock_session.execute.return_value.all.return_value = [mock_row]
-    
+
     res = load_ivan_stock_product_level(date(2026, 7, 4))
-    
+
     assert len(res) == 1
     assert res[0]["nm_id"] == 134111623
     assert res[0]["ivan_stock_qty"] == 1000

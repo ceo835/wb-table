@@ -1,44 +1,70 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
-from typing import Any, Mapping, Sequence, Optional
-from sqlalchemy import select, func, case
+from typing import Any, Optional, Sequence
+
+from sqlalchemy import case, func, select, text
 from sqlalchemy.orm import Session
-from src.config.settings import settings
+
 from src.clients.google_sheets_client import GoogleSheetsClient
+from src.config.settings import settings
 from src.db.models import FactIvanStockSheetDay
 from src.db.session import session_scope, upsert_rows
 from src.utils.logger import get_logger
 
 logger = get_logger("ivan_stock_sheet_loader")
 
+STOCK_SHEET_NAME = "Остатки"
+DATE_REGEX = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+SIZE_LABEL_REGEX = re.compile(r"Размер:\s*(.*?)(?=\s*Цвет:|,\s*$|$)")
+COLOR_LABEL_REGEX = re.compile(r"Цвет:\s*(.*?)(?=\s*Размер:|,\s*$|$)")
+BARCODE_TAIL_REGEX = re.compile(r",\s*(\d+)\s*$")
+
+
+def _parse_tail_size_without_label(text: str) -> str:
+    if not text:
+        return ""
+
+    tail_patterns = (
+        r"([0-9]+XL\s*\([0-9]+(?:-[0-9]+)?\))$",
+        r"([A-Za-zА-Яа-я]{1,4}\s*\([0-9]+(?:-[0-9]+)?\))$",
+        r"([0-9]+(?:/[0-9]+)?-[0-9]+)$",
+        r"([0-9]+/[0-9]+)$",
+    )
+    for pattern in tail_patterns:
+        match = re.search(pattern, text.strip())
+        if match:
+            return match.group(1).strip()
+    return ""
+
 
 def parse_row_nomenclature(text: str) -> tuple[str, Optional[str], str]:
     if not text:
         return "", None, ""
-    
+
     text_str = str(text).strip()
-    
     barcode = ""
-    barcode_match = re.search(r',\s*(\d+)\s*$', text_str)
+    barcode_match = BARCODE_TAIL_REGEX.search(text_str)
     if barcode_match:
         barcode = barcode_match.group(1)
-        main_part = text_str[:barcode_match.start()].strip()
+        main_part = text_str[: barcode_match.start()].strip()
     else:
-        main_part = text_str.rstrip(',').strip()
-        
+        main_part = text_str.rstrip(",").strip()
+
     size_name = ""
-    size_match = re.search(r'Размер:\s*(.*?)(?=\s*Цвет:|,\s*$|$)', main_part)
+    size_match = SIZE_LABEL_REGEX.search(main_part)
     if size_match:
         size_name = size_match.group(1).strip()
-        
+    else:
+        size_name = _parse_tail_size_without_label(main_part)
+
     color_name = None
-    color_match = re.search(r'Цвет:\s*(.*?)(?=\s*Размер:|,\s*$|$)', main_part)
+    color_match = COLOR_LABEL_REGEX.search(main_part)
     if color_match:
         color_name = color_match.group(1).strip()
-        
+
     return size_name, color_name, barcode
 
 
@@ -70,116 +96,146 @@ def resolve_latest_ivan_stock_date(session: Session, target_date: Optional[date]
     return session.execute(stmt).scalar()
 
 
+def prune_legacy_blank_size_rows(session: Session, stock_date: date) -> int:
+    result = session.execute(
+        text(
+            """
+            delete from fact_ivan_stock_sheet_day stale
+            using fact_ivan_stock_sheet_day actual
+            where stale.stock_date = :stock_date
+              and actual.stock_date = stale.stock_date
+              and actual.nm_id = stale.nm_id
+              and coalesce(actual.barcode, '') = coalesce(stale.barcode, '')
+              and coalesce(actual.barcode, '') <> ''
+              and coalesce(stale.size_name, '') = ''
+              and coalesce(actual.size_name, '') <> ''
+              and stale.id <> actual.id
+            """
+        ),
+        {"stock_date": stock_date},
+    )
+    return max(result.rowcount or 0, 0)
+
+
+def _parse_sheet_date(value: Any) -> Optional[date]:
+    if not value:
+        return None
+    match = DATE_REGEX.search(str(value).strip())
+    if not match:
+        return None
+    day, month, year = map(int, match.group(0).split("."))
+    return date(year, month, day)
+
+
+def _is_stock_header_row(row: Sequence[Any]) -> bool:
+    row_lower = [str(cell).strip().lower() for cell in row if cell]
+    return any("номенклатур" in cell or "количеств" in cell for cell in row_lower)
+
+
+def _resolve_latest_stock_sheet_block(all_values: Sequence[Sequence[Any]]) -> tuple[date, int, int]:
+    date_rows: list[tuple[int, date]] = []
+    for idx, row in enumerate(all_values):
+        row_date = next((_parse_sheet_date(cell) for cell in row if _parse_sheet_date(cell) is not None), None)
+        if row_date is not None:
+            date_rows.append((idx, row_date))
+
+    if not date_rows:
+        raise RuntimeError("Stock date not found in the sheet.")
+
+    date_row_idx, stock_date = date_rows[-1]
+    header_idx = -1
+    search_end = min(len(all_values), date_row_idx + 10)
+    for idx in range(date_row_idx + 1, search_end):
+        if _is_stock_header_row(all_values[idx]):
+            header_idx = idx
+            break
+    if header_idx == -1:
+        raise RuntimeError(f"Header row not found for stock date block {stock_date.isoformat()}.")
+
+    parse_end = len(all_values)
+    return stock_date, header_idx, parse_end
+
+
 def load_ivan_stock_sheet(
     *,
     sheet_id: Optional[str] = None,
     write_db: bool = False,
 ) -> dict[str, Any]:
-    resolved_sheet_id = sheet_id or settings.vvbromo_google_sheet_id or "1MxVBCfKX6WSqU5_q-r9h_bFhQ61h3VxmgLNyYY9RcEs"
+    resolved_sheet_id = (
+        sheet_id
+        or settings.vvbromo_google_sheet_id
+        or "1MxVBCfKX6WSqU5_q-r9h_bFhQ61h3VxmgLNyYY9RcEs"
+    )
     creds_path = settings.google_application_credentials or "credentials.json"
-    
+
     logger.info(f"Connecting to Google Sheets for stock load: {resolved_sheet_id}")
     gs_client = GoogleSheetsClient(credentials_path=creds_path, spreadsheet_id=resolved_sheet_id)
-    
+
     titles = gs_client.get_worksheet_titles(resolved_sheet_id)
     if not titles:
         raise RuntimeError("Failed to fetch worksheets titles.")
-        
-    target_sheet = None
-    for t in titles:
-        if t.strip().lower() == "остатки":
-            target_sheet = t
-            break
-            
+
+    target_sheet = next((title for title in titles if title.strip().lower() == STOCK_SHEET_NAME.lower()), None)
     if not target_sheet:
-        raise RuntimeError("Worksheet 'Остатки' not found.")
-        
+        raise RuntimeError(f"Worksheet '{STOCK_SHEET_NAME}' not found.")
+
     all_values = gs_client.read_range(resolved_sheet_id, f"{target_sheet}!A1:Z")
     if not all_values:
-        raise RuntimeError("No data retrieved from sheet 'Остатки'.")
-        
+        raise RuntimeError(f"No data retrieved from sheet '{STOCK_SHEET_NAME}'.")
+
     total_rows = len(all_values)
-    
-    # 1. Date extraction
-    stock_date = None
-    date_regex = r'\b\d{2}\.\d{2}\.\d{4}\b'
-    for r in all_values[:5]:
-        for cell in r:
-            if cell:
-                cell_str = str(cell).strip()
-                date_match = re.search(date_regex, cell_str)
-                if date_match:
-                    d_str = date_match.group(0)
-                    day, month, year = map(int, d_str.split('.'))
-                    stock_date = date(year, month, day)
-                    break
-        if stock_date:
-            break
-            
-    if not stock_date:
-        raise RuntimeError("Stock date not found in the sheet header.")
-        
-    # Find headers row
-    header_idx = -1
-    for idx, r in enumerate(all_values[:10]):
-        r_lower = [str(cell).strip().lower() for cell in r if cell]
-        if any("номенклатура" in cell or "количество" in cell for cell in r_lower):
-            header_idx = idx
-            break
-            
-    if header_idx == -1:
-        header_idx = 0
-        
-    rows_to_save = []
+    stock_date, header_idx, parse_end = _resolve_latest_stock_sheet_block(all_values)
+
+    rows_to_save: list[dict[str, Any]] = []
     skipped_no_nm_id = 0
     data_rows = 0
     quantity_sum_total = Decimal("0")
-    
-    for idx in range(header_idx + 1, len(all_values)):
+
+    for idx in range(header_idx + 1, parse_end):
         row = all_values[idx]
         if not row:
             continue
-            
+
         col1 = str(row[0]).strip() if len(row) > 0 else ""
         col2 = str(row[1]).strip() if len(row) > 1 else ""
         col3 = str(row[2]).strip() if len(row) > 2 else ""
-        
-        # Skip completely empty rows
+
         if not col1 and not col2 and not col3:
             continue
-            
+
         data_rows += 1
-        
+
         nm_id_raw = col2.replace(" ", "").replace("\xa0", "").strip()
         if not nm_id_raw:
             skipped_no_nm_id += 1
             continue
-            
+
         try:
             nm_id = int(nm_id_raw)
         except ValueError:
             skipped_no_nm_id += 1
             continue
-            
+
         qty = normalize_ivan_stock_quantity(col3)
-            
         quantity_sum_total += qty
-        
         size_name, color_name, barcode = parse_row_nomenclature(col1)
-        
-        rows_to_save.append({
-            "stock_date": stock_date,
-            "nm_id": nm_id,
-            "size_name": size_name,  # normalized to '' in function if None
-            "barcode": barcode,      # normalized to '' in function if None
-            "color_name": color_name,
-            "quantity": qty,
-            "nomenclature_raw": col1,
-            "source_sheet": "Остатки",
-            "raw_row": row
-        })
-        
+
+        rows_to_save.append(
+            {
+                "stock_date": stock_date,
+                "nm_id": nm_id,
+                "size_name": size_name,
+                "barcode": barcode,
+                "color_name": color_name,
+                "quantity": qty,
+                "nomenclature_raw": col1,
+                "source_sheet": STOCK_SHEET_NAME,
+                "raw_row": row,
+            }
+        )
+
     rows_inserted = 0
+    legacy_rows_deleted = 0
     if write_db and rows_to_save:
         with session_scope() as session:
             rows_inserted = upsert_rows(
@@ -188,11 +244,12 @@ def load_ivan_stock_sheet(
                 rows=rows_to_save,
                 conflict_columns=("stock_date", "nm_id", "size_name", "barcode"),
             )
-            
-    distinct_nm_ids = {r["nm_id"] for r in rows_to_save}
-    distinct_nm_id_sizes = {(r["nm_id"], r["size_name"]) for r in rows_to_save}
-    
-    rows_with_barcode = sum(1 for r in rows_to_save if r["barcode"])
+            legacy_rows_deleted = prune_legacy_blank_size_rows(session, stock_date)
+
+    distinct_nm_ids = {row["nm_id"] for row in rows_to_save}
+    distinct_nm_id_sizes = {(row["nm_id"], row["size_name"]) for row in rows_to_save}
+    rows_with_barcode = sum(1 for row in rows_to_save if row["barcode"])
+
     return {
         "success": True,
         "stock_date": stock_date,
@@ -207,6 +264,7 @@ def load_ivan_stock_sheet(
         "product_level_rows": len(distinct_nm_ids),
         "quantity_sum_total": int(quantity_sum_total) if quantity_sum_total % 1 == 0 else float(quantity_sum_total),
         "rows_inserted": rows_inserted,
+        "legacy_rows_deleted": legacy_rows_deleted,
     }
 
 
@@ -215,7 +273,7 @@ def load_ivan_stock_size_level(stock_date: Optional[date] = None) -> list[dict[s
         stock_date = resolve_latest_ivan_stock_date(session, stock_date)
         if stock_date is None:
             return []
-                
+
         stmt = select(
             FactIvanStockSheetDay.stock_date,
             FactIvanStockSheetDay.nm_id,
@@ -225,20 +283,20 @@ def load_ivan_stock_size_level(stock_date: Optional[date] = None) -> list[dict[s
             FactIvanStockSheetDay.quantity,
             FactIvanStockSheetDay.nomenclature_raw,
         ).where(FactIvanStockSheetDay.stock_date == stock_date)
-        
+
         results = session.execute(stmt).all()
         rows: list[dict[str, Any]] = []
-        for r in results:
-            normalized_quantity = normalize_ivan_stock_quantity(r.quantity)
+        for row in results:
+            normalized_quantity = normalize_ivan_stock_quantity(row.quantity)
             rows.append(
                 {
-                    "stock_date": r.stock_date,
-                    "nm_id": r.nm_id,
-                    "size_name": r.size_name,
-                    "barcode": r.barcode,
-                    "color_name": r.color_name,
+                    "stock_date": row.stock_date,
+                    "nm_id": row.nm_id,
+                    "size_name": row.size_name,
+                    "barcode": row.barcode,
+                    "color_name": row.color_name,
                     "quantity": int(normalized_quantity) if normalized_quantity % 1 == 0 else float(normalized_quantity),
-                    "nomenclature_raw": r.nomenclature_raw,
+                    "nomenclature_raw": row.nomenclature_raw,
                 }
             )
         return rows
@@ -249,34 +307,38 @@ def load_ivan_stock_product_level(stock_date: Optional[date] = None) -> list[dic
         stock_date = resolve_latest_ivan_stock_date(session, stock_date)
         if stock_date is None:
             return []
-                
-        stmt = select(
-            FactIvanStockSheetDay.stock_date,
-            FactIvanStockSheetDay.nm_id,
-            func.sum(
-                case(
-                    (FactIvanStockSheetDay.quantity < 0, 0),
-                    else_=FactIvanStockSheetDay.quantity,
-                )
-            ).label("ivan_stock_qty"),
-            func.count(func.distinct(FactIvanStockSheetDay.size_name)).label("sizes_count"),
-            func.count(func.distinct(FactIvanStockSheetDay.barcode)).label("barcodes_count"),
-        ).where(FactIvanStockSheetDay.stock_date == stock_date).group_by(
-            FactIvanStockSheetDay.stock_date,
-            FactIvanStockSheetDay.nm_id
+
+        stmt = (
+            select(
+                FactIvanStockSheetDay.stock_date,
+                FactIvanStockSheetDay.nm_id,
+                func.sum(
+                    case(
+                        (FactIvanStockSheetDay.quantity < 0, 0),
+                        else_=FactIvanStockSheetDay.quantity,
+                    )
+                ).label("ivan_stock_qty"),
+                func.count(func.distinct(FactIvanStockSheetDay.size_name)).label("sizes_count"),
+                func.count(func.distinct(FactIvanStockSheetDay.barcode)).label("barcodes_count"),
+            )
+            .where(FactIvanStockSheetDay.stock_date == stock_date)
+            .group_by(
+                FactIvanStockSheetDay.stock_date,
+                FactIvanStockSheetDay.nm_id,
+            )
         )
-        
+
         results = session.execute(stmt).all()
         rows: list[dict[str, Any]] = []
-        for r in results:
-            normalized_quantity = normalize_ivan_stock_quantity(r.ivan_stock_qty)
+        for row in results:
+            normalized_quantity = normalize_ivan_stock_quantity(row.ivan_stock_qty)
             rows.append(
                 {
-                    "stock_date": r.stock_date,
-                    "nm_id": r.nm_id,
+                    "stock_date": row.stock_date,
+                    "nm_id": row.nm_id,
                     "ivan_stock_qty": int(normalized_quantity) if normalized_quantity % 1 == 0 else float(normalized_quantity),
-                    "sizes_count": r.sizes_count,
-                    "barcodes_count": r.barcodes_count,
+                    "sizes_count": row.sizes_count,
+                    "barcodes_count": row.barcodes_count,
                 }
             )
         return rows
