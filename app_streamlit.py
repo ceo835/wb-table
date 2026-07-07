@@ -8963,12 +8963,12 @@ def render_stock_speed_charts(filtered: pd.DataFrame, preselected_product_label:
         color_col = None
 
     # Графики
-    st.markdown("### Скорость продаж")
+    st.markdown("### Скорость заказов")
     speed_chart = build_stock_speed_chart_altair(
         chart_df=df_chart,
         value_column="sales_speed",
-        y_title="Скорость продаж, шт/день",
-        tooltip_value_title="Скорость",
+        y_title="Скорость заказов, шт/день",
+        tooltip_value_title="Скорость заказов",
         value_format=".1f",
         color_column=color_col,
     )

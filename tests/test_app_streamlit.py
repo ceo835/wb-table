@@ -6258,3 +6258,56 @@ def test_render_stock_speed_charts_passes_cache_buster_to_range_loaders(monkeypa
     assert calls["ivan"] == (d1, d2, "buster-stock")
     assert calls["funnel"] == (pd.Timestamp("2026-06-24").date(), d1, "buster-stock")
     assert calls["settings"] == "buster-stock"
+
+
+def test_render_stock_speed_charts_uses_orders_label(monkeypatch) -> None:
+    from unittest.mock import patch
+
+    d1 = pd.Timestamp("2026-07-01").date()
+    filtered = pd.DataFrame({"report_date": [d1]})
+    markdown_calls: list[str] = []
+
+    monkeypatch.setattr(app_streamlit, "resolve_db_dataset_cache_buster", lambda: "buster-stock")
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_stock_warehouse_snapshot_range_from_db",
+        lambda *args, **kwargs: pd.DataFrame([{"snapshot_date": d1, "nm_id": 101, "stock_qty": 5}]),
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_ivan_stock_range_from_db",
+        lambda *args, **kwargs: pd.DataFrame([{"snapshot_date": d1, "nm_id": 101, "one_c_stock_qty": 2}]),
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_funnel_sales_range_from_db",
+        lambda *args, **kwargs: pd.DataFrame([{"date": pd.Timestamp("2026-06-29").date(), "nm_id": 101, "order_count": 1}]),
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_settings_product_query_groups_from_db",
+        lambda *args, **kwargs: pd.DataFrame(
+            [{"nm_id": 101, "query_group": "women_underwear", "supplier_article": "art-101", "title": "Товар 101"}]
+        ),
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "prepare_stock_speed_charts_dataframe",
+        lambda **kwargs: pd.DataFrame([{"date": d1, "sales_speed": 1.0, "forecast_months": 1.0}]),
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "aggregate_stock_charts_by_cabinet",
+        lambda df_all, speed_col: pd.DataFrame([{"date": d1, "sales_speed": 1.0, "forecast_months": 1.0}]),
+    )
+    monkeypatch.setattr(app_streamlit, "build_stock_speed_chart_altair", lambda **kwargs: object())
+
+    with patch("streamlit.subheader"), \
+         patch("streamlit.warning"), \
+         patch("streamlit.info"), \
+         patch("streamlit.altair_chart"), \
+         patch("streamlit.markdown", side_effect=lambda text: markdown_calls.append(text)), \
+         patch("streamlit.radio", side_effect=["За кабинет", "Позавчера"]):
+        app_streamlit.render_stock_speed_charts(filtered, None)
+
+    assert "### Скорость заказов" in markdown_calls
