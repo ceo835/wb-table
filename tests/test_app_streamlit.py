@@ -6330,6 +6330,51 @@ def test_render_stock_speed_charts_passes_cache_buster_to_range_loaders(monkeypa
     assert calls["settings"] == "buster-stock"
 
 
+def test_load_ivan_stock_range_from_db_uses_latest_snapshot_not_after_each_day(monkeypatch) -> None:
+    from contextlib import contextmanager
+    from datetime import date
+
+    class _Row:
+        def __init__(self, stock_date, nm_id, quantity) -> None:
+            self.stock_date = stock_date
+            self.nm_id = nm_id
+            self.quantity = quantity
+
+    class _Session:
+        def execute(self, _stmt):
+            class _Result:
+                def all(self_inner):
+                    return [
+                        _Row(date(2026, 7, 4), 101, 5),
+                        _Row(date(2026, 7, 6), 101, 7),
+                        _Row(date(2026, 7, 4), 202, -3),
+                    ]
+
+            return _Result()
+
+    @contextmanager
+    def _fake_session_scope(*args, **kwargs):
+        yield _Session()
+
+    monkeypatch.setattr(app_streamlit, "session_scope", _fake_session_scope)
+
+    result = app_streamlit.load_ivan_stock_range_from_db(
+        date(2026, 7, 5),
+        date(2026, 7, 7),
+        cache_buster="ivan-range-buster",
+    )
+
+    records = result.sort_values(["nm_id", "snapshot_date"]).to_dict(orient="records")
+    assert records == [
+        {"snapshot_date": date(2026, 7, 5), "nm_id": 101, "one_c_stock_qty": 5.0},
+        {"snapshot_date": date(2026, 7, 6), "nm_id": 101, "one_c_stock_qty": 7.0},
+        {"snapshot_date": date(2026, 7, 7), "nm_id": 101, "one_c_stock_qty": 7.0},
+        {"snapshot_date": date(2026, 7, 5), "nm_id": 202, "one_c_stock_qty": 0.0},
+        {"snapshot_date": date(2026, 7, 6), "nm_id": 202, "one_c_stock_qty": 0.0},
+        {"snapshot_date": date(2026, 7, 7), "nm_id": 202, "one_c_stock_qty": 0.0},
+    ]
+
+
 def test_render_stock_speed_charts_uses_orders_label(monkeypatch) -> None:
     from unittest.mock import patch
 

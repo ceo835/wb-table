@@ -8586,7 +8586,38 @@ def load_ivan_stock_range_from_db(
             .groupby(["snapshot_date", "nm_id"], as_index=False)["one_c_stock_qty"]
             .sum(min_count=1)
         )
-        return df
+        df["nm_id"] = pd.to_numeric(df["nm_id"], errors="coerce")
+        df = df.dropna(subset=["nm_id"]).copy()
+        if df.empty:
+            return pd.DataFrame(columns=["snapshot_date", "nm_id", "one_c_stock_qty"])
+        df["nm_id"] = df["nm_id"].astype("int64")
+        df = (
+            df.sort_values(["nm_id", "snapshot_date"])
+            .drop_duplicates(subset=["nm_id", "snapshot_date"], keep="last")
+            .reset_index(drop=True)
+        )
+        target_nm_ids = sorted(df["nm_id"].dropna().astype(int).unique().tolist())
+        if not target_nm_ids:
+            return pd.DataFrame(columns=["snapshot_date", "nm_id", "one_c_stock_qty"])
+        date_grid = pd.MultiIndex.from_product(
+            [target_nm_ids, pd.date_range(start=date_from, end=date_to).date],
+            names=["nm_id", "snapshot_date"],
+        ).to_frame(index=False)
+        date_grid["nm_id"] = pd.to_numeric(date_grid["nm_id"], errors="coerce").astype("int64")
+        date_grid["snapshot_date"] = pd.to_datetime(date_grid["snapshot_date"])
+        df["snapshot_date"] = pd.to_datetime(df["snapshot_date"])
+        materialized = pd.merge_asof(
+            date_grid.sort_values(["snapshot_date", "nm_id"]),
+            df.sort_values(["snapshot_date", "nm_id"]),
+            on="snapshot_date",
+            by="nm_id",
+            direction="backward",
+        )
+        materialized["snapshot_date"] = pd.to_datetime(materialized["snapshot_date"], errors="coerce").dt.date
+        materialized["one_c_stock_qty"] = _clip_non_negative_numeric_series(materialized["one_c_stock_qty"])
+        materialized = materialized.dropna(subset=["snapshot_date", "nm_id", "one_c_stock_qty"]).copy()
+        materialized["nm_id"] = materialized["nm_id"].astype("int64")
+        return materialized.reset_index(drop=True)
 
 
 @st.cache_data(show_spinner=False)
