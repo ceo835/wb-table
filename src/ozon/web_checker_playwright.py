@@ -41,9 +41,16 @@ class PlaywrightWebPriceChecker:
         '[class*="price"]',
         '[data-test*="price"]',
     ]
-    RUB_PATTERN = re.compile(r"(\d[\d\s\u00A0\u2009]{0,})(?:[.,](\d{1,2}))?\s*(?:₽|руб\.?)", re.IGNORECASE)
+    RUB_PATTERN = re.compile(
+        r"(\d[\d\s\u00A0\u2009]{0,})(?:[.,](\d{1,2}))?\s*(?:₽|руб\.?|р\.)",
+        re.IGNORECASE,
+    )
     PRICE_TEXT_PATTERN = re.compile(
-        r'"text"\s*:\s*"(?P<text>[^"]*?(?:₽|руб)[^"]*?)"\s*,\s*"textStyle"\s*:\s*"(?P<style>[^"]+)"',
+        r'"text"\s*:\s*"(?P<text>[^"]*?(?:₽|руб\.?|р\.)[^"]*?)"\s*,\s*"textStyle"\s*:\s*"(?P<style>[^"]+)"',
+        re.IGNORECASE,
+    )
+    WEB_PRICE_STATE_PATTERN = re.compile(
+        r'id="state-webPrice[^"]*"\s+data-state="(?P<data>(?:&quot;|[^"])*)"',
         re.IGNORECASE,
     )
     PRICE_IGNORE_CONTEXT_MARKERS = (
@@ -414,9 +421,79 @@ class PlaywrightWebPriceChecker:
 
         return candidates
 
+    def _extract_price_candidates_from_web_price_state(self, html: str, page_type: str) -> list[dict[str, object]]:
+        decoded = html_unescape(html)
+        candidates: list[dict[str, object]] = []
+
+        for match in self.WEB_PRICE_STATE_PATTERN.finditer(html):
+            state_blob = html_unescape(match.group("data"))
+            try:
+                state_data = json.loads(state_blob)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(state_data, dict):
+                continue
+
+            context = decoded[max(0, match.start() - 120) : min(len(decoded), match.end() + 120)].lower()
+            price_entries: list[tuple[str, object, int, str]] = []
+
+            card_price = state_data.get("cardPrice")
+            regular_price = state_data.get("price")
+            original_price = state_data.get("originalPrice")
+
+            if card_price is not None:
+                price_entries.append(("current", card_price, 150, "web_price_card"))
+            if regular_price is not None:
+                role = "other_bank" if card_price is not None else "current"
+                score = 120 if card_price is not None else 145
+                price_entries.append((role, regular_price, score, "web_price_regular"))
+            if original_price is not None:
+                price_entries.append(("old", original_price, 80, "web_price_original"))
+
+            for role, raw_value, base_score, reason in price_entries:
+                value_text = str(raw_value).strip()
+                if not value_text:
+                    continue
+
+                price, raw = self._price_from_text(value_text)
+                if price is None:
+                    # Some values may already be plain numerics without a currency symbol.
+                    price = self._to_price(value_text)
+                    raw = value_text
+                if price is None:
+                    continue
+
+                score = base_score
+                if role == "current":
+                    score += 30
+                elif role == "other_bank":
+                    score -= 10
+                elif role == "old":
+                    score -= 50
+
+                candidates.append(
+                    {
+                        "value": price,
+                        "raw_price_text": self._compact_raw_price_text(raw or value_text),
+                        "source": f"{page_type}:web_price_state",
+                        "selector": None,
+                        "source_kind": "structured",
+                        "role": role,
+                        "score": score,
+                        "context": context.strip(),
+                        "reason": reason,
+                        "text": value_text,
+                    }
+                )
+
+        return candidates
+
     def _extract_price_candidates_from_html(self, html: str, page_type: str) -> list[dict[str, object]]:
         decoded = html_unescape(html)
         candidates: list[dict[str, object]] = []
+        candidates.extend(self._extract_price_candidates_from_web_price_state(html, page_type))
+        candidates.extend(self._extract_price_candidates_from_web_price_state(decoded, page_type))
+
         for match in self.PRICE_TEXT_PATTERN.finditer(decoded):
             text = self._normalize_price_text(match.group("text"))
             style = match.group("style") or ""
@@ -601,13 +678,16 @@ class PlaywrightWebPriceChecker:
             return "unavailable"
         return "price_not_found"
 
-    def _find_product_url_on_search_page(self, page, current_url: str, web_lookup_id: Optional[int]) -> Optional[str]:
-        if web_lookup_id is None:
+    def _find_product_url_on_search_page(self, page, current_url: str, lookup_value: str | int | None) -> Optional[str]:
+        if lookup_value is None:
+            return None
+        lookup_text = str(lookup_value).strip()
+        if not lookup_text:
             return None
         selectors = [
-            f'a[href*="/product/{web_lookup_id}"]',
-            f'a[href*="-{web_lookup_id}"]',
-            f'a[href*="{web_lookup_id}"]',
+            f'a[href*="/product/{lookup_text}"]',
+            f'a[href*="-{lookup_text}"]',
+            f'a[href*="{lookup_text}"]',
         ]
         for selector in selectors:
             try:
@@ -627,7 +707,7 @@ class PlaywrightWebPriceChecker:
             search_url = f"https://www.ozon.ru/search/?text={web_lookup_id}"
             logger.info("Playwright fallback search by SKU: %s", search_url)
             try:
-                response = page.goto(search_url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
+                page.goto(search_url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
                 page.wait_for_load_state("domcontentloaded", timeout=self.timeout * 1000)
                 page.wait_for_timeout(1500)
                 found_url = self._find_product_url_on_search_page(page, page.url, web_lookup_id)
@@ -641,10 +721,10 @@ class PlaywrightWebPriceChecker:
         search_url = f"https://www.ozon.ru/search/?text={offer_id}"
         logger.info("Playwright fallback search by offer_id: %s", search_url)
         try:
-            response = page.goto(search_url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
+            page.goto(search_url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
             page.wait_for_load_state("domcontentloaded", timeout=self.timeout * 1000)
             page.wait_for_timeout(1500)
-            found_url = self._find_product_url_on_search_page(page, page.url, web_lookup_id)
+            found_url = self._find_product_url_on_search_page(page, page.url, offer_id)
             if found_url:
                 logger.info("Playwright found product URL by offer_id search: %s", found_url)
                 return found_url
@@ -810,22 +890,11 @@ class PlaywrightWebPriceChecker:
 
     def get_buyer_visible_price(self, product: OzonProduct) -> WebPriceInfo:
         web_lookup_id = self._resolve_web_lookup_id(product)
-        requested_url = self._build_product_url(web_lookup_id) if web_lookup_id is not None else None
-        if requested_url is None:
-            return WebPriceInfo(
-                offer_id=product.offer_id,
-                product_id=product.product_id,
-                sku=product.sku,
-                web_lookup_id=None,
-                url=None,
-                final_url=None,
-                buyer_visible_price=None,
-                raw_price_text=None,
-                source="no_url",
-                page_type="wrong_page",
-                status="no_web_lookup_id",
-                error="no_web_lookup_id",
-            )
+        requested_url = (
+            self._build_product_url(web_lookup_id)
+            if web_lookup_id is not None
+            else f"https://www.ozon.ru/search/?text={product.offer_id}"
+        )
 
         if sync_playwright is None:
             return WebPriceInfo(
@@ -1027,3 +1096,5 @@ class PlaywrightWebPriceChecker:
                 error="parse_error",
                 price_candidates=tuple(),
             )
+
+

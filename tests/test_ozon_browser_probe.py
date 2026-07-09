@@ -125,6 +125,35 @@ def test_playwright_price_parser_prefers_structured_main_price_over_noise() -> N
     assert [candidate["value"] for candidate in checker._last_price_candidates[:3]] == [1294.0, 1438.0, 5500.0]
 
 
+def test_playwright_price_parser_reads_web_price_state_json() -> None:
+    checker = PlaywrightWebPriceChecker()
+
+    class FakeLocator:
+        def count(self) -> int:
+            return 0
+
+    class FakePage:
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator()
+
+    html = """
+        <html>
+          <body>
+            <div id="state-webPrice-3121879-default-1" data-state="{&quot;isAvailable&quot;:true,&quot;cardPrice&quot;:&quot;538 ₽&quot;,&quot;price&quot;:&quot;598 ₽&quot;,&quot;originalPrice&quot;:&quot;4 400 ₽&quot;}"></div>
+          </body>
+        </html>
+    """
+
+    price, raw, source = checker._extract_price(FakePage(), html, "product_page")
+
+    assert price == 538.0
+    assert raw == "538₽"
+    assert source == "product_page:web_price_state"
+    assert checker._last_other_bank_price == 598.0
+    assert checker._last_old_price == 4400.0
+    assert [candidate["value"] for candidate in checker._last_price_candidates[:3]] == [538.0, 598.0, 4400.0]
+
+
 def test_playwright_page_type_detection_for_product_page() -> None:
     checker = PlaywrightWebPriceChecker()
     html = "<html><body><div>Product page</div></body></html>"
