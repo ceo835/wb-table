@@ -2023,18 +2023,39 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
     merged_dfs = []
 
     if not date_grid_numeric.empty:
-        date_grid_numeric["sku_join"] = pd.to_numeric(date_grid_numeric["offer_id"], errors="coerce").astype("Int64")
-        latest_snapshots_numeric = latest_snapshots.copy()
-        latest_snapshots_numeric["sku_join"] = pd.to_numeric(latest_snapshots_numeric["sku"], errors="coerce").astype("Int64")
-        latest_snapshots_numeric = latest_snapshots_numeric.dropna(subset=["sku_join"])
+        # 1. Merge by offer_id to get web-scraped (bot) data
+        merged_numeric_web = date_grid_numeric.merge(
+            latest_snapshots.drop(columns=["category"], errors="ignore"),
+            on=["snapshot_date", "offer_id"],
+            how="left"
+        )
 
-        merged_numeric = date_grid_numeric.merge(
-            latest_snapshots_numeric.drop(columns=["category", "offer_id"], errors="ignore"),
+        # 2. Merge by sku to get API data
+        latest_snapshots_api = latest_snapshots.copy()
+        latest_snapshots_api["sku_join"] = pd.to_numeric(latest_snapshots_api["sku"], errors="coerce").astype("Int64")
+        latest_snapshots_api = latest_snapshots_api.dropna(subset=["sku_join"])
+
+        api_cols = ["snapshot_date", "sku_join", "sku", "seller_price_api", "status_api", "product_id", "name"]
+        latest_api_subset = latest_snapshots_api[[c for c in api_cols if c in latest_snapshots_api.columns]]
+
+        date_grid_numeric_api = date_grid_numeric.copy()
+        date_grid_numeric_api["sku_join"] = pd.to_numeric(date_grid_numeric_api["offer_id"], errors="coerce").astype("Int64")
+
+        merged_numeric_api = date_grid_numeric_api[["snapshot_date", "offer_id", "sku_join"]].merge(
+            latest_api_subset,
             on=["snapshot_date", "sku_join"],
             how="left"
         )
+
+        # Combine bot prices (web) and API prices (seller_price_api)
+        merged_numeric_web = merged_numeric_web.set_index(["snapshot_date", "offer_id"])
+        merged_numeric_api = merged_numeric_api.set_index(["snapshot_date", "offer_id"])
+
+        merged_numeric = merged_numeric_web.combine_first(merged_numeric_api).reset_index()
+
         if "sku_join" in merged_numeric.columns:
             merged_numeric = merged_numeric.drop(columns=["sku_join"])
+
         merged_dfs.append(merged_numeric)
 
     if not date_grid_text.empty:

@@ -6637,18 +6637,33 @@ def test_process_ozon_snapshot_with_categories_spp_joins(monkeypatch) -> None:
     from datetime import date, datetime
     d1 = date(2026, 7, 8)
     snapshot_df = pd.DataFrame([
+        # Row 1: web-scraped data (bot) - offer_id is numeric SKU, sku is None, price is web-only
+        {
+            "snapshot_date": d1,
+            "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
+            "offer_id": "1469004334",
+            "sku": None,
+            "name": "Product 1 Web",
+            "buyer_regular_price_web": 2500.0,
+            "seller_price_api": None,
+            "status_web": "ok",
+            "final_url": "http://ozon/1",
+            "spp_rub": 211.0,
+            "spp_percent": 7.7,
+        },
+        # Row 2: API data - offer_id is text, sku is numeric, price is api-only
         {
             "snapshot_date": d1,
             "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
             "offer_id": "AvokaDo744-46",
             "sku": 1469004334,
-            "name": "Product 1",
-            "buyer_regular_price_web": 2500.0,
+            "name": "Product 1 API",
+            "buyer_regular_price_web": None,
             "seller_price_api": 2711.0,
-            "status_web": "ok",
-            "final_url": "http://ozon/1",
-            "spp_rub": 211.0,
-            "spp_percent": 7.7,
+            "status_web": None,
+            "final_url": None,
+            "spp_rub": None,
+            "spp_percent": None,
         }
     ])
 
@@ -6660,8 +6675,10 @@ def test_process_ozon_snapshot_with_categories_spp_joins(monkeypatch) -> None:
     res_numeric = app_streamlit.process_ozon_snapshot_with_categories(snapshot_df)
     assert not res_numeric.empty
     assert res_numeric.iloc[0]["seller_price_api"] == 2711.0
+    assert res_numeric.iloc[0]["buyer_regular_price_web"] == 2500.0
     assert res_numeric.iloc[0]["offer_id"] == "1469004334"
     assert res_numeric.iloc[0]["sku"] == 1469004334
+    assert res_numeric.iloc[0]["spp_rub"] == 211.0
 
     # Case 2: tracked product uses text seller offer_id
     monkeypatch.setattr(
