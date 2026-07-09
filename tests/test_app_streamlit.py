@@ -6505,6 +6505,7 @@ def test_build_ozon_price_monitor_dataframe(monkeypatch) -> None:
             "sku": 1001,
             "name": "Product 1",
             "buyer_regular_price_web": 1500.0,
+            "seller_price_api": 1990.0,
             "status_web": "ok",
             "final_url": "http://ozon/1",
         },
@@ -6515,6 +6516,7 @@ def test_build_ozon_price_monitor_dataframe(monkeypatch) -> None:
             "sku": 1001,
             "name": "Product 1",
             "buyer_regular_price_web": 1420.0,
+            "seller_price_api": 2000.0,
             "status_web": "ok",
             "final_url": "http://ozon/1",
         }
@@ -6551,6 +6553,7 @@ def test_render_ozon_price_monitor_content_dry_run(monkeypatch) -> None:
             "sku": 1001,
             "name": "Product 1",
             "buyer_regular_price_web": 1420.0,
+            "seller_price_api": 2000.0,
             "status_web": "ok",
             "final_url": "http://ozon/1",
             "seller_price_api": 2000.0,
@@ -6579,6 +6582,9 @@ def test_render_ozon_price_monitor_content_dry_run(monkeypatch) -> None:
     assert any("Все проверенные цены за дату" in call for call in markdown_calls)
     assert any("Только скачки цены / alerts" in call for call in markdown_calls)
     assert len(st_dataframe_calls) >= 1
+    main_df = st_dataframe_calls[0].data
+    assert "???? ????????" in main_df.columns
+    assert "SKU" not in main_df.columns
 
 
 def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
@@ -6592,6 +6598,7 @@ def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
             "sku": 1001,
             "name": "Product 1",
             "buyer_regular_price_web": 1420.0,
+            "seller_price_api": 2000.0,
             "status_web": "ok",
             "final_url": "http://ozon/1",
             "seller_price_api": 2000.0,
