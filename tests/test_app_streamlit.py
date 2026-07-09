@@ -6493,7 +6493,7 @@ def test_render_stock_speed_charts_uses_orders_label(monkeypatch) -> None:
     assert "### Скорость заказов" in markdown_calls
 
 
-def test_build_ozon_price_monitor_dataframe() -> None:
+def test_build_ozon_price_monitor_dataframe(monkeypatch) -> None:
     from datetime import date, datetime
     d1 = date(2026, 7, 7)
     d2 = date(2026, 7, 8)
@@ -6520,11 +6520,17 @@ def test_build_ozon_price_monitor_dataframe() -> None:
         }
     ])
 
+    monkeypatch.setattr(
+        "src.ozon.config.load_tracked_articles_with_categories",
+        lambda: [{"offer_id": "art-1", "category": "трусы"}]
+    )
+
     res = app_streamlit.build_ozon_price_monitor_dataframe(snapshot_df, snapshot_date=d2)
 
     assert len(res) == 1
     row = res.iloc[0]
     assert row["Артикул Ozon"] == "art-1"
+    assert row["Категория"] == "трусы"
     assert row["SKU"] == 1001
     assert row["Текущая цена"] == 1420.0
     assert row["Предыдущая цена"] == 1500.0
@@ -6553,6 +6559,10 @@ def test_render_ozon_price_monitor_content_dry_run(monkeypatch) -> None:
         }
     ])
 
+    monkeypatch.setattr(
+        "src.ozon.config.load_tracked_articles_with_categories",
+        lambda: [{"offer_id": "art-1", "category": "трусы"}]
+    )
     monkeypatch.setattr(app_streamlit, "load_ozon_price_snapshot_from_db", lambda *args, **kwargs: snapshot_df)
 
     markdown_calls = []
@@ -6590,6 +6600,10 @@ def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
         }
     ])
 
+    monkeypatch.setattr(
+        "src.ozon.config.load_tracked_articles_with_categories",
+        lambda: [{"offer_id": "art-1", "category": "трусы"}]
+    )
     monkeypatch.setattr(app_streamlit, "load_ozon_price_snapshot_from_db", lambda *args, **kwargs: snapshot_df)
 
     st_dataframe_calls = []

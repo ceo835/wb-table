@@ -60,3 +60,52 @@ def load_tracked_articles() -> set[str]:
         print(f"[WARN] Failed to load tracked articles from {TRACKED_ARTICLES_CSV}: {exc}")
 
     return articles
+
+
+def load_tracked_articles_with_categories() -> list[dict[str, str]]:
+    """Loads tracked Ozon articles as a list of dicts with 'offer_id' and 'category'.
+
+    Preserves duplicates and ordering from the CSV configuration file.
+    """
+    if not TRACKED_ARTICLES_CSV.exists():
+        return []
+
+    rows: list[dict[str, str]] = []
+    try:
+        with TRACKED_ARTICLES_CSV.open("r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            # Find matching column for offer_id
+            offer_col = None
+            if reader.fieldnames:
+                for col_name in ["offer_id", "offerid", "article", "артикул", "id"]:
+                    for fn in reader.fieldnames:
+                        if fn.strip().lower() == col_name:
+                            offer_col = fn
+                            break
+                    if offer_col:
+                        break
+
+            # Find matching column for category
+            category_col = None
+            if reader.fieldnames:
+                for col_name in ["category", "категория"]:
+                    for fn in reader.fieldnames:
+                        if fn.strip().lower() == col_name:
+                            category_col = fn
+                            break
+                    if category_col:
+                        break
+
+            for r in reader:
+                oid = r.get(offer_col or "") if offer_col else next(iter(r.values()), None)
+                if oid:
+                    oid = oid.strip()
+                cat = r.get(category_col or "") if category_col else ""
+                if cat:
+                    cat = cat.strip()
+                if oid:
+                    rows.append({"offer_id": oid, "category": cat or "без категории"})
+    except Exception as exc:
+        print(f"[WARN] Failed to load tracked articles with categories from {TRACKED_ARTICLES_CSV}: {exc}")
+
+    return rows
