@@ -2030,14 +2030,14 @@ def build_ozon_price_monitor_dataframe(
         return pd.DataFrame(
             columns=[
                 "Артикул Ozon",
-                "SKU",
-                "Название",
                 "Категория",
-                "Текущая цена",
+                "Название",
+                "Цена продавца",
+                "Цена Ozon",
                 "Предыдущая цена",
                 "Изменение, ₽",
                 "Alert",
-                "Ссылка Ozon",
+                "Ссылка на карточку",
             ]
         )
 
@@ -2046,28 +2046,39 @@ def build_ozon_price_monitor_dataframe(
     if snapshot_df.empty:
         display_df = tracked_df.copy()
         display_df = display_df.rename(columns={"offer_id": "Артикул Ozon", "category": "Категория"})
-        display_df["SKU"] = None
         display_df["Название"] = ""
-        display_df["Текущая цена"] = None
+        display_df["Цена продавца"] = None
+        display_df["Цена Ozon"] = None
         display_df["Предыдущая цена"] = None
         display_df["Изменение, ₽"] = None
         display_df["Alert"] = False
-        display_df["Ссылка Ozon"] = ""
-        return display_df
+        display_df["Ссылка на карточку"] = ""
+        cols = [
+            "Артикул Ozon",
+            "Категория",
+            "Название",
+            "Цена продавца",
+            "Цена Ozon",
+            "Предыдущая цена",
+            "Изменение, ₽",
+            "Alert",
+            "Ссылка на карточку",
+        ]
+        return display_df[cols]
 
     expanded_all = process_ozon_snapshot_with_categories(snapshot_df)
     if expanded_all.empty:
         return pd.DataFrame(
             columns=[
                 "Артикул Ozon",
-                "SKU",
-                "Название",
                 "Категория",
-                "Текущая цена",
+                "Название",
+                "Цена продавца",
+                "Цена Ozon",
                 "Предыдущая цена",
                 "Изменение, ₽",
                 "Alert",
-                "Ссылка Ozon",
+                "Ссылка на карточку",
             ]
         )
 
@@ -2109,28 +2120,57 @@ def build_ozon_price_monitor_dataframe(
         columns={
             "offer_id": "Артикул Ozon",
             "category": "Категория",
-            "sku": "SKU",
             "name": "Название",
-            "buyer_regular_price_web": "Текущая цена",
+            "seller_price_api": "Цена продавца",
+            "buyer_regular_price_web": "Цена Ozon",
             "_previous_success_price": "Предыдущая цена",
             "price_delta": "Изменение, ₽",
-            "final_url": "Ссылка Ozon",
+            "final_url": "Ссылка на карточку",
         }
     )
 
     cols = [
         "Артикул Ozon",
-        "SKU",
-        "Название",
         "Категория",
-        "Текущая цена",
+        "Название",
+        "Цена продавца",
+        "Цена Ozon",
         "Предыдущая цена",
         "Изменение, ₽",
         "Alert",
-        "Ссылка Ozon",
+        "Ссылка на карточку",
     ]
     display_df = display_df[[c for c in cols if c in display_df.columns]].copy()
     return display_df.reset_index(drop=True)
+
+
+def style_ozon_site_price_monitor_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    safe_df = sanitize_dataframe_for_streamlit_display(
+        df,
+        numeric_columns={"Цена продавца", "Цена Ozon", "Предыдущая цена", "Изменение, ₽"},
+    )
+
+    def row_style(row: pd.Series) -> list[str]:
+        if bool(row.get("Alert")):
+            return ["background-color: #fff7ed;" for _ in row.index]
+        return ["" for _ in row.index]
+
+    def delta_style(value: object) -> str:
+        if pd.isna(value):
+            return ""
+        numeric_value = float(value)
+        if numeric_value > 0:
+            return "color: #b91c1c; font-weight: 600;"
+        if numeric_value < 0:
+            return "color: #166534; font-weight: 600;"
+        return ""
+
+    styler = safe_df.style.apply(row_style, axis=1)
+    if "Изменение, ₽" in safe_df.columns:
+        styler = styler.map(delta_style, subset=["Изменение, ₽"])
+    return styler
+
+
 
 
 def build_wb_site_price_monitor_visibility_summary(
@@ -2424,28 +2464,29 @@ def render_ozon_price_monitor_content(cache_buster: str | None) -> None:
     
     compact_columns = [
         "Артикул Ozon",
-        "SKU",
-        "Название",
         "Категория",
-        "Текущая цена",
+        "Название",
+        "Цена продавца",
+        "Цена Ozon",
         "Предыдущая цена",
         "Изменение, ₽",
         "Alert",
-        "Ссылка Ozon",
+        "Ссылка на карточку",
     ]
     
     compact_df = display_df[[column for column in compact_columns if column in display_df.columns]].copy()
     
     st.dataframe(
-        style_wb_site_price_monitor_table(compact_df),
+        style_ozon_site_price_monitor_table(compact_df),
         width="stretch",
         hide_index=True,
         column_config={
-            "Текущая цена": st.column_config.NumberColumn("Текущая цена", format="%.2f"),
+            "Цена продавца": st.column_config.NumberColumn("Цена продавца", format="%.2f"),
+            "Цена Ozon": st.column_config.NumberColumn("Цена Ozon", format="%.2f"),
             "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
             "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
             "Alert": st.column_config.CheckboxColumn("Alert"),
-            "Ссылка Ozon": st.column_config.LinkColumn("Ссылка Ozon", display_text="Карточка Ozon"),
+            "Ссылка на карточку": st.column_config.LinkColumn("Ссылка на карточку", display_text="Карточка Ozon"),
         },
     )
 
@@ -2456,24 +2497,25 @@ def render_ozon_price_monitor_content(cache_buster: str | None) -> None:
     else:
         alert_columns = [
             "Артикул Ozon",
-            "SKU",
-            "Название",
             "Категория",
-            "Текущая цена",
+            "Название",
+            "Цена продавца",
+            "Цена Ozon",
             "Предыдущая цена",
             "Изменение, ₽",
-            "Ссылка Ozon",
+            "Ссылка на карточку",
         ]
         alert_compact_df = alert_display_df[[column for column in alert_columns if column in alert_display_df.columns]].copy()
         st.dataframe(
-            style_wb_site_price_monitor_table(alert_compact_df),
+            style_ozon_site_price_monitor_table(alert_compact_df),
             width="stretch",
             hide_index=True,
             column_config={
-                "Текущая цена": st.column_config.NumberColumn("Текущая цена", format="%.2f"),
+                "Цена продавца": st.column_config.NumberColumn("Цена продавца", format="%.2f"),
+                "Цена Ozon": st.column_config.NumberColumn("Цена Ozon", format="%.2f"),
                 "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
                 "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
-                "Ссылка Ozon": st.column_config.LinkColumn("Ссылка Ozon", display_text="Карточка Ozon"),
+                "Ссылка на карточку": st.column_config.LinkColumn("Ссылка на карточку", display_text="Карточка Ozon"),
             },
         )
 

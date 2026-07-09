@@ -6533,12 +6533,13 @@ def test_build_ozon_price_monitor_dataframe(monkeypatch) -> None:
     row = res.iloc[0]
     assert row["Артикул Ozon"] == "art-1"
     assert row["Категория"] == "трусы"
-    assert row["SKU"] == 1001
-    assert row["Текущая цена"] == 1420.0
+    assert "SKU" not in res.columns
+    assert row["Цена продавца"] == 2000.0
+    assert row["Цена Ozon"] == 1420.0
     assert row["Предыдущая цена"] == 1500.0
     assert row["Изменение, ₽"] == -80.0
     assert bool(row["Alert"]) is True
-    assert row["Ссылка Ozon"] == "http://ozon/1"
+    assert row["Ссылка на карточку"] == "http://ozon/1"
 
 
 def test_render_ozon_price_monitor_content_dry_run(monkeypatch) -> None:
@@ -6583,7 +6584,9 @@ def test_render_ozon_price_monitor_content_dry_run(monkeypatch) -> None:
     assert any("Только скачки цены / alerts" in call for call in markdown_calls)
     assert len(st_dataframe_calls) >= 1
     main_df = st_dataframe_calls[0].data
-    assert "???? ????????" in main_df.columns
+    assert "Цена Ozon" in main_df.columns
+    assert "Цена продавца" in main_df.columns
+    assert "Ссылка на карточку" in main_df.columns
     assert "SKU" not in main_df.columns
 
 
