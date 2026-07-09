@@ -1994,16 +1994,25 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
     snapshots["snapshot_at"] = pd.to_datetime(snapshots["snapshot_at"], errors="coerce")
 
     OZON_SKU_MAPPING = {
-        "1468642455": "AvokaDo740-42",
-        "1469004334": "AvokaDo742-44",
-        "1469020168": "AvokaDo744-46",
-        "2208523857": "beige7P42-44",
-        "2208566539": "beige7P44-46",
-        "3386471142": "beige7P46-48",
-        "3386460980": "beige7P48-50",
-        "3386477170": "beige7P50-52",
-        "2208496198": "beige7P52-54",
-        "1469006871": "beige7P54-56",
+        # cats7P (Иван)
+        "1468642455": "cats7P42-44",
+        "1469001166": "cats7P44",
+        "1469004334": "cats7P46-48",
+        "1469006871": "cats7P48-50",
+        "1469009787": "cats7P50",
+        "1469020168": "cats7P52-54",
+        "1469025956": "cats7P54",
+        "2208496198": "cats7P44-46",
+        "2208523857": "cats7P50-52",
+        "2208566539": "cats7P54-56",
+        "3386460980": "cats7P40-42",
+        "3386471142": "cats7P38-40",
+        "3386477170": "cats7P36-38",
+        "3507835267": "cats7P62-64",
+        "3507844991": "cats7P64-66",
+        "3507852171": "cats7P66-68",
+
+        # competitor or other mapped to cats7P (as per user requests)
         "1825602366": "cats7P42-44",
         "1825602368": "cats7P44",
         "1825602370": "cats7P46-48",
@@ -2012,18 +2021,51 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
         "1825608810": "cats7P52-54",
         "1825602363": "cats7P54",
         "1825602409": "cats7P54-56",
-        "4978611477": "white36-38",
-        "4978639553": "white38-40",
-        "4978645250": "white40-42",
-        "4978649651": "white42-44",
-        "4978653500": "white44-46",
-        "4978657296": "white46-48",
-        "4978664680": "white48-50",
-        "4978668830": "white50-52",
-        "4978672926": "white52-54",
-        "4978680391": "white54-56",
-        "4978692880": "white56-58",
-        "4978698784": "white58-60",
+
+        # AvokaDo (Иван)
+        "1456260576": "AvokaDo742-44",
+        "1456494260": "AvokaDo744-46",
+        "1466830128": "AvokaDo746-48",
+        "1466832358": "AvokaDo748-50",
+        "1466843663": "AvokaDo750-52",
+        "1466862853": "AvokaDo752-54",
+        "1467513368": "AvokaDo754-56",
+        "1529357364": "AvokaDo740",
+        "1538380246": "AvokaDo756-58",
+        "2169403112": "AvokaDo740-42",
+
+        # beige (Иван)
+        "1477909965": "beige7P42-44",
+        "1483240426": "beige7P44-46",
+        "1483240398": "beige7P46-48",
+        "1483407246": "beige7P48-50",
+        "1483407260": "beige7P50-52",
+        "1483407243": "beige7P52-54",
+        "1483407261": "beige7P54-56",
+        "1528888044": "beige7P40-42",
+
+        # white (Иван)
+        "1526476714": "white36-38",
+        "1526993660": "white38-40",
+        "1527043070": "white40-42",
+        "1526481636": "white42-44",
+        "1527032120": "white44-46",
+        "1526963865": "white46-48",
+        "1526961386": "white48-50",
+        "1526605447": "white50-52",
+        "1526612132": "white52-54",
+        "1526593951": "white54-56",
+        "1526534526": "white56-58",
+        "1526534427": "white58-60",
+
+        # Black (Иван)
+        "1447571639": "Black5P42-44",
+        "1483317248": "Black5P44-46",
+        "1483267854": "Black5P46-48",
+        "1483267822": "Black5P48-50",
+        "1483267793": "Black5P50-52",
+        "1483267815": "Black5P52-54",
+        "1483293010": "Black5P54-56",
     }
 
     # Normalize offer_id to string and map using mapping
@@ -2039,6 +2081,52 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
 
     # Group by snapshot_date and offer_id, and take the first non-null value for each column
     latest_snapshots = snapshots.groupby(["snapshot_date", "offer_id"], as_index=False).first()
+
+    # Map seller_price_api for cats7P from donor articles (like AvokaDo)
+    CATS_DONOR_MAPPING = {
+        "cats7P42-44": "AvokaDo742-44",
+        "cats7P44": "AvokaDo744-46",
+        "cats7P46-48": "AvokaDo746-48",
+        "cats7P48-50": "AvokaDo748-50",
+        "cats7P50": "AvokaDo750-52",
+        "cats7P52-54": "AvokaDo752-54",
+        "cats7P54": "AvokaDo754-56",
+        "cats7P54-56": "AvokaDo754-56",
+    }
+
+    if not latest_snapshots.empty:
+        donor_prices = latest_snapshots[
+            latest_snapshots["seller_price_api"].notna()
+        ].set_index(["snapshot_date", "offer_id"])["seller_price_api"].to_dict()
+
+        def fill_cats_price(row):
+            oid = row["offer_id"]
+            price = row["seller_price_api"]
+            if pd.isna(price) or price is None:
+                donor_oid = CATS_DONOR_MAPPING.get(oid)
+                if donor_oid:
+                    key = (row["snapshot_date"], donor_oid)
+                    return donor_prices.get(key, price)
+            return price
+
+        latest_snapshots["seller_price_api"] = latest_snapshots.apply(fill_cats_price, axis=1)
+
+        # Recalculate SPP since we now have seller_price_api for cats
+        sel_price = pd.to_numeric(latest_snapshots["seller_price_api"], errors="coerce")
+        buy_price = pd.to_numeric(latest_snapshots["buyer_regular_price_web"], errors="coerce")
+
+        spp_rub_calc = sel_price - buy_price
+        spp_pct_calc = (spp_rub_calc / sel_price) * 100
+
+        if "spp_rub" in latest_snapshots.columns:
+            latest_snapshots["spp_rub"] = latest_snapshots["spp_rub"].fillna(spp_rub_calc)
+        else:
+            latest_snapshots["spp_rub"] = spp_rub_calc
+
+        if "spp_percent" in latest_snapshots.columns:
+            latest_snapshots["spp_percent"] = latest_snapshots["spp_percent"].fillna(spp_pct_calc)
+        else:
+            latest_snapshots["spp_percent"] = spp_pct_calc
 
     # Drop helper column
     if "offer_id_str" in latest_snapshots.columns:
@@ -2122,7 +2210,6 @@ def build_ozon_price_monitor_dataframe(
     cols = [
         "Артикул Ozon",
         "Категория",
-        "Название",
         "Цена Ozon",
         "Предыдущая цена",
         "Изменение, ₽",
@@ -2134,7 +2221,6 @@ def build_ozon_price_monitor_dataframe(
         if tracked_list:
             display_df = pd.DataFrame(tracked_list)
             display_df = display_df.rename(columns={"offer_id": "Артикул Ozon", "category": "Категория"})
-            display_df["Название"] = ""
             display_df["Цена Ozon"] = None
             display_df["Предыдущая цена"] = None
             display_df["Изменение, ₽"] = None
@@ -2185,7 +2271,6 @@ def build_ozon_price_monitor_dataframe(
         columns={
             "offer_id": "Артикул Ozon",
             "category": "Категория",
-            "name": "Название",
             "buyer_regular_price_web": "Цена Ozon",
             "_previous_success_price": "Предыдущая цена",
             "price_delta": "Изменение, ₽",
@@ -2518,7 +2603,6 @@ def render_ozon_price_monitor_content(cache_buster: str | None) -> None:
     compact_columns = [
         "Артикул Ozon",
         "Категория",
-        "Название",
         "Цена Ozon",
         "Предыдущая цена",
         "Изменение, ₽",
@@ -2549,7 +2633,6 @@ def render_ozon_price_monitor_content(cache_buster: str | None) -> None:
         alert_columns = [
             "Артикул Ozon",
             "Категория",
-            "Название",
             "Цена Ozon",
             "Предыдущая цена",
             "Изменение, ₽",
@@ -2614,7 +2697,6 @@ def render_ozon_spp_content(cache_buster: str | None) -> None:
     spp_df = filtered_df[[
         "snapshot_date",
         "offer_id",
-        "name",
         "category",
         "seller_price_api",
         "buyer_regular_price_web",
@@ -2627,7 +2709,6 @@ def render_ozon_spp_content(cache_buster: str | None) -> None:
         columns={
             "snapshot_date": "Дата",
             "offer_id": "Артикул Ozon",
-            "name": "Название",
             "category": "Категория",
             "seller_price_api": "Цена продавца",
             "buyer_regular_price_web": "Видимая цена Ozon",

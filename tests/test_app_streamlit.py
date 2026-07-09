@@ -6535,6 +6535,7 @@ def test_build_ozon_price_monitor_dataframe(monkeypatch) -> None:
     assert row["Категория"] == "трусы"
     assert "Цена продавца" not in res.columns
     assert "SKU" not in res.columns
+    assert "Название" not in res.columns
     assert row["Цена Ozon"] == 1420.0
     assert row["Предыдущая цена"] == 1500.0
     assert row["Изменение, ₽"] == -80.0
@@ -6588,6 +6589,7 @@ def test_render_ozon_price_monitor_content_dry_run(monkeypatch) -> None:
     assert "Цена продавца" not in main_df.columns
     assert "Ссылка на карточку" in main_df.columns
     assert "SKU" not in main_df.columns
+    assert "Название" not in main_df.columns
 
 
 def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
@@ -6630,6 +6632,7 @@ def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
     assert "СПП, ₽" in df_data.columns
     assert "СПП, %" in df_data.columns
     assert "Цена продавца" in df_data.columns
+    assert "Название" not in df_data.columns
     assert df_data.iloc[0]["СПП, ₽"] == 580.0
 
 
@@ -6704,4 +6707,48 @@ def test_ozon_spp_contains_both_prices(monkeypatch) -> None:
     assert res.iloc[0]["spp_percent"] == 67.8
     assert res.iloc[0]["offer_id"] == "white42-44"
     assert res.iloc[0]["category"] == "трусы"
+
+
+def test_ozon_spp_cats_donor_mapping(monkeypatch) -> None:
+    from datetime import date, datetime
+    d1 = date(2026, 7, 8)
+    snapshot_df = pd.DataFrame([
+        {
+            "snapshot_date": d1,
+            "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
+            "offer_id": "AvokaDo742-44",
+            "sku": 2169403112,
+            "name": "Avokado Product",
+            "buyer_regular_price_web": 800.0,
+            "seller_price_api": 2400.0,
+            "status_web": "ok",
+            "final_url": "http://ozon/avokado",
+        },
+        {
+            "snapshot_date": d1,
+            "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
+            "offer_id": "1825602366",
+            "sku": 1825602366,
+            "name": "Cats Product",
+            "buyer_regular_price_web": 772.0,
+            "seller_price_api": None,
+            "status_web": "ok",
+            "final_url": "http://ozon/cats",
+        }
+    ])
+
+    monkeypatch.setattr(
+        "src.ozon.config.load_tracked_articles_with_categories",
+        lambda: [{"offer_id": "2169403112", "category": "трусы"}, {"offer_id": "1825602366", "category": "трусы"}]
+    )
+
+    res = app_streamlit.process_ozon_snapshot_with_categories(snapshot_df)
+    assert not res.empty
+    
+    cats_row = res[res["offer_id"] == "cats7P42-44"].iloc[0]
+    assert cats_row["seller_price_api"] == 2400.0
+    assert cats_row["buyer_regular_price_web"] == 772.0
+    assert cats_row["spp_rub"] == 1628.0
+    assert round(float(cats_row["spp_percent"]), 1) == 67.8
+
 
