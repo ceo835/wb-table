@@ -94,6 +94,28 @@ def main() -> int:
     print(f"missing_from_web  : {missing_from_web}")
     print(f"saved_offer_ids   : {saved_offer_ids}")
     print("-" * 115)
+    
+    # Blocked diagnostics list
+    blocked_items = [r for r in items if r.get("status_web") == "blocked"]
+    if blocked_items:
+        print("\nBlocked Ozon Items Diagnostics:")
+        print("-" * 115)
+        print(f"{'offer_id':<18} | {'sku':<10} | {'stock':<5} | {'page_type':<13} | {'error':<8} | {'title':<30}")
+        print("-" * 115)
+        for b in blocked_items:
+            raw = b.get("raw_json", {})
+            web_res = raw.get("web_result", {})
+            page_title = web_res.get("page_title") or "None"
+            page_type = web_res.get("page_type") or "None"
+            err = web_res.get("error") or "None"
+            
+            # Format requested URL based on sku
+            req_url = f"https://www.ozon.ru/product/{b['sku']}/" if b.get('sku') else "None"
+            
+            print(f"{b['offer_id']:<18} | {str(b['sku']):<10} | {b['stock']:<5.0f} | {page_type:<13} | {err:<8} | {page_title[:30]:<30}")
+            print(f"  > Requested URL: {req_url}")
+            print(f"  > Final URL    : {b.get('final_url') or 'None'}")
+        print("-" * 115)
     print()
 
     return 0

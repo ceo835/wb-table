@@ -76,8 +76,6 @@ class PlaywrightWebPriceChecker:
         "доступ ограничен",
         "access denied",
         "verify you are human",
-        "robot",
-        "робот",
         "проверьте, что вы не робот",
     ]
     NETWORK_BLOCKED_MARKERS = [
@@ -623,6 +621,38 @@ class PlaywrightWebPriceChecker:
                 return absolute_url
         return None
 
+    def _run_fallback_search(self, page, web_lookup_id: Optional[int], offer_id: str) -> Optional[str]:
+        # 1. Search by SKU (web_lookup_id)
+        if web_lookup_id is not None:
+            search_url = f"https://www.ozon.ru/search/?text={web_lookup_id}"
+            logger.info("Playwright fallback search by SKU: %s", search_url)
+            try:
+                response = page.goto(search_url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
+                page.wait_for_load_state("domcontentloaded", timeout=self.timeout * 1000)
+                page.wait_for_timeout(1500)
+                found_url = self._find_product_url_on_search_page(page, page.url, web_lookup_id)
+                if found_url:
+                    logger.info("Playwright found product URL by SKU search: %s", found_url)
+                    return found_url
+            except Exception as e:
+                logger.warning("Playwright fallback search by SKU failed: %s", e)
+
+        # 2. Search by offer_id
+        search_url = f"https://www.ozon.ru/search/?text={offer_id}"
+        logger.info("Playwright fallback search by offer_id: %s", search_url)
+        try:
+            response = page.goto(search_url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
+            page.wait_for_load_state("domcontentloaded", timeout=self.timeout * 1000)
+            page.wait_for_timeout(1500)
+            found_url = self._find_product_url_on_search_page(page, page.url, web_lookup_id)
+            if found_url:
+                logger.info("Playwright found product URL by offer_id search: %s", found_url)
+                return found_url
+        except Exception as e:
+            logger.warning("Playwright fallback search by offer_id failed: %s", e)
+
+        return None
+
     def _detect_delivery_unavailable(self, html: str, page_title: Optional[str] = None) -> bool:
         normalized = f"{html}\n{page_title or ''}".lower()
         return any(
@@ -836,27 +866,32 @@ class PlaywrightWebPriceChecker:
             status_code = response.status if response is not None else None
             page_type = self._detect_page_type(final_url, html, status_code=status_code)
 
+            redirected_url = None
             if page_type == "search_page":
                 redirected_url = self._find_product_url_on_search_page(page, final_url, web_lookup_id)
-                if redirected_url:
-                    logger.info(
-                        "Playwright search redirect for %s: web_lookup_id=%s search_url=%s target_url=%s",
-                        product.offer_id,
-                        web_lookup_id,
-                        final_url,
-                        redirected_url,
-                    )
-                    response = page.goto(redirected_url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
-                    page.wait_for_load_state("domcontentloaded", timeout=self.timeout * 1000)
-                    try:
-                        page.wait_for_selector(widget_selector, timeout=3000)
-                    except PlaywrightTimeoutError:
-                        pass
-                    page.wait_for_timeout(self.WAIT_AFTER_LOAD_MS)
-                    final_url = page.url
-                    html = page.content()
-                    status_code = response.status if response is not None else None
-                    page_type = self._detect_page_type(final_url, html, status_code=status_code)
+                if not redirected_url:
+                    redirected_url = self._run_fallback_search(page, web_lookup_id, product.offer_id)
+            elif page_type == "wrong_page":
+                redirected_url = self._run_fallback_search(page, web_lookup_id, product.offer_id)
+
+            if redirected_url:
+                logger.info(
+                    "Playwright search redirect/fallback for %s: web_lookup_id=%s target_url=%s",
+                    product.offer_id,
+                    web_lookup_id,
+                    redirected_url,
+                )
+                response = page.goto(redirected_url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
+                page.wait_for_load_state("domcontentloaded", timeout=self.timeout * 1000)
+                try:
+                    page.wait_for_selector(widget_selector, timeout=3000)
+                except PlaywrightTimeoutError:
+                    pass
+                page.wait_for_timeout(self.WAIT_AFTER_LOAD_MS)
+                final_url = page.url
+                html = page.content()
+                status_code = response.status if response is not None else None
+                page_type = self._detect_page_type(final_url, html, status_code=status_code)
 
             price, raw, parsed_price_source = self._extract_price(page, html, page_type)
             try:

@@ -192,6 +192,8 @@ def collect_and_load_ozon_snapshots(
                 "offer_id": result.offer_id,
                 "status": result.status,
                 "error": result.error,
+                "page_title": result.page_title,
+                "page_type": result.page_type,
                 "buyer_visible_price": result.buyer_visible_price,
                 "other_bank_price": result.other_bank_price,
                 "old_price": result.old_price,
