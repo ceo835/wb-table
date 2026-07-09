@@ -1148,3 +1148,34 @@ class FactIvanStockSheetDay(Base, TimestampMixin):
     nomenclature_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_sheet: Mapped[str] = mapped_column(Text, nullable=False, default="Остатки", server_default="Остатки")
     raw_row: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+
+
+class FactOzonPriceSnapshot(Base, TimestampMixin):
+    __tablename__ = "fact_ozon_price_snapshot"
+    __table_args__ = (
+        UniqueConstraint("snapshot_at", "offer_id", name="uq_fact_ozon_price_snapshot_at_offer_id"),
+        Index("idx_fact_ozon_price_snapshot_at_offer_id", "snapshot_at", "offer_id"),
+        Index("idx_fact_ozon_price_snapshot_date", "snapshot_date"),
+    )
+
+    snapshot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    offer_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    product_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sku: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seller_status: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    stock_total: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    seller_price_api: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    buyer_visible_price_web: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    other_bank_price_web: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    old_price_web: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    buyer_regular_price_web: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    spp_rub: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    spp_percent: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    final_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status_api: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status_web: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)

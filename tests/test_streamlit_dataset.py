@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.streamlit_dataset import attach_wb_price_snapshot_fields, enrich_streamlit_row
+from src.streamlit_dataset import attach_wb_price_snapshot_fields, attach_wb_seller_price_fields, enrich_streamlit_row
 
 
 def test_enrich_streamlit_row_uses_entry_point_impressions_for_display_fields():
@@ -303,3 +303,56 @@ def test_attach_wb_price_snapshot_fields_uses_exact_date_and_last_prior_success_
     assert attached[2]["previous_wb_buyer_price"] is None
     assert attached[2]["wb_price_delta"] is None
     assert attached[2]["wb_price_alert"] is False
+
+
+def test_attach_wb_seller_price_fields_calculates_spp() -> None:
+    rows = [
+        {"report_date": "2026-06-10", "nm_id": 91470767, "wb_buyer_price": "428.00"},
+    ]
+    seller_rows = [
+        {"snapshot_date": "2026-06-10", "nm_id": 91470767, "wb_seller_price": "543.80"},
+    ]
+    attached = attach_wb_seller_price_fields(rows, seller_rows)
+    
+    assert float(attached[0]["wb_seller_price"]) == 543.80
+    assert float(attached[0]["spp_rub"]) == 115.80
+    assert round(float(attached[0]["spp_pct"]), 4) == round(21.2945936, 4)
+
+
+def test_attach_wb_seller_price_fields_keeps_null_on_empty() -> None:
+    rows = [
+        {"report_date": "2026-06-10", "nm_id": 91470767, "wb_buyer_price": "428.00"},
+        {"report_date": "2026-06-11", "nm_id": 91470767, "wb_buyer_price": None},
+    ]
+    seller_rows = [
+        {"snapshot_date": "2026-06-10", "nm_id": 91470767, "wb_seller_price": None},
+    ]
+    attached = attach_wb_seller_price_fields(rows, seller_rows)
+    
+    assert attached[0]["wb_seller_price"] is None
+    assert attached[0]["spp_rub"] is None
+    assert attached[0]["spp_pct"] is None
+    assert attached[1]["wb_seller_price"] is None
+
+
+def test_attach_wb_seller_price_fields_uses_exact_date_and_last_prior_price() -> None:
+    rows = [
+        {"report_date": "2026-06-10", "nm_id": 91470767, "wb_buyer_price": "400.00"},
+        {"report_date": "2026-06-11", "nm_id": 91470767, "wb_buyer_price": "400.00"},
+    ]
+    seller_rows = [
+        {"snapshot_date": "2026-06-08", "nm_id": 91470767, "wb_seller_price": "500.00"},
+        {"snapshot_date": "2026-06-11", "nm_id": 91470767, "wb_seller_price": "600.00"},
+    ]
+    attached = attach_wb_seller_price_fields(rows, seller_rows)
+    
+    # On 2026-06-10: carry forward the 2026-06-08 seller price (500)
+    assert float(attached[0]["wb_seller_price"]) == 500.00
+    assert float(attached[0]["spp_rub"]) == 100.00
+    assert float(attached[0]["spp_pct"]) == 20.0
+    
+    # On 2026-06-11: use the exact 2026-06-11 seller price (600)
+    assert float(attached[1]["wb_seller_price"]) == 600.00
+    assert float(attached[1]["spp_rub"]) == 200.00
+    assert round(float(attached[1]["spp_pct"]), 4) == round(33.333333, 4)
+

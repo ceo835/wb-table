@@ -48,6 +48,9 @@ data/raw/
 data/tmp/
 data/processed/
 data/processed/*.csv
+
+# Probe / tmp outputs (не коммитить)
+tmp/
 *.xlsx
 *.xlsm
 *.tmp
