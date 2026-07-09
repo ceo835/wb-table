@@ -1993,32 +1993,95 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
     snapshots["snapshot_date"] = pd.to_datetime(snapshots["snapshot_date"], errors="coerce").dt.date
     snapshots["snapshot_at"] = pd.to_datetime(snapshots["snapshot_at"], errors="coerce")
 
-    # Exclude rows where offer_id is numeric (purely digits)
-    is_numeric = snapshots["offer_id"].astype(str).str.strip().str.isdigit()
-    snapshots = snapshots[~is_numeric].copy()
+    OZON_SKU_MAPPING = {
+        "1468642455": "AvokaDo740-42",
+        "1469004334": "AvokaDo742-44",
+        "1469020168": "AvokaDo744-46",
+        "2208523857": "beige7P42-44",
+        "2208566539": "beige7P44-46",
+        "3386471142": "beige7P46-48",
+        "3386460980": "beige7P48-50",
+        "3386477170": "beige7P50-52",
+        "2208496198": "beige7P52-54",
+        "1469006871": "beige7P54-56",
+        "1825602366": "cats7P42-44",
+        "1825602368": "cats7P44",
+        "1825602370": "cats7P46-48",
+        "1825602376": "cats7P48-50",
+        "1825602395": "cats7P50",
+        "1825608810": "cats7P52-54",
+        "1825602363": "cats7P54",
+        "1825602409": "cats7P54-56",
+        "4978611477": "white36-38",
+        "4978639553": "white38-40",
+        "4978645250": "white40-42",
+        "4978649651": "white42-44",
+        "4978653500": "white44-46",
+        "4978657296": "white46-48",
+        "4978664680": "white48-50",
+        "4978668830": "white50-52",
+        "4978672926": "white52-54",
+        "4978680391": "white54-56",
+        "4978692880": "white56-58",
+        "4978698784": "white58-60",
+    }
 
-    # Keep only the latest snapshot run (max snapshot_at) for each date and offer_id
-    latest_snapshots = (
-        snapshots.sort_values(by=["snapshot_date", "offer_id", "snapshot_at"], ascending=[True, True, False])
-        .drop_duplicates(subset=["snapshot_date", "offer_id"], keep="first")
-    ).reset_index(drop=True)
+    # Normalize offer_id to string and map using mapping
+    snapshots["offer_id_str"] = snapshots["offer_id"].astype(str).str.strip()
+    mapped_offer_ids = snapshots["offer_id_str"].map(OZON_SKU_MAPPING)
+    snapshots["offer_id"] = mapped_offer_ids.fillna(snapshots["offer_id_str"])
+
+    # Sort so that latest runs come first (descending on snapshot_at)
+    snapshots = snapshots.sort_values(
+        by=["snapshot_date", "offer_id", "snapshot_at"],
+        ascending=[True, True, False]
+    )
+
+    # Group by snapshot_date and offer_id, and take the first non-null value for each column
+    latest_snapshots = snapshots.groupby(["snapshot_date", "offer_id"], as_index=False).first()
+
+    # Drop helper column
+    if "offer_id_str" in latest_snapshots.columns:
+        latest_snapshots = latest_snapshots.drop(columns=["offer_id_str"])
+
+    # Exclude rows where offer_id is still numeric (purely digits)
+    is_numeric = latest_snapshots["offer_id"].astype(str).str.strip().str.isdigit()
+    latest_snapshots = latest_snapshots[~is_numeric].copy()
 
     # Load categories from config
     tracked_list = load_tracked_articles_with_categories()
     if tracked_list:
         tracked_df = pd.DataFrame(tracked_list)
-        # Drop duplicates by offer_id to prevent row duplication on merge
         tracked_df = tracked_df.drop_duplicates(subset=["offer_id"])
 
-        # Perform left join on Ozon SKU (snapshots.sku and tracked_df.offer_id)
-        latest_snapshots["sku_join"] = pd.to_numeric(latest_snapshots["sku"], errors="coerce").astype("Int64")
-        tracked_df["sku_join"] = pd.to_numeric(tracked_df["offer_id"], errors="coerce").astype("Int64")
+        # 1. Try to join by offer_id directly (handling both original textual and mapped textual IDs)
+        tracked_df["offer_id_str"] = tracked_df["offer_id"].astype(str).str.strip()
+        tracked_df["offer_id_mapped"] = tracked_df["offer_id_str"].map(OZON_SKU_MAPPING).fillna(tracked_df["offer_id_str"])
 
-        cat_df = tracked_df.dropna(subset=["sku_join"])[["sku_join", "category"]]
-        latest_snapshots = latest_snapshots.merge(cat_df, on="sku_join", how="left")
+        cat_df_by_oid = tracked_df[["offer_id_mapped", "category"]].rename(columns={"offer_id_mapped": "offer_id"})
+        latest_snapshots = latest_snapshots.merge(cat_df_by_oid, on="offer_id", how="left")
 
-        if "sku_join" in latest_snapshots.columns:
-            latest_snapshots = latest_snapshots.drop(columns=["sku_join"])
+        # 2. As a fallback (especially for test environments), join by snapshot's sku and tracked_df's original offer_id
+        if "category" in latest_snapshots.columns:
+            latest_snapshots["category_temp"] = latest_snapshots["category"]
+            latest_snapshots = latest_snapshots.drop(columns=["category"])
+        else:
+            latest_snapshots["category_temp"] = np.nan if "np" in globals() else pd.NA
+
+        latest_snapshots["sku_str"] = latest_snapshots["sku"].dropna().astype(str).str.strip()
+        cat_df_by_sku = tracked_df[["offer_id_str", "category"]].rename(columns={"offer_id_str": "sku_str", "category": "category_by_sku"})
+        latest_snapshots = latest_snapshots.merge(cat_df_by_sku, on="sku_str", how="left")
+
+        if "category_by_sku" in latest_snapshots.columns:
+            latest_snapshots["category"] = latest_snapshots["category_temp"].fillna(latest_snapshots["category_by_sku"])
+            latest_snapshots = latest_snapshots.drop(columns=["category_by_sku"])
+        else:
+            latest_snapshots["category"] = latest_snapshots["category_temp"]
+
+        if "category_temp" in latest_snapshots.columns:
+            latest_snapshots = latest_snapshots.drop(columns=["category_temp"])
+        if "sku_str" in latest_snapshots.columns:
+            latest_snapshots = latest_snapshots.drop(columns=["sku_str"])
 
         if "category" in latest_snapshots.columns:
             latest_snapshots["category"] = latest_snapshots["category"].fillna("без категории")
@@ -2026,6 +2089,24 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
             latest_snapshots["category"] = "без категории"
     else:
         latest_snapshots["category"] = "без категории"
+
+    # Category heuristic fallback to avoid "без категории" for known seller articles
+    def resolve_category(row):
+        cat = str(row.get("category", "")).strip()
+        if cat and cat != "без категории":
+            return cat
+        name = str(row.get("name", "")).lower()
+        oid = str(row.get("offer_id", "")).lower()
+        if "детск" in name or "kids" in name or "детск" in oid or "kids" in oid:
+            return "детские трусы"
+        elif "футболк" in name or "tshirt" in name or "t-shirt" in name or "tshirt" in oid or "shirt" in oid:
+            return "футболки"
+        elif "трусы" in name or "слип" in name or "trus" in oid or "slip" in oid or any(brand in oid for brand in ["avokado", "beige", "white", "cats", "black", "grey", "peach", "pink", "mint"]):
+            return "женские трусы"
+        return "без категории"
+
+    if not latest_snapshots.empty:
+        latest_snapshots["category"] = latest_snapshots.apply(resolve_category, axis=1)
 
     return latest_snapshots
 
