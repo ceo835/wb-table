@@ -5994,6 +5994,71 @@ def test_render_stock_all_tab_adds_xlsx_download_button_for_current_main_table(m
     assert download_calls[0]["mime"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+def test_render_stock_all_tab_hides_wb_vs_one_c_summary_card(monkeypatch) -> None:
+    snapshot_df = pd.DataFrame([{"snapshot_date": pd.Timestamp("2026-07-04").date(), "nm_id": 101}])
+    settings_df = pd.DataFrame([{"nm_id": 101, "supplier_article": "art-101", "title": "Товар 101"}])
+    available_dates = [pd.Timestamp("2026-07-04").date()]
+    product_df = pd.DataFrame(
+        [
+            {
+                "nm_id": 101,
+                "band_name": "Трусы женские",
+                "wb_stock_qty": 5,
+                "wb_in_way_to_client": 1,
+                "wb_in_way_from_client": 0,
+                "wb_total_in_contour": 6,
+                "one_c_stock_qty": 2,
+                "wb_vs_one_c_diff": 3,
+            }
+        ]
+    )
+    display_df = pd.DataFrame(
+        [
+            {
+                "Банда": "Трусы женские",
+                "Артикул WB": 101,
+                "Артикул продавца": "art-101",
+                "Название": "Товар 101",
+                "Остаток WB": 5,
+                "Остаток 1С": 2,
+            }
+        ]
+    )
+
+    rendered_cards: list[str] = []
+
+    class _Column:
+        def markdown(self, html, *_args, **_kwargs):
+            rendered_cards.append(str(html))
+            return None
+
+    monkeypatch.setattr(app_streamlit.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "divider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "date_input", lambda *args, **kwargs: available_dates[0])
+    monkeypatch.setattr(app_streamlit.st, "radio", lambda *args, **kwargs: "По товарам")
+    monkeypatch.setattr(app_streamlit.st, "columns", lambda count: [_Column() for _ in range(count)])
+    monkeypatch.setattr(app_streamlit.st, "download_button", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "dataframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit, "load_ivan_stock_product_level_from_db", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(app_streamlit, "load_tracked_products", lambda: pd.DataFrame())
+    monkeypatch.setattr(app_streamlit, "build_stock_all_product_level", lambda *args, **kwargs: product_df)
+    monkeypatch.setattr(app_streamlit, "load_sales_speed_data_from_db", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(
+        app_streamlit,
+        "build_stock_all_display_dataframe",
+        lambda *args, **kwargs: (display_df.copy(), ["Остаток WB", "Остаток 1С"]),
+    )
+    monkeypatch.setattr(app_streamlit, "sanitize_dataframe_for_streamlit_display", lambda df, **kwargs: df)
+    monkeypatch.setattr(app_streamlit, "build_excel_export_bytes", lambda df: b"PK-stock-all")
+
+    app_streamlit.render_stock_all_tab(snapshot_df, settings_df, available_dates, cache_buster="stock-buster")
+
+    cards_html = "\n".join(rendered_cards)
+    assert "Разница WB - 1С" not in cards_html
+
+
 def test_build_stock_all_band_level_clips_negative_one_c_stock_to_zero() -> None:
     product_df = pd.DataFrame(
         [
@@ -6426,3 +6491,119 @@ def test_render_stock_speed_charts_uses_orders_label(monkeypatch) -> None:
         app_streamlit.render_stock_speed_charts(filtered, None)
 
     assert "### Скорость заказов" in markdown_calls
+
+
+def test_build_ozon_price_monitor_dataframe() -> None:
+    from datetime import date, datetime
+    d1 = date(2026, 7, 7)
+    d2 = date(2026, 7, 8)
+    snapshot_df = pd.DataFrame([
+        {
+            "snapshot_date": d1,
+            "snapshot_at": datetime(2026, 7, 7, 12, 0, 0),
+            "offer_id": "art-1",
+            "sku": 1001,
+            "name": "Product 1",
+            "buyer_regular_price_web": 1500.0,
+            "status_web": "ok",
+            "final_url": "http://ozon/1",
+        },
+        {
+            "snapshot_date": d2,
+            "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
+            "offer_id": "art-1",
+            "sku": 1001,
+            "name": "Product 1",
+            "buyer_regular_price_web": 1420.0,
+            "status_web": "ok",
+            "final_url": "http://ozon/1",
+        }
+    ])
+
+    res = app_streamlit.build_ozon_price_monitor_dataframe(snapshot_df, snapshot_date=d2)
+
+    assert len(res) == 1
+    row = res.iloc[0]
+    assert row["Артикул Ozon"] == "art-1"
+    assert row["SKU"] == 1001
+    assert row["Текущая цена"] == 1420.0
+    assert row["Предыдущая цена"] == 1500.0
+    assert row["Изменение, ₽"] == -80.0
+    assert bool(row["Alert"]) is True
+    assert row["Ссылка Ozon"] == "http://ozon/1"
+
+
+def test_render_ozon_price_monitor_content_dry_run(monkeypatch) -> None:
+    from datetime import date, datetime
+    from unittest.mock import MagicMock
+    d1 = date(2026, 7, 8)
+    snapshot_df = pd.DataFrame([
+        {
+            "snapshot_date": d1,
+            "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
+            "offer_id": "art-1",
+            "sku": 1001,
+            "name": "Product 1",
+            "buyer_regular_price_web": 1420.0,
+            "status_web": "ok",
+            "final_url": "http://ozon/1",
+            "seller_price_api": 2000.0,
+            "spp_rub": 580.0,
+            "spp_percent": 29.0,
+        }
+    ])
+
+    monkeypatch.setattr(app_streamlit, "load_ozon_price_snapshot_from_db", lambda *args, **kwargs: snapshot_df)
+
+    markdown_calls = []
+    st_dataframe_calls = []
+
+    monkeypatch.setattr(app_streamlit.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "selectbox", lambda *args, **kwargs: d1)
+    monkeypatch.setattr(app_streamlit.st, "columns", lambda count: [MagicMock() for _ in range(count)])
+    monkeypatch.setattr(app_streamlit.st, "markdown", lambda text, **kwargs: markdown_calls.append(text))
+    monkeypatch.setattr(app_streamlit.st, "dataframe", lambda df, **kwargs: st_dataframe_calls.append(df))
+
+    app_streamlit.render_ozon_price_monitor_content("ozon-buster")
+
+    assert any("Все проверенные цены за дату" in call for call in markdown_calls)
+    assert any("Только скачки цены / alerts" in call for call in markdown_calls)
+    assert len(st_dataframe_calls) >= 1
+
+
+def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
+    from datetime import date, datetime
+    d1 = date(2026, 7, 8)
+    snapshot_df = pd.DataFrame([
+        {
+            "snapshot_date": d1,
+            "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
+            "offer_id": "art-1",
+            "sku": 1001,
+            "name": "Product 1",
+            "buyer_regular_price_web": 1420.0,
+            "status_web": "ok",
+            "final_url": "http://ozon/1",
+            "seller_price_api": 2000.0,
+            "spp_rub": 580.0,
+            "spp_percent": 29.0,
+        }
+    ])
+
+    monkeypatch.setattr(app_streamlit, "load_ozon_price_snapshot_from_db", lambda *args, **kwargs: snapshot_df)
+
+    st_dataframe_calls = []
+
+    monkeypatch.setattr(app_streamlit.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_streamlit.st, "date_input", lambda *args, **kwargs: (d1, d1))
+    monkeypatch.setattr(app_streamlit.st, "dataframe", lambda df, **kwargs: st_dataframe_calls.append(df))
+
+    app_streamlit.render_ozon_spp_content("ozon-buster")
+
+    assert len(st_dataframe_calls) == 1
+    df = st_dataframe_calls[0]
+    df_data = df.data
+    assert "СПП, ₽" in df_data.columns
+    assert "СПП, %" in df_data.columns
+    assert "Цена продавца" in df_data.columns
+    assert df_data.iloc[0]["СПП, ₽"] == 580.0

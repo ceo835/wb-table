@@ -45,6 +45,7 @@ from src.db.models import (
     FactFunnelDay,
     FactIvanStockSheetDay,
     FactWbStatisticsOrderSizeDay,
+    FactOzonPriceSnapshot,
 )
 from src.db.product_query_group_backfill import (
     QUERY_GROUP_UNKNOWN,
@@ -80,7 +81,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 DATASET_PATH = ROOT_DIR / "data" / "processed" / "streamlit_v1_dataset.csv"
 PRODUCT_BANDS_PATH = ROOT_DIR / "data" / "config" / "product_bands.csv"
 MAIN_WB_WAREHOUSES_PATH = ROOT_DIR / "data" / "config" / "main_wb_warehouses.csv"
-WB_SITE_PRICE_TAB_LABEL = "Мониторинг цен WB"
+WB_SITE_PRICE_TAB_LABEL = "Мониторинг цен"
 DEFAULT_DATA_SOURCE = "csv"
 STOCK_WAREHOUSE_TAB_LABEL = "Остатки по складам"
 STOCK_ZERO_POSITIONS_TAB_LABEL = "Контроль нулевых позиций"
@@ -1022,6 +1023,16 @@ def get_db_dataset_cache_buster() -> str:
                 func.count(),
             )
         ).one()
+        try:
+            ozon_state = session.execute(
+                select(
+                    func.max(FactOzonPriceSnapshot.snapshot_date),
+                    func.max(FactOzonPriceSnapshot.loaded_at),
+                    func.count(),
+                )
+            ).one()
+        except Exception:
+            ozon_state = (None, None, 0)
     return "|".join(
         "" if value is None else str(value) 
         for value in (
@@ -1037,6 +1048,7 @@ def get_db_dataset_cache_buster() -> str:
             *ivan_stock_state,
             *funnel_state,
             *settings_products_state,
+            *ozon_state,
         )
     )
 
@@ -1607,6 +1619,43 @@ def load_wb_site_price_snapshot_from_db(cache_buster: str | None = None) -> pd.D
 
 
 @st.cache_data(show_spinner=False)
+def load_ozon_price_snapshot_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+    with session_scope() as session:
+        rows = session.execute(
+            select(FactOzonPriceSnapshot).order_by(
+                FactOzonPriceSnapshot.snapshot_date.asc(),
+                FactOzonPriceSnapshot.offer_id.asc(),
+            )
+        ).scalars().all()
+        materialized_rows = [
+            {
+                "snapshot_at": row.snapshot_at,
+                "snapshot_date": row.snapshot_date,
+                "offer_id": row.offer_id,
+                "product_id": row.product_id,
+                "sku": row.sku,
+                "name": row.name,
+                "seller_status": row.seller_status,
+                "stock_total": row.stock_total,
+                "seller_price_api": row.seller_price_api,
+                "buyer_visible_price_web": row.buyer_visible_price_web,
+                "other_bank_price_web": row.other_bank_price_web,
+                "old_price_web": row.old_price_web,
+                "buyer_regular_price_web": row.buyer_regular_price_web,
+                "spp_rub": row.spp_rub,
+                "spp_percent": row.spp_percent,
+                "final_url": row.final_url,
+                "status_api": row.status_api,
+                "status_web": row.status_web,
+                "error": row.error,
+                "loaded_at": row.loaded_at,
+            }
+            for row in rows
+        ]
+    return pd.DataFrame(materialized_rows)
+
+
+@st.cache_data(show_spinner=False)
 def load_wb_seller_price_snapshot_from_db(cache_buster: str | None = None) -> pd.DataFrame:
     with session_scope() as session:
         rows = session.execute(
@@ -1934,6 +1983,100 @@ def build_wb_site_price_monitor_dataframe(
     return display_df
 
 
+def build_ozon_price_monitor_dataframe(
+    snapshot_df: pd.DataFrame,
+    *,
+    snapshot_date: date,
+) -> pd.DataFrame:
+    if snapshot_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "Артикул Ozon",
+                "SKU",
+                "Название",
+                "Текущая цена",
+                "Предыдущая цена",
+                "Изменение, ₽",
+                "Alert",
+                "Ссылка Ozon",
+            ]
+        )
+
+    snapshots = snapshot_df.copy()
+    snapshots["snapshot_date"] = pd.to_datetime(snapshots["snapshot_date"], errors="coerce").dt.date
+
+    # Find the latest successful price check before the selected snapshot date
+    previous_success_history = snapshots[
+        snapshots["status_web"].astype(str).eq("ok")
+        & snapshots["buyer_regular_price_web"].notna()
+        & snapshots["snapshot_date"].lt(snapshot_date)
+    ].copy()
+
+    if not previous_success_history.empty:
+        previous_success_history["snapshot_at"] = pd.to_datetime(previous_success_history["snapshot_at"], errors="coerce")
+        latest_success_by_offer = (
+            previous_success_history.sort_values(
+                by=["offer_id", "snapshot_date", "snapshot_at"],
+                ascending=[True, False, False],
+                na_position="last",
+            )
+            .drop_duplicates(subset=["offer_id"], keep="first")[["offer_id", "buyer_regular_price_web"]]
+            .rename(columns={"buyer_regular_price_web": "_previous_success_price"})
+        )
+    else:
+        latest_success_by_offer = pd.DataFrame(columns=["offer_id", "_previous_success_price"])
+
+    snapshots_current = snapshots[snapshots["snapshot_date"] == snapshot_date].copy()
+    if snapshots_current.empty:
+        return pd.DataFrame(
+            columns=[
+                "Артикул Ozon",
+                "SKU",
+                "Название",
+                "Текущая цена",
+                "Предыдущая цена",
+                "Изменение, ₽",
+                "Alert",
+                "Ссылка Ozon",
+            ]
+        )
+
+    snapshots_current = snapshots_current.merge(latest_success_by_offer, on="offer_id", how="left")
+
+    curr_price = pd.to_numeric(snapshots_current["buyer_regular_price_web"], errors="coerce")
+    prev_price = pd.to_numeric(snapshots_current["_previous_success_price"], errors="coerce")
+    
+    price_delta = curr_price - prev_price
+    snapshots_current["price_delta"] = price_delta
+    snapshots_current["price_delta_abs"] = price_delta.abs()
+    snapshots_current["Alert"] = snapshots_current["price_delta_abs"] >= 50
+
+    display_df = snapshots_current.rename(
+        columns={
+            "offer_id": "Артикул Ozon",
+            "sku": "SKU",
+            "name": "Название",
+            "buyer_regular_price_web": "Текущая цена",
+            "_previous_success_price": "Предыдущая цена",
+            "price_delta": "Изменение, ₽",
+            "final_url": "Ссылка Ozon",
+        }
+    )
+
+    cols = [
+        "Артикул Ozon",
+        "SKU",
+        "Название",
+        "Текущая цена",
+        "Предыдущая цена",
+        "Изменение, ₽",
+        "Alert",
+        "Ссылка Ozon",
+    ]
+    display_df = display_df[[c for c in cols if c in display_df.columns]].copy()
+    return display_df.reset_index(drop=True)
+
+
 def build_wb_site_price_monitor_visibility_summary(
     snapshot_df: pd.DataFrame,
     tracked_df: pd.DataFrame,
@@ -2028,12 +2171,7 @@ def style_wb_site_price_monitor_table(df: pd.DataFrame) -> pd.io.formats.style.S
     return styler
 
 
-def render_wb_site_price_tab(data_source: str) -> None:
-    if data_source != "db":
-        st.info("Мониторинг цен WB доступен только в режиме PostgreSQL.")
-        return
-
-    cache_buster = resolve_db_dataset_cache_buster()
+def render_wb_price_monitor_content(cache_buster: str | None) -> None:
     snapshot_df = load_wb_site_price_snapshot_from_db(cache_buster)
     alert_df = load_wb_site_price_alert_from_db(cache_buster)
     if snapshot_df.empty:
@@ -2190,6 +2328,199 @@ def render_wb_site_price_tab(data_source: str) -> None:
                 "Дата/время проверки": st.column_config.DatetimeColumn("Дата/время проверки", format="DD.MM.YYYY HH:mm"),
             },
         )
+
+
+def render_ozon_price_monitor_content(cache_buster: str | None) -> None:
+    snapshot_df = load_ozon_price_snapshot_from_db(cache_buster)
+    if snapshot_df.empty:
+        st.warning("В `fact_ozon_price_snapshot` пока нет строк.")
+        return
+
+    snapshot_dates = sorted(pd.to_datetime(snapshot_df["snapshot_date"], errors="coerce").dropna().dt.date.unique().tolist())
+    if not snapshot_dates:
+        st.warning("В `fact_ozon_price_snapshot` нет валидных дат snapshot.")
+        return
+
+    selected_snapshot_date = st.selectbox("Дата проверки цен Ozon", options=snapshot_dates, index=len(snapshot_dates) - 1, key="ozon_site_price_date_select")
+
+    current_snapshot = snapshot_df.copy()
+    current_snapshot["snapshot_date"] = pd.to_datetime(current_snapshot["snapshot_date"], errors="coerce").dt.date
+    current_snapshot = current_snapshot[current_snapshot["snapshot_date"] == selected_snapshot_date].copy()
+
+    # Prepare Ozon monitor dataframe
+    display_df = build_ozon_price_monitor_dataframe(
+        snapshot_df,
+        snapshot_date=selected_snapshot_date,
+    )
+
+    # Render summary metrics
+    summary_cols = st.columns(4)
+    success_count = int(current_snapshot["status_web"].astype(str).eq("ok").sum())
+    error_count = int(current_snapshot["status_web"].astype(str).ne("ok").sum())
+    alerts_count = int(display_df["Alert"].sum()) if not display_df.empty else 0
+    
+    summary_cols[0].metric("Товаров проверено", f"{len(current_snapshot):,}".replace(",", " "))
+    summary_cols[1].metric("Цен получено", f"{success_count:,}".replace(",", " "))
+    summary_cols[2].metric("Ошибок проверки", f"{error_count:,}".replace(",", " "))
+    summary_cols[3].metric("Изменений от 50 ₽", f"{alerts_count:,}".replace(",", " "))
+
+    st.markdown("**Все проверенные цены за дату**")
+    
+    compact_columns = [
+        "Артикул Ozon",
+        "SKU",
+        "Название",
+        "Текущая цена",
+        "Предыдущая цена",
+        "Изменение, ₽",
+        "Alert",
+        "Ссылка Ozon",
+    ]
+    
+    compact_df = display_df[[column for column in compact_columns if column in display_df.columns]].copy()
+    
+    st.dataframe(
+        style_wb_site_price_monitor_table(compact_df),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Текущая цена": st.column_config.NumberColumn("Текущая цена", format="%.2f"),
+            "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
+            "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
+            "Alert": st.column_config.CheckboxColumn("Alert"),
+            "Ссылка Ozon": st.column_config.LinkColumn("Ссылка Ozon", display_text="Карточка Ozon"),
+        },
+    )
+
+    st.markdown("**Только скачки цены / alerts**")
+    alert_display_df = display_df[display_df["Alert"]].copy()
+    if alert_display_df.empty:
+        st.info("За выбранную дату скачков цены от 50 ₽ не найдено.")
+    else:
+        st.dataframe(
+            style_wb_site_price_monitor_table(alert_display_df),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Текущая цена": st.column_config.NumberColumn("Текущая цена", format="%.2f"),
+                "Предыдущая цена": st.column_config.NumberColumn("Предыдущая цена", format="%.2f"),
+                "Изменение, ₽": st.column_config.NumberColumn("Изменение, ₽", format="%.2f"),
+                "Ссылка Ozon": st.column_config.LinkColumn("Ссылка Ozon", display_text="Карточка Ozon"),
+            },
+        )
+
+
+def render_ozon_spp_content(cache_buster: str | None) -> None:
+    snapshot_df = load_ozon_price_snapshot_from_db(cache_buster)
+    if snapshot_df.empty:
+        st.warning("В `fact_ozon_price_snapshot` пока нет строк.")
+        return
+
+    all_dates = sorted(pd.to_datetime(snapshot_df["snapshot_date"], errors="coerce").dropna().dt.date.unique().tolist())
+    if not all_dates:
+        st.warning("В `fact_ozon_price_snapshot` нет валидных дат snapshot.")
+        return
+
+    min_date = all_dates[0]
+    max_date = all_dates[-1]
+
+    # Date range selector
+    date_range = st.date_input(
+        "Период дат",
+        value=[min_date, max_date],
+        min_value=min_date,
+        max_value=max_date,
+        key="ozon_spp_date_range",
+    )
+
+    filtered_df = snapshot_df.copy()
+    filtered_df["snapshot_date"] = pd.to_datetime(filtered_df["snapshot_date"], errors="coerce").dt.date
+
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        start_dt, end_dt = date_range
+        filtered_df = filtered_df[(filtered_df["snapshot_date"] >= start_dt) & (filtered_df["snapshot_date"] <= end_dt)]
+    elif isinstance(date_range, date):
+        filtered_df = filtered_df[filtered_df["snapshot_date"] == date_range]
+
+    if filtered_df.empty:
+        st.info("Нет данных за выбранный период.")
+        return
+
+    filtered_df = filtered_df.sort_values(by=["snapshot_date", "offer_id"], ascending=[False, True])
+
+    spp_df = filtered_df[[
+        "snapshot_date",
+        "offer_id",
+        "sku",
+        "name",
+        "seller_price_api",
+        "buyer_regular_price_web",
+        "spp_rub",
+        "spp_percent",
+        "final_url",
+    ]].copy()
+
+    spp_df = spp_df.rename(
+        columns={
+            "snapshot_date": "Дата",
+            "offer_id": "Артикул Ozon",
+            "sku": "SKU",
+            "name": "Название",
+            "seller_price_api": "Цена продавца",
+            "buyer_regular_price_web": "Видимая цена Ozon",
+            "spp_rub": "СПП, ₽",
+            "spp_percent": "СПП, %",
+            "final_url": "Ссылка на карточку",
+        }
+    )
+
+    def style_spp_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+        safe_df = sanitize_dataframe_for_streamlit_display(
+            df,
+            numeric_columns={"Цена продавца", "Видимая цена Ozon", "СПП, ₽", "СПП, %"},
+        )
+        
+        def spp_row_style(row: pd.Series) -> list[str]:
+            val = row.get("СПП, %")
+            if pd.notna(val) and float(val) > 20.0:
+                return ["background-color: #f0fdf4;" for _ in row.index]
+            return ["" for _ in row.index]
+
+        return safe_df.style.apply(spp_row_style, axis=1)
+
+    st.dataframe(
+        style_spp_table(spp_df),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Дата": st.column_config.DateColumn("Дата", format="DD.MM.YYYY"),
+            "Цена продавца": st.column_config.NumberColumn("Цена продавца", format="%.2f"),
+            "Видимая цена Ozon": st.column_config.NumberColumn("Видимая цена Ozon", format="%.2f"),
+            "СПП, ₽": st.column_config.NumberColumn("СПП, ₽", format="%.2f"),
+            "СПП, %": st.column_config.NumberColumn("СПП, %", format="%.2f"),
+            "Ссылка на карточку": st.column_config.LinkColumn("Ссылка на карточку", display_text="Карточка Ozon"),
+        },
+    )
+
+
+def render_wb_site_price_tab(data_source: str) -> None:
+    if data_source != "db":
+        st.info("Мониторинг цен доступен только в режиме PostgreSQL.")
+        return
+
+    cache_buster = resolve_db_dataset_cache_buster()
+
+    marketplace_tabs = st.tabs(["Wildberries", "Ozon"])
+
+    with marketplace_tabs[0]:
+        render_wb_price_monitor_content(cache_buster)
+
+    with marketplace_tabs[1]:
+        ozon_sub_tabs = st.tabs(["Мониторинг цен Ozon", "СПП Ozon"])
+        with ozon_sub_tabs[0]:
+            render_ozon_price_monitor_content(cache_buster)
+        with ozon_sub_tabs[1]:
+            render_ozon_spp_content(cache_buster)
 
 
 @st.cache_data(show_spinner=False)
@@ -4969,7 +5300,8 @@ def render_stock_all_tab(
     ]
     if len(metric_items) >= 5:
         metric_items[4] = ("Остаток 1С", _fmt_stock_int(one_c_stock_total))
-        metric_items.insert(5, ("Разница WB - 1С", _fmt_stock_int(wb_vs_one_c_diff_total)))
+        if not one_c_product_df.empty:
+            metric_items.insert(5, ("Разница WB - 1С", _fmt_stock_int(wb_vs_one_c_diff_total)))
 
     cols = st.columns(len(metric_items))
     for col, (label, value) in zip(cols, metric_items):
