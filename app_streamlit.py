@@ -2015,7 +2015,41 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
         for t in tracked_list
     ])
 
-    expanded = date_grid.merge(latest_snapshots.drop(columns=["category"], errors="ignore"), on=["snapshot_date", "offer_id"], how="left")
+    is_numeric = date_grid["offer_id"].astype(str).str.strip().str.isdigit()
+
+    date_grid_numeric = date_grid[is_numeric].copy()
+    date_grid_text = date_grid[~is_numeric].copy()
+
+    merged_dfs = []
+
+    if not date_grid_numeric.empty:
+        date_grid_numeric["sku_join"] = pd.to_numeric(date_grid_numeric["offer_id"], errors="coerce").astype("Int64")
+        latest_snapshots_numeric = latest_snapshots.copy()
+        latest_snapshots_numeric["sku_join"] = pd.to_numeric(latest_snapshots_numeric["sku"], errors="coerce").astype("Int64")
+        latest_snapshots_numeric = latest_snapshots_numeric.dropna(subset=["sku_join"])
+
+        merged_numeric = date_grid_numeric.merge(
+            latest_snapshots_numeric.drop(columns=["category", "offer_id"], errors="ignore"),
+            on=["snapshot_date", "sku_join"],
+            how="left"
+        )
+        if "sku_join" in merged_numeric.columns:
+            merged_numeric = merged_numeric.drop(columns=["sku_join"])
+        merged_dfs.append(merged_numeric)
+
+    if not date_grid_text.empty:
+        merged_text = date_grid_text.merge(
+            latest_snapshots.drop(columns=["category"], errors="ignore"),
+            on=["snapshot_date", "offer_id"],
+            how="left"
+        )
+        merged_dfs.append(merged_text)
+
+    if merged_dfs:
+        expanded = pd.concat(merged_dfs, ignore_index=True)
+    else:
+        expanded = pd.DataFrame()
+
     return expanded
 
 

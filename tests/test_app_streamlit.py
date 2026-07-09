@@ -6631,3 +6631,46 @@ def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
     assert "СПП, %" in df_data.columns
     assert "Цена продавца" in df_data.columns
     assert df_data.iloc[0]["СПП, ₽"] == 580.0
+
+
+def test_process_ozon_snapshot_with_categories_spp_joins(monkeypatch) -> None:
+    from datetime import date, datetime
+    d1 = date(2026, 7, 8)
+    snapshot_df = pd.DataFrame([
+        {
+            "snapshot_date": d1,
+            "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
+            "offer_id": "AvokaDo744-46",
+            "sku": 1469004334,
+            "name": "Product 1",
+            "buyer_regular_price_web": 2500.0,
+            "seller_price_api": 2711.0,
+            "status_web": "ok",
+            "final_url": "http://ozon/1",
+            "spp_rub": 211.0,
+            "spp_percent": 7.7,
+        }
+    ])
+
+    # Case 1: tracked product uses numeric Ozon SKU
+    monkeypatch.setattr(
+        "src.ozon.config.load_tracked_articles_with_categories",
+        lambda: [{"offer_id": "1469004334", "category": "женские трусы"}]
+    )
+    res_numeric = app_streamlit.process_ozon_snapshot_with_categories(snapshot_df)
+    assert not res_numeric.empty
+    assert res_numeric.iloc[0]["seller_price_api"] == 2711.0
+    assert res_numeric.iloc[0]["offer_id"] == "1469004334"
+    assert res_numeric.iloc[0]["sku"] == 1469004334
+
+    # Case 2: tracked product uses text seller offer_id
+    monkeypatch.setattr(
+        "src.ozon.config.load_tracked_articles_with_categories",
+        lambda: [{"offer_id": "AvokaDo744-46", "category": "женские трусы"}]
+    )
+    res_text = app_streamlit.process_ozon_snapshot_with_categories(snapshot_df)
+    assert not res_text.empty
+    assert res_text.iloc[0]["seller_price_api"] == 2711.0
+    assert res_text.iloc[0]["offer_id"] == "AvokaDo744-46"
+    assert res_text.iloc[0]["sku"] == 1469004334
+
