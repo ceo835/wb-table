@@ -6533,8 +6533,8 @@ def test_build_ozon_price_monitor_dataframe(monkeypatch) -> None:
     row = res.iloc[0]
     assert row["Артикул Ozon"] == "art-1"
     assert row["Категория"] == "трусы"
+    assert "Цена продавца" not in res.columns
     assert "SKU" not in res.columns
-    assert row["Цена продавца"] == 2000.0
     assert row["Цена Ozon"] == 1420.0
     assert row["Предыдущая цена"] == 1500.0
     assert row["Изменение, ₽"] == -80.0
@@ -6585,7 +6585,7 @@ def test_render_ozon_price_monitor_content_dry_run(monkeypatch) -> None:
     assert len(st_dataframe_calls) >= 1
     main_df = st_dataframe_calls[0].data
     assert "Цена Ozon" in main_df.columns
-    assert "Цена продавца" in main_df.columns
+    assert "Цена продавца" not in main_df.columns
     assert "Ссылка на карточку" in main_df.columns
     assert "SKU" not in main_df.columns
 
@@ -6633,7 +6633,44 @@ def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
     assert df_data.iloc[0]["СПП, ₽"] == 580.0
 
 
-def test_process_ozon_snapshot_with_categories_direct_from_snapshot(monkeypatch) -> None:
+def test_ozon_monitor_does_not_contain_spp(monkeypatch) -> None:
+    from datetime import date, datetime
+    d1 = date(2026, 7, 8)
+    snapshot_df = pd.DataFrame([
+        {
+            "snapshot_date": d1,
+            "snapshot_at": datetime(2026, 7, 8, 12, 0, 0),
+            "offer_id": "white42-44",
+            "sku": 1456494260,
+            "name": "Product Test",
+            "buyer_regular_price_web": 772.0,
+            "seller_price_api": 2400.0,
+            "status_web": "ok",
+            "final_url": "http://ozon/1",
+            "spp_rub": 1628.0,
+            "spp_percent": 67.8,
+        }
+    ])
+
+    monkeypatch.setattr(
+        "src.ozon.config.load_tracked_articles_with_categories",
+        lambda: [{"offer_id": "white42-44", "category": "трусы"}]
+    )
+
+    df_monitor = app_streamlit.build_ozon_price_monitor_dataframe(snapshot_df, snapshot_date=d1)
+    
+    assert not df_monitor.empty
+    # Цена Ozon должна быть в мониторинге (использует buyer_regular_price_web)
+    assert "Цена Ozon" in df_monitor.columns
+    assert df_monitor.iloc[0]["Цена Ozon"] == 772.0
+    
+    # Не должно быть СПП и Цены продавца
+    assert "Цена продавца" not in df_monitor.columns
+    assert "СПП, ₽" not in df_monitor.columns
+    assert "СПП, %" not in df_monitor.columns
+
+
+def test_ozon_spp_contains_both_prices(monkeypatch) -> None:
     from datetime import date, datetime
     d1 = date(2026, 7, 8)
     snapshot_df = pd.DataFrame([
@@ -6659,9 +6696,11 @@ def test_process_ozon_snapshot_with_categories_direct_from_snapshot(monkeypatch)
 
     res = app_streamlit.process_ozon_snapshot_with_categories(snapshot_df)
     assert not res.empty
+    
+    # И Цена продавца, и Видимая цена Ozon должны быть в строке
     assert res.iloc[0]["seller_price_api"] == 2400.0
     assert res.iloc[0]["buyer_regular_price_web"] == 772.0
     assert res.iloc[0]["spp_rub"] == 1628.0
     assert res.iloc[0]["spp_percent"] == 67.8
-    assert res.iloc[0]["category"] == "трусы"
+    assert res.iloc[0]["offer_id"] == "white42-44"
 
