@@ -6524,7 +6524,7 @@ def test_build_ozon_price_monitor_dataframe(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "src.ozon.config.load_tracked_articles_with_categories",
-        lambda: [{"offer_id": "art-1", "category": "трусы"}]
+        lambda: [{"offer_id": "1001", "category": "трусы"}]
     )
 
     res = app_streamlit.build_ozon_price_monitor_dataframe(snapshot_df, snapshot_date=d2)
@@ -6612,7 +6612,7 @@ def test_render_ozon_spp_content_dry_run(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "src.ozon.config.load_tracked_articles_with_categories",
-        lambda: [{"offer_id": "art-1", "category": "трусы"}]
+        lambda: [{"offer_id": "1001", "category": "трусы"}]
     )
     monkeypatch.setattr(app_streamlit, "load_ozon_price_snapshot_from_db", lambda *args, **kwargs: snapshot_df)
 
@@ -6654,7 +6654,7 @@ def test_ozon_monitor_does_not_contain_spp(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "src.ozon.config.load_tracked_articles_with_categories",
-        lambda: [{"offer_id": "white42-44", "category": "трусы"}]
+        lambda: [{"offer_id": "1456494260", "category": "трусы"}]
     )
 
     df_monitor = app_streamlit.build_ozon_price_monitor_dataframe(snapshot_df, snapshot_date=d1)
@@ -6691,7 +6691,7 @@ def test_ozon_spp_contains_both_prices(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "src.ozon.config.load_tracked_articles_with_categories",
-        lambda: [{"offer_id": "white42-44", "category": "трусы"}]
+        lambda: [{"offer_id": "1456494260", "category": "трусы"}]
     )
 
     res = app_streamlit.process_ozon_snapshot_with_categories(snapshot_df)
@@ -6703,4 +6703,5 @@ def test_ozon_spp_contains_both_prices(monkeypatch) -> None:
     assert res.iloc[0]["spp_rub"] == 1628.0
     assert res.iloc[0]["spp_percent"] == 67.8
     assert res.iloc[0]["offer_id"] == "white42-44"
+    assert res.iloc[0]["category"] == "трусы"
 

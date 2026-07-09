@@ -1993,6 +1993,10 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
     snapshots["snapshot_date"] = pd.to_datetime(snapshots["snapshot_date"], errors="coerce").dt.date
     snapshots["snapshot_at"] = pd.to_datetime(snapshots["snapshot_at"], errors="coerce")
 
+    # Exclude rows where offer_id is numeric (purely digits)
+    is_numeric = snapshots["offer_id"].astype(str).str.strip().str.isdigit()
+    snapshots = snapshots[~is_numeric].copy()
+
     # Keep only the latest snapshot run (max snapshot_at) for each date and offer_id
     latest_snapshots = (
         snapshots.sort_values(by=["snapshot_date", "offer_id", "snapshot_at"], ascending=[True, True, False])
@@ -2006,15 +2010,15 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
         # Drop duplicates by offer_id to prevent row duplication on merge
         tracked_df = tracked_df.drop_duplicates(subset=["offer_id"])
 
-        # Perform left join on offer_id as string
-        latest_snapshots["offer_id_str"] = latest_snapshots["offer_id"].astype(str).str.strip()
-        tracked_df["offer_id_str"] = tracked_df["offer_id"].astype(str).str.strip()
+        # Perform left join on Ozon SKU (snapshots.sku and tracked_df.offer_id)
+        latest_snapshots["sku_join"] = pd.to_numeric(latest_snapshots["sku"], errors="coerce").astype("Int64")
+        tracked_df["sku_join"] = pd.to_numeric(tracked_df["offer_id"], errors="coerce").astype("Int64")
 
-        cat_df = tracked_df[["offer_id_str", "category"]]
-        latest_snapshots = latest_snapshots.merge(cat_df, on="offer_id_str", how="left")
+        cat_df = tracked_df.dropna(subset=["sku_join"])[["sku_join", "category"]]
+        latest_snapshots = latest_snapshots.merge(cat_df, on="sku_join", how="left")
 
-        if "offer_id_str" in latest_snapshots.columns:
-            latest_snapshots = latest_snapshots.drop(columns=["offer_id_str"])
+        if "sku_join" in latest_snapshots.columns:
+            latest_snapshots = latest_snapshots.drop(columns=["sku_join"])
 
         if "category" in latest_snapshots.columns:
             latest_snapshots["category"] = latest_snapshots["category"].fillna("без категории")
