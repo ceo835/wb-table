@@ -1985,11 +1985,6 @@ def build_wb_site_price_monitor_dataframe(
 
 def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataFrame:
     from src.ozon.config import load_tracked_articles_with_categories
-    tracked_list = load_tracked_articles_with_categories()
-    if not tracked_list:
-        return pd.DataFrame()
-
-    tracked_df = pd.DataFrame(tracked_list)
 
     if snapshot_df.empty:
         return pd.DataFrame()
@@ -2002,76 +1997,33 @@ def process_ozon_snapshot_with_categories(snapshot_df: pd.DataFrame) -> pd.DataF
     latest_snapshots = (
         snapshots.sort_values(by=["snapshot_date", "offer_id", "snapshot_at"], ascending=[True, True, False])
         .drop_duplicates(subset=["snapshot_date", "offer_id"], keep="first")
-    )
+    ).reset_index(drop=True)
 
-    unique_dates = latest_snapshots["snapshot_date"].dropna().unique().tolist()
-    if not unique_dates:
-        return pd.DataFrame()
+    # Load categories from config
+    tracked_list = load_tracked_articles_with_categories()
+    if tracked_list:
+        tracked_df = pd.DataFrame(tracked_list)
+        # Drop duplicates by offer_id to prevent row duplication on merge
+        tracked_df = tracked_df.drop_duplicates(subset=["offer_id"])
 
-    # Expand tracked categories grid across unique dates
-    date_grid = pd.DataFrame([
-        {"snapshot_date": d, "offer_id": t["offer_id"], "category": t["category"]}
-        for d in unique_dates
-        for t in tracked_list
-    ])
+        # Perform left join on offer_id as string
+        latest_snapshots["offer_id_str"] = latest_snapshots["offer_id"].astype(str).str.strip()
+        tracked_df["offer_id_str"] = tracked_df["offer_id"].astype(str).str.strip()
 
-    is_numeric = date_grid["offer_id"].astype(str).str.strip().str.isdigit()
+        cat_df = tracked_df[["offer_id_str", "category"]]
+        latest_snapshots = latest_snapshots.merge(cat_df, on="offer_id_str", how="left")
 
-    date_grid_numeric = date_grid[is_numeric].copy()
-    date_grid_text = date_grid[~is_numeric].copy()
+        if "offer_id_str" in latest_snapshots.columns:
+            latest_snapshots = latest_snapshots.drop(columns=["offer_id_str"])
 
-    merged_dfs = []
-
-    if not date_grid_numeric.empty:
-        # 1. Merge by offer_id to get web-scraped (bot) data
-        merged_numeric_web = date_grid_numeric.merge(
-            latest_snapshots.drop(columns=["category"], errors="ignore"),
-            on=["snapshot_date", "offer_id"],
-            how="left"
-        )
-
-        # 2. Merge by sku to get API data
-        latest_snapshots_api = latest_snapshots.copy()
-        latest_snapshots_api["sku_join"] = pd.to_numeric(latest_snapshots_api["sku"], errors="coerce").astype("Int64")
-        latest_snapshots_api = latest_snapshots_api.dropna(subset=["sku_join"])
-
-        api_cols = ["snapshot_date", "sku_join", "sku", "seller_price_api", "status_api", "product_id", "name"]
-        latest_api_subset = latest_snapshots_api[[c for c in api_cols if c in latest_snapshots_api.columns]]
-
-        date_grid_numeric_api = date_grid_numeric.copy()
-        date_grid_numeric_api["sku_join"] = pd.to_numeric(date_grid_numeric_api["offer_id"], errors="coerce").astype("Int64")
-
-        merged_numeric_api = date_grid_numeric_api[["snapshot_date", "offer_id", "sku_join"]].merge(
-            latest_api_subset,
-            on=["snapshot_date", "sku_join"],
-            how="left"
-        )
-
-        # Combine bot prices (web) and API prices (seller_price_api)
-        merged_numeric_web = merged_numeric_web.set_index(["snapshot_date", "offer_id"])
-        merged_numeric_api = merged_numeric_api.set_index(["snapshot_date", "offer_id"])
-
-        merged_numeric = merged_numeric_web.combine_first(merged_numeric_api).reset_index()
-
-        if "sku_join" in merged_numeric.columns:
-            merged_numeric = merged_numeric.drop(columns=["sku_join"])
-
-        merged_dfs.append(merged_numeric)
-
-    if not date_grid_text.empty:
-        merged_text = date_grid_text.merge(
-            latest_snapshots.drop(columns=["category"], errors="ignore"),
-            on=["snapshot_date", "offer_id"],
-            how="left"
-        )
-        merged_dfs.append(merged_text)
-
-    if merged_dfs:
-        expanded = pd.concat(merged_dfs, ignore_index=True)
+        if "category" in latest_snapshots.columns:
+            latest_snapshots["category"] = latest_snapshots["category"].fillna("без категории")
+        else:
+            latest_snapshots["category"] = "без категории"
     else:
-        expanded = pd.DataFrame()
+        latest_snapshots["category"] = "без категории"
 
-    return expanded
+    return latest_snapshots
 
 
 def build_ozon_price_monitor_dataframe(
