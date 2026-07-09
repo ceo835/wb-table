@@ -60,6 +60,40 @@ def main() -> int:
     print(f"Successfully processed {len(items)} items. Saved/Upserted rows count: {saved_count}")
     if args.dry_run:
         print("[Dry Run Mode] Database write skipped.")
+
+    # Diagnostic Summary Calculation
+    from src.ozon.config import load_tracked_articles
+    tracked_articles = sorted(list(load_tracked_articles()))
+    tracked_count = len(tracked_articles)
+    
+    items_map = {r["offer_id"]: r for r in items}
+    api_found_offer_ids = [
+        oid for oid, r in items_map.items()
+        if r.get("product_id") is not None or r.get("sku") is not None
+    ]
+    api_found_count = len(api_found_offer_ids)
+    
+    web_checked_offer_ids = [
+        oid for oid, r in items_map.items()
+        if r.get("status_web") != "parse_error"
+    ]
+    web_checked_count = len(web_checked_offer_ids)
+    
+    db_saved_count = saved_count if not args.dry_run else 0
+    missing_from_api = [oid for oid in tracked_articles if oid not in api_found_offer_ids]
+    missing_from_web = [oid for oid in tracked_articles if oid not in web_checked_offer_ids]
+    saved_offer_ids = sorted(list(items_map.keys())) if db_saved_count > 0 else []
+
+    print("\nDiagnostic Summary:")
+    print("-" * 115)
+    print(f"tracked_count     : {tracked_count}")
+    print(f"api_found_count   : {api_found_count}")
+    print(f"web_checked_count : {web_checked_count}")
+    print(f"db_saved_count    : {db_saved_count}")
+    print(f"missing_from_api  : {missing_from_api}")
+    print(f"missing_from_web  : {missing_from_web}")
+    print(f"saved_offer_ids   : {saved_offer_ids}")
+    print("-" * 115)
     print()
 
     return 0

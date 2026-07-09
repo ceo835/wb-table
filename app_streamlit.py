@@ -2041,6 +2041,13 @@ def build_ozon_price_monitor_dataframe(
             ]
         )
 
+    # Leave only the latest snapshot_at for each offer_id on the selected date
+    snapshots_current["snapshot_at"] = pd.to_datetime(snapshots_current["snapshot_at"], errors="coerce")
+    snapshots_current = (
+        snapshots_current.sort_values(by=["offer_id", "snapshot_at"], ascending=[True, False])
+        .drop_duplicates(subset=["offer_id"], keep="first")
+    )
+
     snapshots_current = snapshots_current.merge(latest_success_by_offer, on="offer_id", how="left")
 
     curr_price = pd.to_numeric(snapshots_current["buyer_regular_price_web"], errors="coerce")
