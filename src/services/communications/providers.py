@@ -247,7 +247,7 @@ class WBChatProvider(BaseChatProvider):
                 rows_to_upsert,
                 conflict_columns=("marketplace", "chat_id")
             )
-            logger.info(f"Upserted {count} records into ChatRegistry")
+            logger.info(f"Prepared {len(rows_to_upsert)} records to upsert into ChatRegistry. upsert_rows returned status: {count}")
             return len(rows_to_upsert)
             
         return 0

@@ -108,7 +108,8 @@ def render_campaigns_subtab(session) -> None:
         })
 
     df = pd.DataFrame(camp_list)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    df.attrs.clear()
+    st.dataframe(df, width="stretch", hide_index=True)
 
     st.write("---")
     st.write("**Действия с кампаниями:**")
@@ -118,11 +119,11 @@ def render_campaigns_subtab(session) -> None:
     selected_camp_id = st.selectbox("Выберите кампанию для открытия или дублирования:", options=list(c_options.keys()), format_func=lambda x: c_options[x])
 
     col_btn = st.columns(3)
-    if col_btn[0].button("📂 Открыть кампанию", use_container_width=True):
+    if col_btn[0].button("📂 Открыть кампанию", width="stretch"):
         st.session_state.comm_active_campaign_id = selected_camp_id
         st.rerun()
         
-    if col_btn[1].button("👯 Продублировать", use_container_width=True):
+    if col_btn[1].button("👯 Продублировать", width="stretch"):
         dup = CampaignService.duplicate_campaign(session, selected_camp_id)
         if dup:
             session.commit()
@@ -233,7 +234,7 @@ def render_campaign_form(session, campaign_id: Optional[int]) -> None:
     # Кнопки сохранения и сбора
     col_save = st.columns(4)
     
-    if col_save[0].button("💾 Сохранить черновик", type="secondary", use_container_width=True):
+    if col_save[0].button("💾 Сохранить черновик", type="secondary", width="stretch"):
         if not input_name:
             st.error("Пожалуйста, заполните название кампании.")
         else:
@@ -263,7 +264,7 @@ def render_campaign_form(session, campaign_id: Optional[int]) -> None:
             st.session_state.comm_creating_new = False
             st.rerun()
 
-    if col_save[1].button("🔍 Собрать аудиторию", type="primary", use_container_width=True):
+    if col_save[1].button("🔍 Собрать аудиторию", type="primary", width="stretch"):
         if not input_name:
             st.error("Пожалуйста, введите название кампании.")
         else:
@@ -301,7 +302,7 @@ def render_campaign_form(session, campaign_id: Optional[int]) -> None:
                 except Exception as ex:
                     st.error(f"Ошибка при сборе аудитории: {ex}")
 
-    if col_save[3].button("↩️ Назад к списку", use_container_width=True):
+    if col_save[3].button("↩️ Назад к списку", width="stretch"):
         st.session_state.comm_active_campaign_id = None
         st.session_state.comm_creating_new = False
         st.session_state.comm_show_confirm = False
@@ -354,11 +355,12 @@ def render_audience_and_send_block(session, campaign: Campaign) -> None:
         })
 
     df_rec = pd.DataFrame(rec_data)
+    df_rec.attrs.clear()
     
     # st.data_editor позволяет изменять чекбокс
     edited_df = st.data_editor(
         df_rec,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         disabled=["recipient_row_id", "Статус", "Chat ID", "Артикул товара", "Причина включения/исключения"],
         column_config={
@@ -401,7 +403,7 @@ def render_audience_and_send_block(session, campaign: Campaign) -> None:
         return
 
     # Запускаем отправку
-    if st.button("🚀 Отправить выбранным", type="primary", use_container_width=True):
+    if st.button("🚀 Отправить выбранным", type="primary", width="stretch"):
         st.session_state.comm_show_confirm = True
 
     if st.session_state.comm_show_confirm:
@@ -412,7 +414,7 @@ def render_audience_and_send_block(session, campaign: Campaign) -> None:
         st.write(f"- **Режим:** {'СИМУЛЯЦИЯ' if (dry_run or not (settings.wb_comm_real_send_enabled and settings.wb_token)) else 'РЕАЛЬНАЯ ОТПРАВКА'}")
         
         col_conf = st.columns(2)
-        if col_conf[0].button("Да, запустить рассылку!", type="primary", use_container_width=True):
+        if col_conf[0].button("Да, запустить рассылку!", type="primary", width="stretch"):
             st.session_state.comm_show_confirm = False
             
             with st.spinner("Выполняется рассылка..."):
@@ -438,7 +440,7 @@ def render_audience_and_send_block(session, campaign: Campaign) -> None:
                 
                 st.rerun()
 
-        if col_conf[1].button("Отмена", use_container_width=True):
+        if col_conf[1].button("Отмена", width="stretch"):
             st.session_state.comm_show_confirm = False
             st.rerun()
 
@@ -505,7 +507,9 @@ def render_chats_registry_subtab(session) -> None:
             "Последнее событие": c.last_activity_at.strftime("%Y-%m-%d %H:%M") if c.last_activity_at else "—",
         })
 
-    st.dataframe(pd.DataFrame(chat_rows), use_container_width=True, hide_index=True)
+    df_chats = pd.DataFrame(chat_rows)
+    df_chats.attrs.clear()
+    st.dataframe(df_chats, width="stretch", hide_index=True)
 
 
 def render_history_subtab(session) -> None:
@@ -530,4 +534,6 @@ def render_history_subtab(session) -> None:
             "Ошибка API": l.error_message or "—",
         })
 
-    st.dataframe(pd.DataFrame(log_rows), use_container_width=True, hide_index=True)
+    df_logs = pd.DataFrame(log_rows)
+    df_logs.attrs.clear()
+    st.dataframe(df_logs, width="stretch", hide_index=True)
