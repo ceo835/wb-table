@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 from src.config.settings import settings
+from sqlalchemy import select
 from src.db.session import session_scope
 from src.db.communications_models import Campaign, ChatRegistry, CampaignRecipient, SendLog
 from src.services.communications.campaign_service import CampaignService
