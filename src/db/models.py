@@ -1179,3 +1179,7 @@ class FactOzonPriceSnapshot(Base, TimestampMixin):
     status_web: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+
+
+# Регистрация моделей модуля коммуникаций
+from src.db.communications_models import Campaign, ChatRegistry, CampaignRecipient, SendLog  # noqa: F401

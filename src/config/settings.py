@@ -48,6 +48,7 @@ ENV = get_env_variable("ENV", required=False, default="dev")
 DATABASE_URL = get_env_variable("DATABASE_URL", required=False)
 ALLOW_PROD_DB = get_env_variable("ALLOW_PROD_DB", required=False, default="false")
 PROFIT_PER_ORDER_RUB = int(get_env_variable("PROFIT_PER_ORDER_RUB", required=False, default="100"))
+WB_COMM_REAL_SEND_ENABLED = get_env_variable("WB_COMM_REAL_SEND_ENABLED", required=False, default="false")
 
 # Google Sheets (поддержка разных имен переменных)
 # Приоритет: GOOGLE_APPLICATION_CREDENTIALS, затем GOOGLE_CREDENTIALS_FILE
@@ -103,6 +104,7 @@ class Settings:
         self.vvbromo_google_sheet_name = VVBROMO_GOOGLE_SHEET_NAME
         self.vvbromo_google_sheet_range = VVBROMO_GOOGLE_SHEET_RANGE
         self.vvbromo_google_sheet_enabled = VVBROMO_GOOGLE_SHEET_ENABLED.lower() in {"1", "true", "yes", "on"}
+        self.wb_comm_real_send_enabled = WB_COMM_REAL_SEND_ENABLED.lower() in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

@@ -73,6 +73,7 @@ from src.tracked_products import (
     apply_tracked_products as shared_apply_tracked_products,
     load_tracked_products,
 )
+from src.services.communications.ui import render_communications_tab
 
 logger = logging.getLogger(__name__)
 
@@ -10620,9 +10621,18 @@ def main() -> None:
     detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
     default_detail_date = detail_dates[0]
 
-    tab_overview, tab_entry_point, tab_ad_campaign, tab_product, tab_charts, tab_price_monitor, tab_stock_warehouse, tab_upload = st.tabs(
-        build_main_tab_labels()
-    )
+    tab_labels = build_main_tab_labels() + ["Коммуникации"]
+    tabs = st.tabs(tab_labels)
+    tab_overview = tabs[0]
+    tab_entry_point = tabs[1]
+    tab_ad_campaign = tabs[2]
+    tab_product = tabs[3]
+    tab_charts = tabs[4]
+    tab_price_monitor = tabs[5]
+    tab_stock_warehouse = tabs[6]
+    tab_upload = tabs[7]
+    tab_communications = tabs[8]
+
     with tab_overview:
         render_overview_tab(filtered, filter_debug_trace, display_coverage)
     with tab_entry_point:
@@ -10646,6 +10656,8 @@ def main() -> None:
         render_stock_warehouse_tab(data_source)
     with tab_upload:
         render_upload_tab()
+    with tab_communications:
+        render_communications_tab()
 
 
 @st.cache_resource(show_spinner=False)
