@@ -114,6 +114,7 @@ def render_campaigns_subtab(session) -> None:
     if col_btn[1].button("👯 Продублировать", use_container_width=True):
         dup = CampaignService.duplicate_campaign(session, selected_camp_id)
         if dup:
+            session.commit()
             st.success(f"Кампания успешно продублирована как ID {dup.id}!")
             st.rerun()
 
@@ -245,6 +246,7 @@ def render_campaign_form(session, campaign_id: Optional[int]) -> None:
                     filters=current_filters,
                     comment=input_comment
                 )
+            session.commit()
             st.success("Кампания сохранена как черновик!")
             st.session_state.comm_active_campaign_id = campaign.id
             st.session_state.comm_creating_new = False
@@ -280,6 +282,7 @@ def render_campaign_form(session, campaign_id: Optional[int]) -> None:
             with st.spinner("Синхронизация чатов с Wildberries и фильтрация..."):
                 try:
                     stats = AudienceService.collect_and_filter_audience(session, campaign.id, max_event_pages=10)
+                    session.commit()
                     st.success("Аудитория собрана успешно!")
                     st.session_state.comm_active_campaign_id = campaign.id
                     st.session_state.comm_creating_new = False
@@ -361,7 +364,7 @@ def render_audience_and_send_block(session, campaign: Campaign) -> None:
             db_rec = session.get(CampaignRecipient, r_id)
             if db_rec:
                 db_rec.selected = is_sel
-        session.flush()
+        session.commit()
         st.success("Выбор получателей обновлен!")
         st.rerun()
 
@@ -416,6 +419,7 @@ def render_audience_and_send_block(session, campaign: Campaign) -> None:
                 sent = res["sent_count"]
                 errors = res["error_count"]
                 
+                session.commit()
                 if errors == 0:
                     st.success(f"Отправка завершена! Успешно обработано {processed} чатов.")
                 else:
@@ -435,11 +439,40 @@ def render_chats_registry_subtab(session) -> None:
     if st.button("🔄 Синхронизировать реестр из API", type="primary"):
         with st.spinner("Загрузка данных из Wildberries..."):
             try:
+                from sqlalchemy import func
+                from src.utils.logger import get_logger
+                ui_logger = get_logger("communications_ui")
+                
                 provider = WBChatProvider()
-                count = provider.build_chat_registry(session, max_event_pages=10)
-                st.success(f"Синхронизация завершена. Обновлено/сохранено чатов: {count}.")
+                prepared_count = provider.build_chat_registry(session, max_event_pages=10)
+                
+                # Явно коммитим сессию
+                session.commit()
+                committed = True
+                
+                # Получаем диагностические данные
+                total_count = session.scalar(select(func.count()).select_from(ChatRegistry))
+                wb_count = session.scalar(select(func.count()).select_from(ChatRegistry).where(ChatRegistry.marketplace == "wb"))
+                marketplaces = list(session.scalars(select(ChatRegistry.marketplace).distinct()).all())
+                
+                min_act = session.scalar(select(func.min(ChatRegistry.last_activity_at)))
+                max_act = session.scalar(select(func.max(ChatRegistry.last_activity_at)))
+                
+                ui_logger.info(
+                    f"Sync diagnostics:\n"
+                    f"- prepared records count: {prepared_count}\n"
+                    f"- committed: {committed}\n"
+                    f"- ChatRegistry total count after commit: {total_count}\n"
+                    f"- ChatRegistry count for marketplace='wb': {wb_count}\n"
+                    f"- distinct marketplace values: {marketplaces}\n"
+                    f"- min/max last_activity_at: {min_act} / {max_act}"
+                )
+                
+                st.success(f"Синхронизация завершена. Добавлено/обновлено: {prepared_count} записей. Всего в реестре чатов WB: {wb_count} (всего в БД: {total_count}).")
                 st.rerun()
             except Exception as e:
+                import logging
+                logging.getLogger("communications_ui").error(f"Error during registry sync: {e}", exc_info=True)
                 st.error(f"Ошибка при синхронизации чатов: {e}")
 
     stmt = select(ChatRegistry).order_by(ChatRegistry.last_activity_at.desc())
