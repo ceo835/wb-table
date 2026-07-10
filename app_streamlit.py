@@ -10621,7 +10621,8 @@ def main() -> None:
     detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
     default_detail_date = detail_dates[0]
 
-    tab_labels = build_main_tab_labels() + ["Коммуникации"]
+    main_labels = build_main_tab_labels()
+    tab_labels = main_labels[:-1] + ["Коммуникации", main_labels[-1]]
     tabs = st.tabs(tab_labels)
     tab_overview = tabs[0]
     tab_entry_point = tabs[1]
@@ -10630,8 +10631,8 @@ def main() -> None:
     tab_charts = tabs[4]
     tab_price_monitor = tabs[5]
     tab_stock_warehouse = tabs[6]
-    tab_upload = tabs[7]
-    tab_communications = tabs[8]
+    tab_communications = tabs[7]
+    tab_upload = tabs[8]
 
     with tab_overview:
         render_overview_tab(filtered, filter_debug_trace, display_coverage)

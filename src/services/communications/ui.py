@@ -24,24 +24,35 @@ def render_communications_tab() -> None:
     else:
         st.warning("🟡 **Режим симуляции по умолчанию** (`WB_COMM_REAL_SEND_ENABLED=false`). Все рассылки будут выполняться в режиме симуляции (Dry-run).")
 
-    # Подменю навигации внутри вкладки "Коммуникации"
-    sub_tab = st.radio(
-        "Раздел:",
-        options=["Кампании", "Реестр WB-чатов", "История отправок", "Ozon-чаты (в разработке)"],
-        horizontal=True,
-    )
+    # Разделение по маркетплейсам
+    tab_wb, tab_ozon = st.tabs(["Wildberries", "Ozon"])
     
-    st.divider()
+    with tab_wb:
+        # Подменю навигации внутри Wildberries
+        wb_sub_tab = st.radio(
+            "Раздел WB:",
+            options=["Кампании WB", "Реестр WB-чатов", "История отправок WB"],
+            horizontal=True,
+            key="comm_wb_sub_tab"
+        )
+        st.write("---")
+        with session_scope() as session:
+            if wb_sub_tab == "Кампании WB":
+                render_campaigns_subtab(session)
+            elif wb_sub_tab == "Реестр WB-чатов":
+                render_chats_registry_subtab(session)
+            elif wb_sub_tab == "История отправок WB":
+                render_history_subtab(session)
 
-    with session_scope() as session:
-        if sub_tab == "Кампании":
-            render_campaigns_subtab(session)
-        elif sub_tab == "Реестр WB-чатов":
-            render_chats_registry_subtab(session)
-        elif sub_tab == "История отправок":
-            render_history_subtab(session)
-        elif "Ozon" in sub_tab:
-            st.info("ℹ️ **Ozon-чаты** — Раздел будет добавлен позже после проведения полного технического аудита Ozon Chat API.")
+    with tab_ozon:
+        st.info("ℹ️ **Ozon-коммуникации будут добавлены позже после аудита API**")
+        st.radio(
+            "Раздел Ozon (в разработке):",
+            options=["Кампании Ozon", "Реестр Ozon-чатов", "История отправок Ozon"],
+            horizontal=True,
+            disabled=True,
+            key="comm_ozon_sub_tab"
+        )
 
 
 def render_campaigns_subtab(session) -> None:
@@ -62,7 +73,7 @@ def render_campaigns_subtab(session) -> None:
         return
 
     # Главный экран: список кампаний
-    st.subheader("Список кампаний рассылок")
+    st.subheader("Список кампаний WB")
     
     col_actions = st.columns([1, 4])
     if col_actions[0].button("➕ Создать кампанию", type="primary"):
@@ -498,8 +509,8 @@ def render_chats_registry_subtab(session) -> None:
 
 
 def render_history_subtab(session) -> None:
-    st.subheader("Логи отправок")
-    st.write("История отправленных сообщений по всем кампаниям.")
+    st.subheader("История отправок WB")
+    st.write("История отправленных сообщений по кампаниям WB.")
 
     stmt = select(SendLog).order_by(SendLog.sent_at.desc())
     logs = list(session.scalars(stmt).all())
