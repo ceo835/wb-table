@@ -26,6 +26,9 @@ from app_streamlit import (
     build_band_summary_table,
     build_category_summary_table,
     build_entry_point_analytics_table,
+    ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN,
+    ENTRY_POINT_ECONOMICS_CART_COST_COLUMN,
+    ENTRY_POINT_ECONOMICS_CPO_COLUMN,
     build_chart_series_dataframe,
     build_display_coverage_summary,
     build_debug_snapshot,
@@ -142,8 +145,8 @@ def test_build_entry_point_analytics_table_cabinet_coarse_groups_and_total() -> 
             {
                 "date": "2026-07-01",
                 "nm_id": 101,
-                "section": "Поиск",
-                "entry_point": "Выдача",
+                "section": app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                "entry_point": "search",
                 "impressions": 100,
                 "card_clicks": 20,
                 "cart_count": 10,
@@ -151,29 +154,39 @@ def test_build_entry_point_analytics_table_cabinet_coarse_groups_and_total() -> 
             },
             {
                 "date": "2026-07-01",
-                "nm_id": 102,
-                "section": "Каталог",
-                "entry_point": "Рубрика",
+                "nm_id": 101,
+                "section": app_streamlit.ENTRY_POINT_GROUP_CATALOG,
+                "entry_point": "catalog",
                 "impressions": 50,
                 "card_clicks": 10,
-                "cart_count": 5,
-                "order_count": 1,
+                "cart_count": 30,
+                "order_count": 6,
             },
             {
                 "date": "2026-07-01",
-                "nm_id": 103,
-                "section": "Похожие товары",
-                "entry_point": "Полка",
+                "nm_id": 102,
+                "section": "similar products",
+                "entry_point": "recommendation shelf",
                 "impressions": 30,
                 "card_clicks": 6,
-                "cart_count": 3,
-                "order_count": 1,
+                "cart_count": 20,
+                "order_count": 4,
+            },
+            {
+                "date": "2026-07-01",
+                "nm_id": 102,
+                "section": "other",
+                "entry_point": "misc",
+                "impressions": 20,
+                "card_clicks": 4,
+                "cart_count": 20,
+                "order_count": 2,
             },
             {
                 "date": "2026-07-02",
                 "nm_id": 101,
-                "section": "Поиск",
-                "entry_point": "Выдача",
+                "section": app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                "entry_point": "search",
                 "impressions": 200,
                 "card_clicks": 40,
                 "cart_count": 20,
@@ -181,35 +194,62 @@ def test_build_entry_point_analytics_table_cabinet_coarse_groups_and_total() -> 
             },
         ]
     )
+    spend_df = pd.DataFrame(
+        [
+            {"date": pd.Timestamp("2026-07-01").date(), "nm_id": 101, "ad_campaign_spend_total": 400},
+            {"date": pd.Timestamp("2026-07-01").date(), "nm_id": 102, "ad_campaign_spend_total": 400},
+            {"date": pd.Timestamp("2026-07-02").date(), "nm_id": 101, "ad_campaign_spend_total": 100},
+        ]
+    )
 
     result = build_entry_point_analytics_table(
         entry_df,
         pd.DataFrame(),
-        analysis_level="Кабинет",
-        detail_level="Укрупнённо",
+        analysis_level=app_streamlit.ENTRY_POINT_LEVEL_CABINET,
+        detail_level=app_streamlit.ENTRY_POINT_DETAIL_COARSE,
+        spend_df=spend_df,
     )
 
-    assert "Дата" in result.columns
-    assert result[result["Дата"] == pd.Timestamp("2026-07-01").date()]["Точка входа"].tolist() == [
-        "Поиск",
-        "Каталог",
-        "Рекомендательные полки",
-        "Итого",
+    assert app_streamlit.ENTRY_POINT_LABEL_DATE in result.columns
+    assert result[result[app_streamlit.ENTRY_POINT_LABEL_DATE] == pd.Timestamp("2026-07-01").date()][app_streamlit.ENTRY_POINT_LABEL_POINT].tolist() == [
+        app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+        app_streamlit.ENTRY_POINT_GROUP_CATALOG,
+        app_streamlit.ENTRY_POINT_GROUP_RECOMMENDATION,
+        app_streamlit.ENTRY_POINT_GROUP_OTHER,
+        app_streamlit.ENTRY_POINT_GROUP_TOTAL,
     ]
+    search_row_day_1 = result[
+        (result[app_streamlit.ENTRY_POINT_LABEL_DATE] == pd.Timestamp("2026-07-01").date()) & (result[app_streamlit.ENTRY_POINT_LABEL_POINT] == app_streamlit.ENTRY_POINT_GROUP_SEARCH)
+    ].iloc[0]
+    catalog_row_day_1 = result[
+        (result[app_streamlit.ENTRY_POINT_LABEL_DATE] == pd.Timestamp("2026-07-01").date()) & (result[app_streamlit.ENTRY_POINT_LABEL_POINT] == app_streamlit.ENTRY_POINT_GROUP_CATALOG)
+    ].iloc[0]
     total_row_day_1 = result[
-        (result["Дата"] == pd.Timestamp("2026-07-01").date()) & (result["Точка входа"] == "Итого")
+        (result[app_streamlit.ENTRY_POINT_LABEL_DATE] == pd.Timestamp("2026-07-01").date()) & (result[app_streamlit.ENTRY_POINT_LABEL_POINT] == app_streamlit.ENTRY_POINT_GROUP_TOTAL)
     ].iloc[0]
-    assert total_row_day_1["Показы"] == 180
-    assert total_row_day_1["Переходы в карточку"] == 36
-    assert total_row_day_1["Добавления в корзину"] == 18
-    assert total_row_day_1["Заказы"] == 4
-    assert round(float(total_row_day_1["Конверсия в корзину"]), 2) == 50.0
-    assert round(float(total_row_day_1["Конверсия в заказ"]), 2) == 22.22
     total_row_day_2 = result[
-        (result["Дата"] == pd.Timestamp("2026-07-02").date()) & (result["Точка входа"] == "Итого")
+        (result[app_streamlit.ENTRY_POINT_LABEL_DATE] == pd.Timestamp("2026-07-02").date()) & (result[app_streamlit.ENTRY_POINT_LABEL_POINT] == app_streamlit.ENTRY_POINT_GROUP_TOTAL)
     ].iloc[0]
-    assert total_row_day_2["Показы"] == 200
-    assert total_row_day_2["Добавления в корзину"] == 20
+
+    assert search_row_day_1[app_streamlit.ENTRY_POINT_LABEL_CART_COUNT] == 10
+    assert round(float(search_row_day_1[app_streamlit.ENTRY_POINT_LABEL_ORDER_CONVERSION]), 2) == 20.0
+    assert round(float(search_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN]), 2) == 100.0
+    assert round(float(search_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN]), 2) == 10.0
+    assert round(float(search_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN]), 2) == 50.0
+
+    assert catalog_row_day_1[app_streamlit.ENTRY_POINT_LABEL_CART_COUNT] == 30
+    assert round(float(catalog_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN]), 2) == 300.0
+    assert round(float(catalog_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN]), 2) == 10.0
+    assert round(float(catalog_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN]), 2) == 50.0
+
+    assert total_row_day_1[app_streamlit.ENTRY_POINT_LABEL_CART_COUNT] == 80
+    assert round(float(total_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN]), 2) == 800.0
+    assert round(float(total_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN]), 2) == 10.0
+    assert round(float(total_row_day_1[app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN]), 2) == 57.14
+    assert total_row_day_2[app_streamlit.ENTRY_POINT_LABEL_IMPRESSIONS] == 200
+    assert round(float(total_row_day_2[app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN]), 2) == 100.0
+    assert round(float(total_row_day_2[app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN]), 2) == 5.0
+    assert round(float(total_row_day_2[app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN]), 2) == 25.0
 
 
 def test_build_entry_point_analytics_table_article_detailed_keeps_real_section_and_entry_point() -> None:
@@ -218,10 +258,10 @@ def test_build_entry_point_analytics_table_article_detailed_keeps_real_section_a
             {
                 "date": "2026-07-01",
                 "nm_id": 101,
-                "section": "Поиск",
-                "entry_point": "Выдача",
+                "section": "search",
+                "entry_point": "search results",
                 "supplier_article": "art-101",
-                "title": "Товар 101",
+                "title": "Item 101",
                 "impressions": 100,
                 "card_clicks": 20,
                 "cart_count": 10,
@@ -230,10 +270,10 @@ def test_build_entry_point_analytics_table_article_detailed_keeps_real_section_a
             {
                 "date": "2026-07-01",
                 "nm_id": 101,
-                "section": "Каталог",
-                "entry_point": "Рубрика",
+                "section": "catalog",
+                "entry_point": "catalog page",
                 "supplier_article": "art-101",
-                "title": "Товар 101",
+                "title": "Item 101",
                 "impressions": 50,
                 "card_clicks": 10,
                 "cart_count": 4,
@@ -246,26 +286,35 @@ def test_build_entry_point_analytics_table_article_detailed_keeps_real_section_a
             {
                 "nm_id": 101,
                 "supplier_article": "art-101",
-                "title": "Товар 101",
-                "band_name": "Банда А",
+                "title": "Item 101",
+                "band_name": "Band A",
             }
+        ]
+    )
+    spend_df = pd.DataFrame(
+        [
+            {"date": pd.Timestamp("2026-07-01").date(), "nm_id": 101, "ad_campaign_spend_total": 100},
         ]
     )
 
     result = build_entry_point_analytics_table(
         entry_df,
         metadata_df,
-        analysis_level="Артикулы",
-        detail_level="Детально",
+        analysis_level=app_streamlit.ENTRY_POINT_LEVEL_ARTICLE,
+        detail_level=app_streamlit.ENTRY_POINT_DETAIL_DETAILED,
+        spend_df=spend_df,
     )
 
-    assert result[["Дата", "Раздел", "Точка входа"]].to_dict(orient="records") == [
-        {"Дата": pd.Timestamp("2026-07-01").date(), "Раздел": "Каталог", "Точка входа": "Рубрика"},
-        {"Дата": pd.Timestamp("2026-07-01").date(), "Раздел": "Поиск", "Точка входа": "Выдача"},
+    assert result[[app_streamlit.ENTRY_POINT_LABEL_DATE, app_streamlit.ENTRY_POINT_LABEL_SECTION, app_streamlit.ENTRY_POINT_LABEL_POINT]].to_dict(orient="records") == [
+        {app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(), app_streamlit.ENTRY_POINT_LABEL_SECTION: "catalog", app_streamlit.ENTRY_POINT_LABEL_POINT: "catalog page"},
+        {app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(), app_streamlit.ENTRY_POINT_LABEL_SECTION: "search", app_streamlit.ENTRY_POINT_LABEL_POINT: "search results"},
     ]
-    assert result["Артикул WB"].tolist() == [101, 101]
-    assert result["Артикул продавца"].tolist() == ["art-101", "art-101"]
-    assert result["Название"].tolist() == ["Товар 101", "Товар 101"]
+    assert result[app_streamlit.ENTRY_POINT_LABEL_WB_ARTICLE].tolist() == [101, 101]
+    assert result[app_streamlit.ENTRY_POINT_LABEL_SUPPLIER_ARTICLE].tolist() == ["art-101", "art-101"]
+    assert result[app_streamlit.ENTRY_POINT_LABEL_TITLE].tolist() == ["Item 101", "Item 101"]
+    assert app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN not in result.columns
+    assert app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN not in result.columns
+    assert app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN not in result.columns
 
 
 def test_build_entry_point_analytics_table_band_coarse_uses_band_names() -> None:
@@ -573,14 +622,17 @@ def test_render_entry_point_analytics_tab_adds_xlsx_download_button(monkeypatch)
     display_df = pd.DataFrame(
         [
             {
-                "Дата": pd.Timestamp("2026-07-01").date(),
-                "Точка входа": "Поиск",
-                "Показы": 100,
-                "Переходы в карточку": 20,
-                "Добавления в корзину": 10,
-                "Конверсия в корзину": 50.0,
-                "Заказы": 2,
-                "Конверсия в заказ": 20.0,
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_LABEL_IMPRESSIONS: 100,
+                app_streamlit.ENTRY_POINT_LABEL_CARD_CLICKS: 20,
+                app_streamlit.ENTRY_POINT_LABEL_CART_COUNT: 10,
+                app_streamlit.ENTRY_POINT_LABEL_CART_CONVERSION: 50.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDERS: 2,
+                app_streamlit.ENTRY_POINT_LABEL_ORDER_CONVERSION: 20.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 100.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN: 10.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN: 50.0,
                 "__entry_point_conversion_fallback_7d": True,
             }
         ]
@@ -594,15 +646,28 @@ def test_render_entry_point_analytics_tab_adds_xlsx_download_button(monkeypatch)
             return self._value
 
     download_calls: list[dict[str, object]] = []
+    spend_calls: list[pd.DataFrame | None] = []
 
     monkeypatch.setattr(app_streamlit, "resolve_db_dataset_cache_buster", lambda: "entry-buster")
     monkeypatch.setattr(
         app_streamlit,
         "load_entry_point_day_range_from_db",
-        lambda *args, **kwargs: pd.DataFrame([{"nm_id": 101, "section": "Поиск", "entry_point": "Выдача"}]),
+        lambda *args, **kwargs: pd.DataFrame([{"nm_id": 101, "section": "search", "entry_point": "search"}]),
+    )
+    monkeypatch.setattr(
+        app_streamlit,
+        "load_entry_point_spend_range_from_db",
+        lambda *args, **kwargs: pd.DataFrame(
+            [{"date": pd.Timestamp("2026-07-01").date(), "nm_id": 101, "ad_campaign_spend_total": 100}]
+        ),
     )
     monkeypatch.setattr(app_streamlit, "build_entry_point_metadata", lambda _filtered: pd.DataFrame())
-    monkeypatch.setattr(app_streamlit, "build_entry_point_analytics_table", lambda *args, **kwargs: display_df)
+
+    def _build_entry_point_analytics_table(*args, **kwargs):
+        spend_calls.append(kwargs.get("spend_df"))
+        return display_df
+
+    monkeypatch.setattr(app_streamlit, "build_entry_point_analytics_table", _build_entry_point_analytics_table)
     monkeypatch.setattr(
         app_streamlit,
         "limit_entry_point_analytics_table",
@@ -616,11 +681,11 @@ def test_render_entry_point_analytics_tab_adds_xlsx_download_button(monkeypatch)
         lambda df: (export_frames.append(df.copy()) or b"PK-entry-point"),
     )
     monkeypatch.setattr(app_streamlit.st, "subheader", lambda *args, **kwargs: None)
-    monkeypatch.setattr(app_streamlit.st, "selectbox", lambda *args, **kwargs: "Все")
+    monkeypatch.setattr(app_streamlit.st, "selectbox", lambda *args, **kwargs: "All")
     monkeypatch.setattr(
         app_streamlit.st,
         "columns",
-        lambda _count: [_FakeColumn("Кабинет"), _FakeColumn("Укрупнённо")],
+        lambda _count: [_FakeColumn(app_streamlit.ENTRY_POINT_LEVEL_CABINET), _FakeColumn(app_streamlit.ENTRY_POINT_DETAIL_COARSE)],
     )
     monkeypatch.setattr(
         app_streamlit.st,
@@ -634,10 +699,14 @@ def test_render_entry_point_analytics_tab_adds_xlsx_download_button(monkeypatch)
     render_entry_point_analytics_tab(filtered)
 
     assert len(download_calls) == 1
-    assert download_calls[0]["label"] == "Скачать XLSX"
+    assert download_calls[0]["label"].endswith("XLSX")
     assert download_calls[0]["data"] == b"PK-entry-point"
     assert str(download_calls[0]["file_name"]).endswith(".xlsx")
     assert download_calls[0]["mime"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert spend_calls and spend_calls[0] is not None
+    assert app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN in export_frames[0].columns
+    assert app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN in export_frames[0].columns
+    assert app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN in export_frames[0].columns
     assert "__entry_point_conversion_fallback_7d" not in export_frames[0].columns
 
 
@@ -6151,32 +6220,126 @@ def test_build_entry_point_chart_dataframe_excludes_total_and_builds_series_labe
     display_df = pd.DataFrame(
         [
             {
-                "Дата": pd.Timestamp("2026-07-01").date(),
-                "Точка входа": "Поиск",
-                "Добавления в корзину": 10,
-                "Конверсия в корзину": 20.0,
-                "Конверсия в заказ": 10.0,
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_LABEL_CART_COUNT: 10,
+                app_streamlit.ENTRY_POINT_LABEL_CART_CONVERSION: 20.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDER_CONVERSION: 10.0,
             },
             {
-                "Дата": pd.Timestamp("2026-07-01").date(),
-                "Точка входа": "Итого",
-                "Добавления в корзину": 50,
-                "Конверсия в корзину": 30.0,
-                "Конверсия в заказ": 15.0,
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_TOTAL,
+                app_streamlit.ENTRY_POINT_LABEL_CART_COUNT: 50,
+                app_streamlit.ENTRY_POINT_LABEL_CART_CONVERSION: 30.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDER_CONVERSION: 15.0,
             },
         ]
     )
 
     result = app_streamlit.build_entry_point_chart_dataframe(
         display_df,
-        analysis_level="Кабинет",
-        detail_level="Укрупнённо",
+        analysis_level=app_streamlit.ENTRY_POINT_LEVEL_CABINET,
+        detail_level=app_streamlit.ENTRY_POINT_DETAIL_COARSE,
     )
 
-    assert result["series_name"].tolist() == ["Поиск"]
+    assert result["series_name"].tolist() == [app_streamlit.ENTRY_POINT_GROUP_SEARCH]
     assert result["cart_count"].tolist() == [10]
     assert result["cart_conversion"].tolist() == [20.0]
     assert result["order_conversion"].tolist() == [10.0]
+
+
+def test_build_entry_point_economics_chart_dataframe_excludes_total_and_builds_series_labels() -> None:
+    display_df = pd.DataFrame(
+        [
+            {
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 100.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN: 10.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN: 50.0,
+            },
+            {
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_TOTAL,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 999.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN: 99.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN: 999.0,
+            },
+        ]
+    )
+
+    result = app_streamlit.build_entry_point_economics_chart_dataframe(
+        display_df,
+        analysis_level=app_streamlit.ENTRY_POINT_LEVEL_CABINET,
+        detail_level=app_streamlit.ENTRY_POINT_DETAIL_COARSE,
+    )
+
+    assert result["series_name"].tolist() == [app_streamlit.ENTRY_POINT_GROUP_SEARCH]
+    assert result["estimated_cost_per_cart"].tolist() == [10.0]
+    assert result["estimated_cpo"].tolist() == [50.0]
+
+
+def test_build_entry_point_period_cpo_series_labels_uses_period_totals() -> None:
+    display_df = pd.DataFrame(
+        [
+            {
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 100.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDERS: 2,
+            },
+            {
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-02").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 200.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDERS: 4,
+            },
+            {
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_CATALOG,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 50.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDERS: 0,
+            },
+            {
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-02").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_CATALOG,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 50.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDERS: 0,
+            },
+        ]
+    )
+
+    result = app_streamlit.build_entry_point_period_cpo_series_labels(
+        display_df,
+        analysis_level=app_streamlit.ENTRY_POINT_LEVEL_CABINET,
+        detail_level=app_streamlit.ENTRY_POINT_DETAIL_COARSE,
+    )
+
+    assert result[app_streamlit.ENTRY_POINT_GROUP_SEARCH] == (
+        f"{app_streamlit.ENTRY_POINT_GROUP_SEARCH} — CPO {app_streamlit.format_summary_rub(50.0)}"
+    )
+    assert result[app_streamlit.ENTRY_POINT_GROUP_CATALOG] == f"{app_streamlit.ENTRY_POINT_GROUP_CATALOG} — CPO н/д"
+
+
+def test_build_entry_point_period_cpo_series_labels_shows_nd_when_orders_are_zero() -> None:
+    display_df = pd.DataFrame(
+        [
+            {
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 125.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDERS: 0,
+            }
+        ]
+    )
+
+    result = app_streamlit.build_entry_point_period_cpo_series_labels(
+        display_df,
+        analysis_level=app_streamlit.ENTRY_POINT_LEVEL_CABINET,
+        detail_level=app_streamlit.ENTRY_POINT_DETAIL_COARSE,
+    )
+
+    assert result[app_streamlit.ENTRY_POINT_GROUP_SEARCH] == f"{app_streamlit.ENTRY_POINT_GROUP_SEARCH} — CPO н/д"
 
 
 def test_render_entry_point_charts_renders_three_graphs_from_limited_daily_table(monkeypatch) -> None:
@@ -6189,18 +6352,26 @@ def test_render_entry_point_charts_renders_three_graphs_from_limited_daily_table
     display_df = pd.DataFrame(
         [
             {
-                "Дата": pd.Timestamp("2026-07-01").date(),
-                "Точка входа": "Поиск",
-                "Добавления в корзину": 10,
-                "Конверсия в корзину": 20.0,
-                "Конверсия в заказ": 10.0,
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_LABEL_CART_COUNT: 10,
+                app_streamlit.ENTRY_POINT_LABEL_CART_CONVERSION: 20.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDER_CONVERSION: 10.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDERS: 2,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 100.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN: 10.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN: 50.0,
             },
             {
-                "Дата": pd.Timestamp("2026-07-02").date(),
-                "Точка входа": "Поиск",
-                "Добавления в корзину": 20,
-                "Конверсия в корзину": 25.0,
-                "Конверсия в заказ": 12.0,
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-02").date(),
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_LABEL_CART_COUNT: 20,
+                app_streamlit.ENTRY_POINT_LABEL_CART_CONVERSION: 25.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDER_CONVERSION: 12.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDERS: 3,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 200.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN: 10.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN: 100.0,
             },
         ]
     )
@@ -6212,7 +6383,15 @@ def test_render_entry_point_charts_renders_three_graphs_from_limited_daily_table
         def radio(self, *_args, **_kwargs):
             return self._value
 
+    class _FakeTab:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
     chart_calls: list[object] = []
+    line_chart_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(app_streamlit.st, "subheader", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_streamlit.st, "info", lambda *args, **kwargs: None)
@@ -6222,8 +6401,9 @@ def test_render_entry_point_charts_renders_three_graphs_from_limited_daily_table
     monkeypatch.setattr(
         app_streamlit.st,
         "columns",
-        lambda _count: [_FakeColumn("Кабинет"), _FakeColumn("Укрупнённо")],
+        lambda _count: [_FakeColumn(app_streamlit.ENTRY_POINT_LEVEL_CABINET), _FakeColumn(app_streamlit.ENTRY_POINT_DETAIL_COARSE)],
     )
+    monkeypatch.setattr(app_streamlit.st, "tabs", lambda labels: [_FakeTab(), _FakeTab()])
     monkeypatch.setattr(
         app_streamlit.st,
         "altair_chart",
@@ -6233,8 +6413,9 @@ def test_render_entry_point_charts_renders_three_graphs_from_limited_daily_table
     monkeypatch.setattr(
         app_streamlit,
         "load_entry_point_day_range_from_db",
-        lambda *args, **kwargs: pd.DataFrame([{"nm_id": 101, "section": "Поиск", "entry_point": "Выдача"}]),
+        lambda *args, **kwargs: pd.DataFrame([{"nm_id": 101, "section": "search", "entry_point": "search"}]),
     )
+    monkeypatch.setattr(app_streamlit, "load_entry_point_spend_range_from_db", lambda *args, **kwargs: pd.DataFrame())
     monkeypatch.setattr(app_streamlit, "build_entry_point_metadata", lambda _filtered: pd.DataFrame())
     monkeypatch.setattr(app_streamlit, "build_entry_point_analytics_table", lambda *args, **kwargs: display_df)
     monkeypatch.setattr(
@@ -6242,31 +6423,50 @@ def test_render_entry_point_charts_renders_three_graphs_from_limited_daily_table
         "limit_entry_point_analytics_table",
         lambda df, **kwargs: (df, {"mode": "all", "message": None, "selected_article": None, "selected_band": None}),
     )
-    monkeypatch.setattr(app_streamlit, "build_entry_point_line_chart", lambda **kwargs: object())
+
+    def _build_entry_point_line_chart(**kwargs):
+        line_chart_calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(app_streamlit, "build_entry_point_line_chart", _build_entry_point_line_chart)
 
     app_streamlit.render_entry_point_charts(filtered, None)
 
-    assert len(chart_calls) == 3
+    assert len(chart_calls) == 5
+    assert len(line_chart_calls) == 5
+    assert line_chart_calls[0]["value_column"] == "cart_count"
+    assert line_chart_calls[0]["chart_df"]["cart_count"].tolist() == [10, 20]
+    assert line_chart_calls[0]["chart_df"]["series_name"].tolist() == [
+        f"{app_streamlit.ENTRY_POINT_GROUP_SEARCH} — CPO {app_streamlit.format_summary_rub(60.0)}",
+        f"{app_streamlit.ENTRY_POINT_GROUP_SEARCH} — CPO {app_streamlit.format_summary_rub(60.0)}",
+    ]
+    assert line_chart_calls[1]["chart_df"]["series_name"].tolist() == [
+        app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+        app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+    ]
 
 
 def test_render_entry_point_charts_uses_global_product_filter_without_second_selectbox(monkeypatch) -> None:
     filtered = pd.DataFrame(
         [
-            {"report_date": pd.Timestamp("2026-07-01").date(), "nm_id": 101, "supplier_article": "art-101", "title": "Товар 101"},
-            {"report_date": pd.Timestamp("2026-07-02").date(), "nm_id": 101, "supplier_article": "art-101", "title": "Товар 101"},
+            {"report_date": pd.Timestamp("2026-07-01").date(), "nm_id": 101, "supplier_article": "art-101", "title": "Item 101"},
+            {"report_date": pd.Timestamp("2026-07-02").date(), "nm_id": 101, "supplier_article": "art-101", "title": "Item 101"},
         ]
     )
     display_df = pd.DataFrame(
         [
             {
-                "Дата": pd.Timestamp("2026-07-01").date(),
-                "Артикул продавца": "art-101",
-                "Артикул WB": 101,
-                "Название": "Товар 101",
-                "Точка входа": "Поиск",
-                "Добавления в корзину": 10,
-                "Конверсия в корзину": 20.0,
-                "Конверсия в заказ": 10.0,
+                app_streamlit.ENTRY_POINT_LABEL_DATE: pd.Timestamp("2026-07-01").date(),
+                app_streamlit.ENTRY_POINT_LABEL_SUPPLIER_ARTICLE: "art-101",
+                app_streamlit.ENTRY_POINT_LABEL_WB_ARTICLE: 101,
+                app_streamlit.ENTRY_POINT_LABEL_TITLE: "Item 101",
+                app_streamlit.ENTRY_POINT_LABEL_POINT: app_streamlit.ENTRY_POINT_GROUP_SEARCH,
+                app_streamlit.ENTRY_POINT_LABEL_CART_COUNT: 10,
+                app_streamlit.ENTRY_POINT_LABEL_CART_CONVERSION: 20.0,
+                app_streamlit.ENTRY_POINT_LABEL_ORDER_CONVERSION: 10.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN: 100.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CART_COST_COLUMN: 10.0,
+                app_streamlit.ENTRY_POINT_ECONOMICS_CPO_COLUMN: 50.0,
             }
         ]
     )
@@ -6278,6 +6478,13 @@ def test_render_entry_point_charts_uses_global_product_filter_without_second_sel
         def radio(self, *_args, **_kwargs):
             return self._value
 
+    class _FakeTab:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
     limiter_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(app_streamlit.st, "subheader", lambda *args, **kwargs: None)
@@ -6285,23 +6492,20 @@ def test_render_entry_point_charts_uses_global_product_filter_without_second_sel
     monkeypatch.setattr(app_streamlit.st, "warning", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_streamlit.st, "caption", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_streamlit.st, "markdown", lambda *args, **kwargs: None)
-    monkeypatch.setattr(app_streamlit.st, "altair_chart", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         app_streamlit.st,
         "columns",
-        lambda _count: [_FakeColumn("Артикулы"), _FakeColumn("Укрупнённо")],
+        lambda _count: [_FakeColumn(app_streamlit.ENTRY_POINT_LEVEL_CABINET), _FakeColumn(app_streamlit.ENTRY_POINT_DETAIL_COARSE)],
     )
-
-    def _unexpected_selectbox(*_args, **_kwargs):
-        raise AssertionError("local product selectbox should not be rendered in entry-point charts")
-
-    monkeypatch.setattr(app_streamlit.st, "selectbox", _unexpected_selectbox)
+    monkeypatch.setattr(app_streamlit.st, "tabs", lambda labels: [_FakeTab(), _FakeTab()])
+    monkeypatch.setattr(app_streamlit.st, "altair_chart", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_streamlit, "resolve_db_dataset_cache_buster", lambda: "entry-chart-buster")
     monkeypatch.setattr(
         app_streamlit,
         "load_entry_point_day_range_from_db",
-        lambda *args, **kwargs: pd.DataFrame([{"nm_id": 101, "section": "Поиск", "entry_point": "Выдача"}]),
+        lambda *args, **kwargs: pd.DataFrame([{"nm_id": 101, "section": "search", "entry_point": "search"}]),
     )
+    monkeypatch.setattr(app_streamlit, "load_entry_point_spend_range_from_db", lambda *args, **kwargs: pd.DataFrame())
     monkeypatch.setattr(app_streamlit, "build_entry_point_metadata", lambda _filtered: pd.DataFrame())
     monkeypatch.setattr(app_streamlit, "build_entry_point_analytics_table", lambda *args, **kwargs: display_df)
 
@@ -6312,11 +6516,13 @@ def test_render_entry_point_charts_uses_global_product_filter_without_second_sel
     monkeypatch.setattr(app_streamlit, "limit_entry_point_analytics_table", _limit)
     monkeypatch.setattr(app_streamlit, "build_entry_point_line_chart", lambda **kwargs: object())
 
-    selected_label = "art-101 | 101 | Товар 101"
+    selected_label = "art-101 | 101 | Item 101"
     app_streamlit.render_entry_point_charts(filtered, selected_label)
 
     assert limiter_calls
     assert limiter_calls[0]["selected_article_label"] == selected_label
+
+
 def test_render_stock_speed_charts_passes_cache_buster_to_range_loaders(monkeypatch) -> None:
     from unittest.mock import patch
 

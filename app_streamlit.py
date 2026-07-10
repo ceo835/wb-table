@@ -185,6 +185,27 @@ ENTRY_POINT_GROUP_ORDER = [
     ENTRY_POINT_GROUP_OTHER,
     ENTRY_POINT_GROUP_TOTAL,
 ]
+ENTRY_POINT_LABEL_DATE = "Дата"
+ENTRY_POINT_LABEL_SECTION = "Раздел"
+ENTRY_POINT_LABEL_POINT = "Точка входа"
+ENTRY_POINT_LABEL_BAND = "Банда"
+ENTRY_POINT_LABEL_SUPPLIER_ARTICLE = "Артикул продавца"
+ENTRY_POINT_LABEL_WB_ARTICLE = "Артикул WB"
+ENTRY_POINT_LABEL_TITLE = "Название"
+ENTRY_POINT_LABEL_IMPRESSIONS = "Показы"
+ENTRY_POINT_LABEL_CARD_CLICKS = "Переходы в карточку"
+ENTRY_POINT_LABEL_CART_COUNT = "Добавления в корзину"
+ENTRY_POINT_LABEL_CART_CONVERSION = "Конверсия в корзину"
+ENTRY_POINT_LABEL_ORDERS = "Заказы"
+ENTRY_POINT_LABEL_ORDER_CONVERSION = "Конверсия в заказ"
+ENTRY_POINT_LABEL_NO_BAND = "Без банды"
+ENTRY_POINT_LABEL_NO_SECTION = "Без раздела"
+ENTRY_POINT_LABEL_NO_POINT = "Без точки входа"
+ENTRY_POINT_LABEL_TRAFFIC_TAB = "Трафик"
+ENTRY_POINT_ECONOMICS_TAB_LABEL = "Стоимость и CPO"
+ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN = "Распределённый расход РК"
+ENTRY_POINT_ECONOMICS_CART_COST_COLUMN = "Стоимость корзины РК"
+ENTRY_POINT_ECONOMICS_CPO_COLUMN = "CPO РК"
 ENTRY_POINT_CONVERSION_HIGHLIGHT = "#fef3c7"
 ENTRY_POINT_CART_SPIKE_HIGHLIGHT = "#fee2e2"
 ENTRY_POINT_DEFAULT_TOP_N_ARTICLES = 20
@@ -2919,6 +2940,49 @@ def load_entry_point_day_range_from_db(
     )
 
 
+@st.cache_data(show_spinner=False)
+def load_entry_point_spend_range_from_db(
+    report_dates: tuple[date, ...],
+    nm_ids: tuple[int, ...],
+    cache_buster: str | None = None,
+) -> pd.DataFrame:
+    columns = ["date", "nm_id", "ad_campaign_spend_total"]
+    if not report_dates or not nm_ids:
+        return pd.DataFrame(columns=columns)
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(
+                    MartTotalReport.report_date,
+                    MartTotalReport.nm_id,
+                    MartTotalReport.ad_campaign_spend_total,
+                )
+                .where(
+                    MartTotalReport.report_date.in_(report_dates),
+                    MartTotalReport.nm_id.in_(nm_ids),
+                )
+                .order_by(
+                    MartTotalReport.report_date.asc(),
+                    MartTotalReport.nm_id.asc(),
+                )
+            ).all()
+    except Exception:
+        logger.exception("Failed to load mart_total_report spend for entry point economics")
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(
+        [
+            {
+                "date": row.report_date,
+                "nm_id": row.nm_id,
+                "ad_campaign_spend_total": row.ad_campaign_spend_total,
+            }
+            for row in rows
+        ],
+        columns=columns,
+    )
+
+
 def build_entry_point_metadata(filtered: pd.DataFrame) -> pd.DataFrame:
     columns = ["nm_id", "supplier_article", "title", "brand", "subject", "band_name"]
     if filtered.empty or "nm_id" not in filtered.columns:
@@ -2982,36 +3046,36 @@ def _apply_entry_point_cart_conversion_fallback(
     group_columns: list[str],
 ) -> pd.DataFrame:
     if grouped.empty:
-        grouped["Конверсия в корзину"] = pd.Series(dtype="float64")
+        grouped[ENTRY_POINT_LABEL_CART_CONVERSION] = pd.Series(dtype="float64")
         return grouped
 
     result = grouped.copy()
-    result["Конверсия в корзину"] = _compute_entry_point_conversion(
-        result["Добавления в корзину"],
-        result["Переходы в карточку"],
+    result[ENTRY_POINT_LABEL_CART_CONVERSION] = _compute_entry_point_conversion(
+        result[ENTRY_POINT_LABEL_CART_COUNT],
+        result[ENTRY_POINT_LABEL_CARD_CLICKS],
     )
     result["__entry_point_conversion_fallback_7d"] = False
-    base_group_columns = [column for column in group_columns if column != "Дата"]
+    base_group_columns = [column for column in group_columns if column != ENTRY_POINT_LABEL_DATE]
 
     def _apply_group_fallback(group_df: pd.DataFrame) -> pd.DataFrame:
-        local = group_df.sort_values("Дата", kind="stable").copy()
-        local["Дата"] = pd.to_datetime(local["Дата"], errors="coerce")
-        local["__cart_numeric"] = pd.to_numeric(local["Добавления в корзину"], errors="coerce")
-        local["__clicks_numeric"] = pd.to_numeric(local["Переходы в карточку"], errors="coerce")
+        local = group_df.sort_values(ENTRY_POINT_LABEL_DATE, kind="stable").copy()
+        local[ENTRY_POINT_LABEL_DATE] = pd.to_datetime(local[ENTRY_POINT_LABEL_DATE], errors="coerce")
+        local["__cart_numeric"] = pd.to_numeric(local[ENTRY_POINT_LABEL_CART_COUNT], errors="coerce")
+        local["__clicks_numeric"] = pd.to_numeric(local[ENTRY_POINT_LABEL_CARD_CLICKS], errors="coerce")
 
-        rolling_indexed = local.set_index("Дата")
+        rolling_indexed = local.set_index(ENTRY_POINT_LABEL_DATE)
         rolling_cart = rolling_indexed["__cart_numeric"].rolling("7D", min_periods=1).sum()
         rolling_clicks = rolling_indexed["__clicks_numeric"].rolling("7D", min_periods=1).sum()
         rolling_conversion = (rolling_cart / rolling_clicks) * 100.0
         rolling_conversion = rolling_conversion.where(rolling_clicks.gt(0))
 
         fallback_mask = local["__cart_numeric"].lt(50).fillna(False)
-        local["Конверсия в корзину"] = local["Конверсия в корзину"].where(
+        local[ENTRY_POINT_LABEL_CART_CONVERSION] = local[ENTRY_POINT_LABEL_CART_CONVERSION].where(
             ~fallback_mask,
             rolling_conversion.to_numpy(),
         )
         local["__entry_point_conversion_fallback_7d"] = fallback_mask
-        local["Дата"] = local["Дата"].dt.date
+        local[ENTRY_POINT_LABEL_DATE] = local[ENTRY_POINT_LABEL_DATE].dt.date
         return local.drop(columns=["__cart_numeric", "__clicks_numeric"])
 
     if base_group_columns:
@@ -3021,6 +3085,70 @@ def _apply_entry_point_cart_conversion_fallback(
         ]
         return pd.concat(grouped_frames, ignore_index=True) if grouped_frames else result
     return _apply_group_fallback(result).reset_index(drop=True)
+
+
+def _prepare_entry_point_economics_source(
+    entry_df: pd.DataFrame,
+    spend_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if entry_df.empty:
+        result = entry_df.copy()
+        result["allocated_point_spend"] = pd.Series(dtype="float64")
+        return result
+
+    result = entry_df.copy()
+    if "date" not in result.columns:
+        result["date"] = pd.NaT
+    if "nm_id" not in result.columns:
+        result["nm_id"] = pd.NA
+    if "cart_count" not in result.columns:
+        result["cart_count"] = pd.NA
+    if "order_count" not in result.columns:
+        result["order_count"] = pd.NA
+
+    result["date"] = pd.to_datetime(result["date"], errors="coerce").dt.date
+    result["nm_id"] = pd.to_numeric(result["nm_id"], errors="coerce")
+    result["cart_count"] = pd.to_numeric(result["cart_count"], errors="coerce")
+    result["order_count"] = pd.to_numeric(result["order_count"], errors="coerce")
+    result = result.dropna(subset=["date", "nm_id"]).copy()
+    if result.empty:
+        result["allocated_point_spend"] = pd.Series(dtype="float64")
+        return result
+
+    result["nm_id"] = result["nm_id"].astype(int)
+    result["allocated_point_spend"] = pd.Series([float("nan")] * len(result), index=result.index, dtype="float64")
+    if spend_df is None or spend_df.empty:
+        return result
+
+    spend = spend_df.copy()
+    if "date" not in spend.columns:
+        if "report_date" in spend.columns:
+            spend["date"] = spend["report_date"]
+        else:
+            return result
+    if "nm_id" not in spend.columns or "ad_campaign_spend_total" not in spend.columns:
+        return result
+
+    spend["date"] = pd.to_datetime(spend["date"], errors="coerce").dt.date
+    spend["nm_id"] = pd.to_numeric(spend["nm_id"], errors="coerce")
+    spend["ad_campaign_spend_total"] = pd.to_numeric(spend["ad_campaign_spend_total"], errors="coerce")
+    spend = spend.dropna(subset=["date", "nm_id"]).copy()
+    if spend.empty:
+        return result
+
+    spend["nm_id"] = spend["nm_id"].astype(int)
+    spend = spend.drop_duplicates(subset=["date", "nm_id"], keep="first")
+    result = result.merge(spend[["date", "nm_id", "ad_campaign_spend_total"]], on=["date", "nm_id"], how="left")
+    result["article_cart_total"] = result.groupby(["date", "nm_id"], dropna=False)["cart_count"].transform(
+        lambda series: series.sum(min_count=1)
+    )
+    point_cart_share = [safe_chart_divide(cart_value, total_value) for cart_value, total_value in zip(result["cart_count"], result["article_cart_total"])]
+    result["allocated_point_spend"] = result["ad_campaign_spend_total"] * pd.Series(
+        point_cart_share,
+        index=result.index,
+        dtype="float64",
+    )
+    return result.drop(columns=["article_cart_total", "ad_campaign_spend_total"], errors="ignore")
 
 
 def _extract_nm_id_from_entry_point_article_label(label: str | None) -> int | None:
@@ -3122,32 +3250,50 @@ def build_entry_point_analytics_table(
     *,
     analysis_level: str,
     detail_level: str,
+    spend_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    economics_enabled = detail_level == ENTRY_POINT_DETAIL_COARSE
     metric_columns = ["impressions", "card_clicks", "cart_count", "order_count"]
+    if economics_enabled:
+        metric_columns.append("allocated_point_spend")
+
     if entry_df.empty:
         if analysis_level == ENTRY_POINT_LEVEL_CABINET:
-            base_columns = ["Дата", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Дата", "Точка входа"]
+            base_columns = [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT] if detail_level == ENTRY_POINT_DETAIL_DETAILED else [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_POINT]
         elif analysis_level == ENTRY_POINT_LEVEL_BAND:
-            base_columns = ["Дата", "Банда", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Дата", "Банда", "Точка входа"]
+            base_columns = [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_BAND, ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT] if detail_level == ENTRY_POINT_DETAIL_DETAILED else [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_BAND, ENTRY_POINT_LABEL_POINT]
         else:
             base_columns = (
-                ["Дата", "Артикул продавца", "Артикул WB", "Название", "Раздел", "Точка входа"]
+                [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_SUPPLIER_ARTICLE, ENTRY_POINT_LABEL_WB_ARTICLE, ENTRY_POINT_LABEL_TITLE, ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT]
                 if detail_level == ENTRY_POINT_DETAIL_DETAILED
-                else ["Дата", "Артикул продавца", "Артикул WB", "Название", "Точка входа"]
+                else [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_SUPPLIER_ARTICLE, ENTRY_POINT_LABEL_WB_ARTICLE, ENTRY_POINT_LABEL_TITLE, ENTRY_POINT_LABEL_POINT]
             )
         return pd.DataFrame(
             columns=base_columns
             + [
-                "Показы",
-                "Переходы в карточку",
-                "Добавления в корзину",
-                "Конверсия в корзину",
-                "Заказы",
-                "Конверсия в заказ",
+                ENTRY_POINT_LABEL_IMPRESSIONS,
+                ENTRY_POINT_LABEL_CARD_CLICKS,
+                ENTRY_POINT_LABEL_CART_COUNT,
+                ENTRY_POINT_LABEL_CART_CONVERSION,
+                ENTRY_POINT_LABEL_ORDERS,
+                ENTRY_POINT_LABEL_ORDER_CONVERSION,
             ]
+            + (
+                [
+                    ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN,
+                    ENTRY_POINT_ECONOMICS_CART_COST_COLUMN,
+                    ENTRY_POINT_ECONOMICS_CPO_COLUMN,
+                ]
+                if economics_enabled
+                else []
+            )
         )
 
     df = entry_df.copy()
+    if economics_enabled:
+        df = _prepare_entry_point_economics_source(df, spend_df)
+    else:
+        df = df.drop(columns=["allocated_point_spend"], errors="ignore")
     for column in ("nm_id", *metric_columns):
         if column not in df.columns:
             df[column] = pd.NA
@@ -3158,7 +3304,7 @@ def build_entry_point_analytics_table(
     df["nm_id"] = df["nm_id"].astype(int)
     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
     df = df.dropna(subset=["date"]).copy()
-    df["Дата"] = df["date"]
+    df[ENTRY_POINT_LABEL_DATE] = df["date"]
     for column in metric_columns:
         df[column] = pd.to_numeric(df[column], errors="coerce")
 
@@ -3192,31 +3338,31 @@ def build_entry_point_analytics_table(
     df["title"] = df["title"].fillna("").astype(str)
     df["section"] = df["section"].fillna("").astype(str)
     df["entry_point"] = df["entry_point"].fillna("").astype(str)
-    df["band_name"] = df["band_name"].fillna("Без банды").astype(str)
+    df["band_name"] = df["band_name"].fillna(ENTRY_POINT_LABEL_NO_BAND).astype(str)
 
     if detail_level == ENTRY_POINT_DETAIL_COARSE:
-        df["Точка входа"] = df.apply(
+        df[ENTRY_POINT_LABEL_POINT] = df.apply(
             lambda row: classify_entry_point_bucket(row.get("section"), row.get("entry_point")),
             axis=1,
         )
     else:
-        df["Раздел"] = df["section"].replace("", "Без раздела")
-        df["Точка входа"] = df["entry_point"].replace("", "Без точки входа")
+        df[ENTRY_POINT_LABEL_SECTION] = df["section"].replace("", ENTRY_POINT_LABEL_NO_SECTION)
+        df[ENTRY_POINT_LABEL_POINT] = df["entry_point"].replace("", ENTRY_POINT_LABEL_NO_POINT)
 
     if analysis_level == ENTRY_POINT_LEVEL_CABINET:
-        group_columns = ["Дата", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Дата", "Точка входа"]
+        group_columns = [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT] if detail_level == ENTRY_POINT_DETAIL_DETAILED else [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_POINT]
     elif analysis_level == ENTRY_POINT_LEVEL_BAND:
-        group_columns = ["Дата", "Банда", "Раздел", "Точка входа"] if detail_level == ENTRY_POINT_DETAIL_DETAILED else ["Дата", "Банда", "Точка входа"]
-        df["Банда"] = df["band_name"].replace("", "Без банды")
+        group_columns = [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_BAND, ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT] if detail_level == ENTRY_POINT_DETAIL_DETAILED else [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_BAND, ENTRY_POINT_LABEL_POINT]
+        df[ENTRY_POINT_LABEL_BAND] = df["band_name"].replace("", ENTRY_POINT_LABEL_NO_BAND)
     else:
         group_columns = (
-            ["Дата", "Артикул продавца", "Артикул WB", "Название", "Раздел", "Точка входа"]
+            [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_SUPPLIER_ARTICLE, ENTRY_POINT_LABEL_WB_ARTICLE, ENTRY_POINT_LABEL_TITLE, ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT]
             if detail_level == ENTRY_POINT_DETAIL_DETAILED
-            else ["Дата", "Артикул продавца", "Артикул WB", "Название", "Точка входа"]
+            else [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_SUPPLIER_ARTICLE, ENTRY_POINT_LABEL_WB_ARTICLE, ENTRY_POINT_LABEL_TITLE, ENTRY_POINT_LABEL_POINT]
         )
-        df["Артикул WB"] = df["nm_id"]
-        df["Артикул продавца"] = df["supplier_article"].replace("", "—")
-        df["Название"] = df["title"].replace("", "—")
+        df[ENTRY_POINT_LABEL_WB_ARTICLE] = df["nm_id"]
+        df[ENTRY_POINT_LABEL_SUPPLIER_ARTICLE] = df["supplier_article"].replace("", "?")
+        df[ENTRY_POINT_LABEL_TITLE] = df["title"].replace("", "?")
 
     aggregations = {column: (lambda series: series.sum(min_count=1)) for column in metric_columns}
     grouped = (
@@ -3224,54 +3370,85 @@ def build_entry_point_analytics_table(
         .agg(aggregations)
         .rename(
             columns={
-                "impressions": "Показы",
-                "card_clicks": "Переходы в карточку",
-                "cart_count": "Добавления в корзину",
-                "order_count": "Заказы",
+                "impressions": ENTRY_POINT_LABEL_IMPRESSIONS,
+                "card_clicks": ENTRY_POINT_LABEL_CARD_CLICKS,
+                "cart_count": ENTRY_POINT_LABEL_CART_COUNT,
+                "order_count": ENTRY_POINT_LABEL_ORDERS,
+                "allocated_point_spend": ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN,
             }
         )
     )
     if analysis_level == ENTRY_POINT_LEVEL_CABINET and detail_level == ENTRY_POINT_DETAIL_COARSE:
         total_rows: list[dict[str, object]] = []
-        for report_date, date_rows in grouped.groupby("Дата", dropna=False, sort=True):
+        for report_date, date_rows in grouped.groupby(ENTRY_POINT_LABEL_DATE, dropna=False, sort=True):
             total_row = {
-                "Дата": report_date,
-                "Точка входа": ENTRY_POINT_GROUP_TOTAL,
-                "Показы": date_rows["Показы"].sum(min_count=1),
-                "Переходы в карточку": date_rows["Переходы в карточку"].sum(min_count=1),
-                "Добавления в корзину": date_rows["Добавления в корзину"].sum(min_count=1),
-                "Заказы": date_rows["Заказы"].sum(min_count=1),
+                ENTRY_POINT_LABEL_DATE: report_date,
+                ENTRY_POINT_LABEL_POINT: ENTRY_POINT_GROUP_TOTAL,
+                ENTRY_POINT_LABEL_IMPRESSIONS: date_rows[ENTRY_POINT_LABEL_IMPRESSIONS].sum(min_count=1),
+                ENTRY_POINT_LABEL_CARD_CLICKS: date_rows[ENTRY_POINT_LABEL_CARD_CLICKS].sum(min_count=1),
+                ENTRY_POINT_LABEL_CART_COUNT: date_rows[ENTRY_POINT_LABEL_CART_COUNT].sum(min_count=1),
+                ENTRY_POINT_LABEL_ORDERS: date_rows[ENTRY_POINT_LABEL_ORDERS].sum(min_count=1),
             }
+            if economics_enabled and ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN in date_rows.columns:
+                total_row[ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN] = date_rows[ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN].sum(min_count=1)
             total_rows.append(total_row)
         grouped = pd.concat([grouped, pd.DataFrame(total_rows)], ignore_index=True)
-    grouped["Конверсия в заказ"] = _compute_entry_point_conversion(
-        grouped["Заказы"],
-        grouped["Добавления в корзину"],
+
+    grouped[ENTRY_POINT_LABEL_ORDER_CONVERSION] = _compute_entry_point_conversion(
+        grouped[ENTRY_POINT_LABEL_ORDERS],
+        grouped[ENTRY_POINT_LABEL_CART_COUNT],
     )
     grouped = _apply_entry_point_cart_conversion_fallback(grouped, group_columns=group_columns)
 
+    if economics_enabled:
+        grouped[ENTRY_POINT_ECONOMICS_CART_COST_COLUMN] = grouped.apply(
+            lambda row: safe_chart_divide(row.get(ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN), row.get(ENTRY_POINT_LABEL_CART_COUNT)),
+            axis=1,
+        )
+        grouped[ENTRY_POINT_ECONOMICS_CPO_COLUMN] = grouped.apply(
+            lambda row: safe_chart_divide(row.get(ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN), row.get(ENTRY_POINT_LABEL_ORDERS)),
+            axis=1,
+        )
+
     if analysis_level == ENTRY_POINT_LEVEL_CABINET and detail_level == ENTRY_POINT_DETAIL_COARSE:
-        grouped["__entry_sort"] = grouped["Точка входа"].map(
+        grouped["__entry_sort"] = grouped[ENTRY_POINT_LABEL_POINT].map(
             {label: index for index, label in enumerate(ENTRY_POINT_GROUP_ORDER)}
         ).fillna(len(ENTRY_POINT_GROUP_ORDER))
-        grouped = grouped.sort_values(["Дата", "__entry_sort", "Точка входа"], kind="stable").drop(columns=["__entry_sort"])
+        grouped = grouped.sort_values([ENTRY_POINT_LABEL_DATE, "__entry_sort", ENTRY_POINT_LABEL_POINT], kind="stable").drop(columns=["__entry_sort"])
     elif detail_level == ENTRY_POINT_DETAIL_COARSE:
-        sort_columns = ["Дата", "Точка входа"]
+        sort_columns = [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_POINT]
         if analysis_level == ENTRY_POINT_LEVEL_BAND:
-            sort_columns = ["Дата", "Банда", "Точка входа"]
+            sort_columns = [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_BAND, ENTRY_POINT_LABEL_POINT]
         elif analysis_level == ENTRY_POINT_LEVEL_ARTICLE:
-            sort_columns = ["Дата", "Артикул продавца", "Артикул WB", "Точка входа"]
-        grouped["__entry_sort"] = grouped["Точка входа"].map(
+            sort_columns = [ENTRY_POINT_LABEL_DATE, ENTRY_POINT_LABEL_SUPPLIER_ARTICLE, ENTRY_POINT_LABEL_WB_ARTICLE, ENTRY_POINT_LABEL_POINT]
+        grouped["__entry_sort"] = grouped[ENTRY_POINT_LABEL_POINT].map(
             {label: index for index, label in enumerate(ENTRY_POINT_GROUP_ORDER)}
         ).fillna(len(ENTRY_POINT_GROUP_ORDER))
         grouped = grouped.sort_values(
-            [column for column in sort_columns if column != "Точка входа"] + ["__entry_sort", "Точка входа"],
+            [column for column in sort_columns if column != ENTRY_POINT_LABEL_POINT] + ["__entry_sort", ENTRY_POINT_LABEL_POINT],
             kind="stable",
         ).drop(columns=["__entry_sort"])
     else:
         grouped = grouped.sort_values(group_columns, kind="stable")
 
-    return grouped.reset_index(drop=True)
+    ordered_columns = list(group_columns) + [
+        ENTRY_POINT_LABEL_IMPRESSIONS,
+        ENTRY_POINT_LABEL_CARD_CLICKS,
+        ENTRY_POINT_LABEL_CART_COUNT,
+        ENTRY_POINT_LABEL_CART_CONVERSION,
+        ENTRY_POINT_LABEL_ORDERS,
+        ENTRY_POINT_LABEL_ORDER_CONVERSION,
+    ]
+    if economics_enabled:
+        ordered_columns += [
+            ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN,
+            ENTRY_POINT_ECONOMICS_CART_COST_COLUMN,
+            ENTRY_POINT_ECONOMICS_CPO_COLUMN,
+        ]
+    if "__entry_point_conversion_fallback_7d" in grouped.columns:
+        ordered_columns.append("__entry_point_conversion_fallback_7d")
+    existing_order = [column for column in ordered_columns if column in grouped.columns]
+    return grouped[existing_order].reset_index(drop=True)
 
 
 def style_entry_point_analytics_table(display_df: pd.DataFrame):
@@ -3322,6 +3499,73 @@ def style_entry_point_analytics_table(display_df: pd.DataFrame):
     return visible_df.style.apply(_highlight_low_cart_conversion, axis=1)
 
 
+def _prepare_entry_point_chart_base_dataframe(
+    display_df: pd.DataFrame,
+    *,
+    analysis_level: str,
+    detail_level: str,
+) -> pd.DataFrame:
+    if display_df.empty:
+        return pd.DataFrame(columns=["report_date", "series_name"])
+
+    chart_df = display_df.drop(columns=["__entry_point_conversion_fallback_7d"], errors="ignore").copy()
+    if ENTRY_POINT_LABEL_DATE not in chart_df.columns:
+        return pd.DataFrame(columns=["report_date", "series_name"])
+
+    chart_df["report_date"] = pd.to_datetime(chart_df[ENTRY_POINT_LABEL_DATE], errors="coerce")
+    chart_df = chart_df.dropna(subset=["report_date"]).copy()
+    if chart_df.empty:
+        return pd.DataFrame(columns=["report_date", "series_name"])
+
+    if analysis_level == ENTRY_POINT_LEVEL_CABINET and ENTRY_POINT_LABEL_POINT in chart_df.columns:
+        chart_df = chart_df[chart_df[ENTRY_POINT_LABEL_POINT] != ENTRY_POINT_GROUP_TOTAL].copy()
+    if chart_df.empty:
+        return pd.DataFrame(columns=["report_date", "series_name"])
+
+    separator = " · "
+    if analysis_level == ENTRY_POINT_LEVEL_CABINET:
+        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT}.issubset(chart_df.columns):
+            chart_df["series_name"] = chart_df[ENTRY_POINT_LABEL_SECTION].astype(str) + separator + chart_df[ENTRY_POINT_LABEL_POINT].astype(str)
+        else:
+            chart_df["series_name"] = chart_df.get(ENTRY_POINT_LABEL_POINT, pd.Series(index=chart_df.index, dtype=object)).astype(str)
+    elif analysis_level == ENTRY_POINT_LEVEL_BAND:
+        band_series = chart_df.get(ENTRY_POINT_LABEL_BAND, pd.Series(ENTRY_POINT_LABEL_NO_BAND, index=chart_df.index)).fillna(ENTRY_POINT_LABEL_NO_BAND).astype(str)
+        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT}.issubset(chart_df.columns):
+            chart_df["series_name"] = (
+                band_series
+                + separator
+                + chart_df[ENTRY_POINT_LABEL_SECTION].astype(str)
+                + separator
+                + chart_df[ENTRY_POINT_LABEL_POINT].astype(str)
+            )
+        else:
+            chart_df["series_name"] = band_series + separator + chart_df.get(
+                ENTRY_POINT_LABEL_POINT, pd.Series(index=chart_df.index, dtype=object)
+            ).astype(str)
+    else:
+        article_series = (
+            chart_df.get(ENTRY_POINT_LABEL_SUPPLIER_ARTICLE, pd.Series("?", index=chart_df.index))
+            .fillna("?")
+            .astype(str)
+            + " | "
+            + chart_df.get(ENTRY_POINT_LABEL_WB_ARTICLE, pd.Series("?", index=chart_df.index)).fillna("?").astype(str)
+        )
+        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {ENTRY_POINT_LABEL_SECTION, ENTRY_POINT_LABEL_POINT}.issubset(chart_df.columns):
+            chart_df["series_name"] = (
+                article_series
+                + separator
+                + chart_df[ENTRY_POINT_LABEL_SECTION].astype(str)
+                + separator
+                + chart_df[ENTRY_POINT_LABEL_POINT].astype(str)
+            )
+        else:
+            chart_df["series_name"] = article_series + separator + chart_df.get(
+                ENTRY_POINT_LABEL_POINT, pd.Series(index=chart_df.index, dtype=object)
+            ).astype(str)
+
+    return chart_df
+
+
 def build_entry_point_chart_dataframe(
     display_df: pd.DataFrame,
     *,
@@ -3335,69 +3579,97 @@ def build_entry_point_chart_dataframe(
         "cart_conversion",
         "order_conversion",
     ]
-    if display_df.empty:
-        return pd.DataFrame(columns=expected_columns)
-
-    chart_df = display_df.drop(columns=["__entry_point_conversion_fallback_7d"], errors="ignore").copy()
-    if "Дата" not in chart_df.columns:
-        return pd.DataFrame(columns=expected_columns)
-
-    chart_df["report_date"] = pd.to_datetime(chart_df["Дата"], errors="coerce")
-    chart_df = chart_df.dropna(subset=["report_date"]).copy()
+    chart_df = _prepare_entry_point_chart_base_dataframe(
+        display_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+    )
     if chart_df.empty:
         return pd.DataFrame(columns=expected_columns)
 
-    if analysis_level == ENTRY_POINT_LEVEL_CABINET and "Точка входа" in chart_df.columns:
-        chart_df = chart_df[chart_df["Точка входа"] != ENTRY_POINT_GROUP_TOTAL].copy()
-    if chart_df.empty:
-        return pd.DataFrame(columns=expected_columns)
-
-    if analysis_level == ENTRY_POINT_LEVEL_CABINET:
-        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {"Раздел", "Точка входа"}.issubset(chart_df.columns):
-            chart_df["series_name"] = chart_df["Раздел"].astype(str) + " · " + chart_df["Точка входа"].astype(str)
-        else:
-            chart_df["series_name"] = chart_df.get("Точка входа", pd.Series(index=chart_df.index, dtype=object)).astype(str)
-    elif analysis_level == ENTRY_POINT_LEVEL_BAND:
-        band_series = chart_df.get("Банда", pd.Series("Без банды", index=chart_df.index)).fillna("Без банды").astype(str)
-        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {"Раздел", "Точка входа"}.issubset(chart_df.columns):
-            chart_df["series_name"] = (
-                band_series
-                + " · "
-                + chart_df["Раздел"].astype(str)
-                + " · "
-                + chart_df["Точка входа"].astype(str)
-            )
-        else:
-            chart_df["series_name"] = band_series + " · " + chart_df.get(
-                "Точка входа", pd.Series(index=chart_df.index, dtype=object)
-            ).astype(str)
-    else:
-        article_series = (
-            chart_df.get("Артикул продавца", pd.Series("—", index=chart_df.index))
-            .fillna("—")
-            .astype(str)
-            + " | "
-            + chart_df.get("Артикул WB", pd.Series("—", index=chart_df.index)).fillna("—").astype(str)
-        )
-        if detail_level == ENTRY_POINT_DETAIL_DETAILED and {"Раздел", "Точка входа"}.issubset(chart_df.columns):
-            chart_df["series_name"] = (
-                article_series
-                + " · "
-                + chart_df["Раздел"].astype(str)
-                + " · "
-                + chart_df["Точка входа"].astype(str)
-            )
-        else:
-            chart_df["series_name"] = article_series + " · " + chart_df.get(
-                "Точка входа", pd.Series(index=chart_df.index, dtype=object)
-            ).astype(str)
-
-    chart_df["cart_count"] = pd.to_numeric(chart_df.get("Добавления в корзину"), errors="coerce")
-    chart_df["cart_conversion"] = pd.to_numeric(chart_df.get("Конверсия в корзину"), errors="coerce")
-    chart_df["order_conversion"] = pd.to_numeric(chart_df.get("Конверсия в заказ"), errors="coerce")
+    chart_df["cart_count"] = pd.to_numeric(chart_df.get(ENTRY_POINT_LABEL_CART_COUNT), errors="coerce")
+    chart_df["cart_conversion"] = pd.to_numeric(chart_df.get(ENTRY_POINT_LABEL_CART_CONVERSION), errors="coerce")
+    chart_df["order_conversion"] = pd.to_numeric(chart_df.get(ENTRY_POINT_LABEL_ORDER_CONVERSION), errors="coerce")
 
     result = chart_df[expected_columns].copy()
     return result.sort_values(["report_date", "series_name"], kind="stable").reset_index(drop=True)
+
+
+def build_entry_point_economics_chart_dataframe(
+    display_df: pd.DataFrame,
+    *,
+    analysis_level: str,
+    detail_level: str,
+) -> pd.DataFrame:
+    expected_columns = [
+        "report_date",
+        "series_name",
+        "estimated_cost_per_cart",
+        "estimated_cpo",
+    ]
+    if detail_level != ENTRY_POINT_DETAIL_COARSE:
+        return pd.DataFrame(columns=expected_columns)
+
+    chart_df = _prepare_entry_point_chart_base_dataframe(
+        display_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+    )
+    if chart_df.empty:
+        return pd.DataFrame(columns=expected_columns)
+    if ENTRY_POINT_ECONOMICS_CART_COST_COLUMN not in chart_df.columns or ENTRY_POINT_ECONOMICS_CPO_COLUMN not in chart_df.columns:
+        return pd.DataFrame(columns=expected_columns)
+
+    chart_df["estimated_cost_per_cart"] = pd.to_numeric(chart_df.get(ENTRY_POINT_ECONOMICS_CART_COST_COLUMN), errors="coerce")
+    chart_df["estimated_cpo"] = pd.to_numeric(chart_df.get(ENTRY_POINT_ECONOMICS_CPO_COLUMN), errors="coerce")
+
+    result = chart_df[expected_columns].copy()
+    return result.sort_values(["report_date", "series_name"], kind="stable").reset_index(drop=True)
+
+
+
+def build_entry_point_period_cpo_series_labels(
+    display_df: pd.DataFrame,
+    *,
+    analysis_level: str,
+    detail_level: str,
+) -> dict[str, str]:
+    chart_df = _prepare_entry_point_chart_base_dataframe(
+        display_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+    )
+    if chart_df.empty or "series_name" not in chart_df.columns:
+        return {}
+
+    series_names = chart_df["series_name"].dropna().astype(str).drop_duplicates().tolist()
+    if not series_names:
+        return {}
+
+    if (
+        ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN not in chart_df.columns
+        or ENTRY_POINT_LABEL_ORDERS not in chart_df.columns
+    ):
+        return {series_name: f"{series_name} — CPO н/д" for series_name in series_names}
+
+    cpo_source = chart_df[["series_name", ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN, ENTRY_POINT_LABEL_ORDERS]].copy()
+    cpo_source[ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN] = pd.to_numeric(
+        cpo_source[ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN],
+        errors="coerce",
+    )
+    cpo_source[ENTRY_POINT_LABEL_ORDERS] = pd.to_numeric(cpo_source[ENTRY_POINT_LABEL_ORDERS], errors="coerce")
+    grouped = cpo_source.groupby("series_name", dropna=False, sort=False).sum(min_count=1)
+
+    labels: dict[str, str] = {}
+    for series_name in series_names:
+        spend_value = grouped.at[series_name, ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN] if series_name in grouped.index else pd.NA
+        orders_value = grouped.at[series_name, ENTRY_POINT_LABEL_ORDERS] if series_name in grouped.index else pd.NA
+        period_cpo = safe_chart_divide(spend_value, orders_value)
+        if period_cpo is None:
+            labels[series_name] = f"{series_name} — CPO н/д"
+        else:
+            labels[series_name] = f"{series_name} — CPO {format_summary_rub(period_cpo)}"
+    return labels
 
 
 def build_entry_point_line_chart(
@@ -6700,11 +6972,15 @@ def render_entry_point_analytics_tab(filtered: pd.DataFrame) -> None:
         return
 
     metadata_df = build_entry_point_metadata(filtered)
+    spend_df = None
+    if detail_level == ENTRY_POINT_DETAIL_COARSE:
+        spend_df = load_entry_point_spend_range_from_db(tuple(selected_dates), tuple(selected_nm_ids), cache_buster=cache_buster)
     display_df = build_entry_point_analytics_table(
         entry_df,
         metadata_df,
         analysis_level=analysis_level,
         detail_level=detail_level,
+        spend_df=spend_df,
     )
     if display_df.empty:
         st.info("После агрегации данных для выбранного режима не осталось строк.")
@@ -6771,25 +7047,40 @@ def render_entry_point_analytics_tab(filtered: pd.DataFrame) -> None:
         key="entry_point_analytics_xlsx_download",
     )
 
+    column_config = {
+        ENTRY_POINT_LABEL_DATE: st.column_config.DateColumn(ENTRY_POINT_LABEL_DATE),
+        ENTRY_POINT_LABEL_WB_ARTICLE: st.column_config.NumberColumn(ENTRY_POINT_LABEL_WB_ARTICLE, format="%d"),
+        ENTRY_POINT_LABEL_IMPRESSIONS: st.column_config.NumberColumn(ENTRY_POINT_LABEL_IMPRESSIONS, format="%.0f"),
+        ENTRY_POINT_LABEL_CARD_CLICKS: st.column_config.NumberColumn(ENTRY_POINT_LABEL_CARD_CLICKS, format="%.0f"),
+        ENTRY_POINT_LABEL_CART_COUNT: st.column_config.NumberColumn(ENTRY_POINT_LABEL_CART_COUNT, format="%.0f"),
+        ENTRY_POINT_LABEL_CART_CONVERSION: st.column_config.NumberColumn(ENTRY_POINT_LABEL_CART_CONVERSION, format="%.2f"),
+        ENTRY_POINT_LABEL_ORDERS: st.column_config.NumberColumn(ENTRY_POINT_LABEL_ORDERS, format="%.0f"),
+        ENTRY_POINT_LABEL_ORDER_CONVERSION: st.column_config.NumberColumn(ENTRY_POINT_LABEL_ORDER_CONVERSION, format="%.2f"),
+    }
+    if ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN in display_df.columns:
+        column_config[ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN] = st.column_config.NumberColumn(
+            ENTRY_POINT_ECONOMICS_ALLOCATED_SPEND_COLUMN,
+            format="%.2f",
+        )
+        column_config[ENTRY_POINT_ECONOMICS_CART_COST_COLUMN] = st.column_config.NumberColumn(
+            ENTRY_POINT_ECONOMICS_CART_COST_COLUMN,
+            format="%.2f",
+        )
+        column_config[ENTRY_POINT_ECONOMICS_CPO_COLUMN] = st.column_config.NumberColumn(
+            ENTRY_POINT_ECONOMICS_CPO_COLUMN,
+            format="%.2f",
+        )
+
     st.dataframe(
         style_entry_point_analytics_table(display_df),
         width="stretch",
         hide_index=True,
         height=720,
-        column_config={
-            "Дата": st.column_config.DateColumn("Дата"),
-            "Артикул WB": st.column_config.NumberColumn("Артикул WB", format="%d"),
-            "Показы": st.column_config.NumberColumn("Показы", format="%.0f"),
-            "Переходы в карточку": st.column_config.NumberColumn("Переходы в карточку", format="%.0f"),
-            "Добавления в корзину": st.column_config.NumberColumn("Добавления в корзину", format="%.0f"),
-            "Конверсия в корзину": st.column_config.NumberColumn("Конверсия в корзину", format="%.2f"),
-            "Заказы": st.column_config.NumberColumn("Заказы", format="%.0f"),
-            "Конверсия в заказ": st.column_config.NumberColumn("Конверсия в заказ", format="%.2f"),
-        },
+        column_config=column_config,
     )
     st.caption(
         "* Если за день менее 50 корзин, конверсия в корзину считается за последние 7 дней и подсвечивается жёлтым цветом. "
-        "Всплески добавлений в корзину относительно среднего по этой группе подсвечиваются красным.*"
+        "Всплески добавлений в корзину относительно среднего по этой группе подсвечиваются красным."
     )
 
 
@@ -9663,11 +9954,15 @@ def render_entry_point_charts(
         return
 
     metadata_df = build_entry_point_metadata(filtered)
+    spend_df = None
+    if detail_level == ENTRY_POINT_DETAIL_COARSE:
+        spend_df = load_entry_point_spend_range_from_db(tuple(selected_dates), tuple(selected_nm_ids), cache_buster=cache_buster)
     display_df = build_entry_point_analytics_table(
         entry_df,
         metadata_df,
         analysis_level=analysis_level,
         detail_level=detail_level,
+        spend_df=spend_df,
     )
     if display_df.empty:
         st.info("После агрегации данных для графиков точки входа не осталось строк.")
@@ -9713,55 +10008,108 @@ def render_entry_point_charts(
     if limit_context.get("message"):
         st.caption(str(limit_context["message"]))
 
-    chart_df = build_entry_point_chart_dataframe(
+    traffic_chart_df = build_entry_point_chart_dataframe(
         display_df,
         analysis_level=analysis_level,
         detail_level=detail_level,
     )
-    if chart_df.empty:
+    economics_chart_df = build_entry_point_economics_chart_dataframe(
+        display_df,
+        analysis_level=analysis_level,
+        detail_level=detail_level,
+    )
+    if traffic_chart_df.empty and economics_chart_df.empty:
         st.info("После подготовки данных графики точки входа не построены: нет отображаемых рядов.")
         return
 
-    st.markdown("### Добавления в корзину по дням")
-    cart_chart = build_entry_point_line_chart(
-        chart_df=chart_df,
-        value_column="cart_count",
-        y_title="Добавления в корзину",
-        tooltip_value_title="Добавления в корзину",
-        value_format=".0f",
-    )
-    if cart_chart is None:
-        st.info("Нет данных для графика добавлений в корзину.")
-    else:
-        st.altair_chart(cart_chart, width="stretch")
+    traffic_tab, economics_tab = st.tabs([ENTRY_POINT_LABEL_TRAFFIC_TAB, ENTRY_POINT_ECONOMICS_TAB_LABEL])
+    with traffic_tab:
+        st.markdown("### Добавления в корзину по дням")
+        cart_series_name_labels = build_entry_point_period_cpo_series_labels(
+            display_df,
+            analysis_level=analysis_level,
+            detail_level=detail_level,
+        )
+        cart_chart_df = traffic_chart_df.copy()
+        if cart_series_name_labels:
+            cart_chart_df["series_name"] = cart_chart_df["series_name"].map(cart_series_name_labels).fillna(cart_chart_df["series_name"])
+        cart_chart = build_entry_point_line_chart(
+            chart_df=cart_chart_df,
+            value_column="cart_count",
+            y_title="Добавления в корзину",
+            tooltip_value_title="Добавления в корзину",
+            value_format=".0f",
+        )
+        if cart_chart is None:
+            st.info("Нет данных для графика добавлений в корзину.")
+        else:
+            st.altair_chart(cart_chart, width="stretch")
 
-    st.markdown("### Конверсия в корзину по дням")
-    cart_conversion_chart = build_entry_point_line_chart(
-        chart_df=chart_df,
-        value_column="cart_conversion",
-        y_title="Конверсия в корзину, %",
-        tooltip_value_title="Конверсия в корзину",
-        value_format=".2f",
-    )
-    if cart_conversion_chart is None:
-        st.info("Нет данных для графика конверсии в корзину.")
-    else:
-        st.altair_chart(cart_conversion_chart, width="stretch")
+        st.markdown("### Конверсия в корзину по дням")
+        cart_conversion_chart = build_entry_point_line_chart(
+            chart_df=traffic_chart_df,
+            value_column="cart_conversion",
+            y_title="Конверсия в корзину, %",
+            tooltip_value_title="Конверсия в корзину",
+            value_format=".2f",
+        )
+        if cart_conversion_chart is None:
+            st.info("Нет данных для графика конверсии в корзину.")
+        else:
+            st.altair_chart(cart_conversion_chart, width="stretch")
 
-    st.markdown("### Конверсия в заказ по дням")
-    order_conversion_chart = build_entry_point_line_chart(
-        chart_df=chart_df,
-        value_column="order_conversion",
-        y_title="Конверсия в заказ, %",
-        tooltip_value_title="Конверсия в заказ",
-        value_format=".2f",
-        threshold=35.0,
-        threshold_label="Порог 35%",
-    )
-    if order_conversion_chart is None:
-        st.info("Нет данных для графика конверсии в заказ.")
-    else:
-        st.altair_chart(order_conversion_chart, width="stretch")
+        st.markdown("### Конверсия в заказ по дням")
+        order_conversion_chart = build_entry_point_line_chart(
+            chart_df=traffic_chart_df,
+            value_column="order_conversion",
+            y_title="Конверсия в заказ, %",
+            tooltip_value_title="Конверсия в заказ",
+            value_format=".2f",
+            threshold=35.0,
+            threshold_label="Порог 35%",
+        )
+        if order_conversion_chart is None:
+            st.info("Нет данных для графика конверсии в заказ.")
+        else:
+            st.altair_chart(order_conversion_chart, width="stretch")
+
+    with economics_tab:
+        if detail_level != ENTRY_POINT_DETAIL_COARSE:
+            st.info("Экономические графики доступны только в режиме Укрупнённо.")
+            return
+        if economics_chart_df.empty:
+            st.info("После подготовки данных графики стоимости корзины и CPO не построены: нет отображаемых рядов.")
+            return
+
+        st.markdown("### Стоимость корзины РК по дням")
+        cart_cost_chart = build_entry_point_line_chart(
+            chart_df=economics_chart_df,
+            value_column="estimated_cost_per_cart",
+            y_title="Стоимость корзины РК, руб.",
+            tooltip_value_title="Стоимость корзины РК, руб.",
+            value_format=".2f",
+            threshold=CHART_THRESHOLD_CART_COST,
+            threshold_label="Порог 35 руб.",
+        )
+        if cart_cost_chart is None:
+            st.info("Нет данных для графика стоимости корзины РК.")
+        else:
+            st.altair_chart(cart_cost_chart, width="stretch")
+
+        st.markdown("### CPO РК по дням")
+        cpo_chart = build_entry_point_line_chart(
+            chart_df=economics_chart_df,
+            value_column="estimated_cpo",
+            y_title="CPO РК, руб.",
+            tooltip_value_title="CPO РК, руб.",
+            value_format=".2f",
+            threshold=CHART_THRESHOLD_CPO,
+            threshold_label="Порог 150 руб.",
+        )
+        if cpo_chart is None:
+            st.info("Нет данных для графика CPO РК.")
+        else:
+            st.altair_chart(cpo_chart, width="stretch")
 
 
 def build_vvbromo_chart(
