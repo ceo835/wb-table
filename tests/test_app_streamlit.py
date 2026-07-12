@@ -6958,3 +6958,90 @@ def test_ozon_spp_cats_donor_mapping(monkeypatch) -> None:
     assert round(float(cats_row["spp_percent"]), 1) == 67.8
 
 
+
+
+def test_build_stock_all_product_level_merges_wb_supply_by_nm_id_and_vendor_fallback() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {"snapshot_date": pd.Timestamp("2026-06-30").date(), "nm_id": 101, "stock_qty": 8, "in_way_to_client": 0, "in_way_from_client": 0},
+            {"snapshot_date": pd.Timestamp("2026-06-30").date(), "nm_id": 202, "stock_qty": 3, "in_way_to_client": 0, "in_way_from_client": 0},
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "query_group": "women_underwear", "supplier_article": "art-101", "title": "Товар 101"},
+            {"nm_id": 202, "query_group": "women_underwear", "supplier_article": "art-202", "title": "Товар 202"},
+        ]
+    )
+    wb_supply_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "vendor_code": "art-101", "barcode": "", "wb_supply_qty": 15},
+            {"nm_id": pd.NA, "vendor_code": "art-202", "barcode": "", "wb_supply_qty": 7},
+        ]
+    )
+
+    result = app_streamlit.build_stock_all_product_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-06-30").date(),
+        wb_supply_df=wb_supply_df,
+    )
+
+    assert result[["nm_id", "wb_supply_qty"]].to_dict(orient="records") == [
+        {"nm_id": 101, "wb_supply_qty": 15.0},
+        {"nm_id": 202, "wb_supply_qty": 7.0},
+    ]
+
+
+def test_build_stock_all_product_level_merges_wb_supply_by_barcode_mapping() -> None:
+    snapshot_df = pd.DataFrame(
+        [
+            {"snapshot_date": pd.Timestamp("2026-06-30").date(), "nm_id": 101, "stock_qty": 8, "in_way_to_client": 0, "in_way_from_client": 0},
+            {"snapshot_date": pd.Timestamp("2026-06-30").date(), "nm_id": 202, "stock_qty": 3, "in_way_to_client": 0, "in_way_from_client": 0},
+        ]
+    )
+    settings_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "query_group": "women_underwear", "supplier_article": "art-101", "title": "Товар 101"},
+            {"nm_id": 202, "query_group": "women_underwear", "supplier_article": "art-202", "title": "Товар 202"},
+        ]
+    )
+    wb_supply_df = pd.DataFrame(
+        [
+            {"nm_id": pd.NA, "vendor_code": "", "barcode": "2036693040908.0", "wb_supply_qty": 60},
+            {"nm_id": pd.NA, "vendor_code": "", "barcode": "2036695956740", "wb_supply_qty": 100},
+        ]
+    )
+    product_size_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "barcode": "2036693040908"},
+            {"nm_id": 101, "barcode": "2036695956740"},
+        ]
+    )
+
+    result = app_streamlit.build_stock_all_product_level(
+        snapshot_df,
+        settings_df,
+        pd.Timestamp("2026-06-30").date(),
+        wb_supply_df=wb_supply_df,
+        product_size_df=product_size_df,
+    )
+
+    row_101 = result.loc[result["nm_id"] == 101].iloc[0]
+    row_202 = result.loc[result["nm_id"] == 202].iloc[0]
+
+    assert row_101["wb_supply_qty"] == 160.0
+    assert pd.isna(row_202["wb_supply_qty"])
+
+
+def test_build_stock_all_band_level_sums_wb_supply_qty() -> None:
+    product_df = pd.DataFrame(
+        [
+            {"query_group": "women_underwear", "band_name": "Трусы женские", "nm_id": 101, "wb_stock_qty": 5, "wb_in_way_to_client": 0, "wb_in_way_from_client": 0, "wb_total_in_contour": 5, "one_c_stock_qty": 1, "wb_supply_qty": 10},
+            {"query_group": "women_underwear", "band_name": "Трусы женские", "nm_id": 202, "wb_stock_qty": 2, "wb_in_way_to_client": 0, "wb_in_way_from_client": 0, "wb_total_in_contour": 2, "one_c_stock_qty": 2, "wb_supply_qty": 3},
+        ]
+    )
+
+    result = app_streamlit.build_stock_all_band_level(product_df)
+
+    assert result.iloc[0]["wb_supply_qty"] == 13
