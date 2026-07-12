@@ -49,6 +49,12 @@ DATABASE_URL = get_env_variable("DATABASE_URL", required=False)
 ALLOW_PROD_DB = get_env_variable("ALLOW_PROD_DB", required=False, default="false")
 PROFIT_PER_ORDER_RUB = int(get_env_variable("PROFIT_PER_ORDER_RUB", required=False, default="100"))
 WB_COMM_REAL_SEND_ENABLED = get_env_variable("WB_COMM_REAL_SEND_ENABLED", required=False, default="false")
+OZON_CLIENT_ID = get_env_variable("OZON_CLIENT_ID", required=False)
+OZON_API_KEY = (
+    get_env_variable("OZON_API_KEY", required=False)
+    or get_env_variable("OZON_API_TOKEN", required=False)
+)
+OZON_COMM_REAL_SEND_ENABLED = get_env_variable("OZON_COMM_REAL_SEND_ENABLED", required=False, default="false")
 
 # Google Sheets (поддержка разных имен переменных)
 # Приоритет: GOOGLE_APPLICATION_CREDENTIALS, затем GOOGLE_CREDENTIALS_FILE
@@ -64,6 +70,7 @@ GOOGLE_SHEET_ID = (
 
 # VVBromo Google Sheet
 GOOGLE_SERVICE_ACCOUNT_JSON = get_env_variable("GOOGLE_SERVICE_ACCOUNT_JSON", required=False)
+WB_SUPPLIES_GOOGLE_DRIVE_FOLDER_ID = get_env_variable("WB_SUPPLIES_GOOGLE_DRIVE_FOLDER_ID", required=False)
 VVBROMO_GOOGLE_SHEET_ID = get_env_variable("VVBROMO_GOOGLE_SHEET_ID", required=False)
 VVBROMO_GOOGLE_SHEET_GID = get_env_variable("VVBROMO_GOOGLE_SHEET_GID", required=False)
 VVBROMO_GOOGLE_SHEET_NAME = get_env_variable("VVBROMO_GOOGLE_SHEET_NAME", required=False)
@@ -96,15 +103,19 @@ class Settings:
         self.data_raw_dir = DATA_RAW_DIR
         self.data_processed_dir = DATA_PROCESSED_DIR
         self.profit_per_order_rub = PROFIT_PER_ORDER_RUB
+        self.ozon_client_id = OZON_CLIENT_ID
+        self.ozon_api_key = OZON_API_KEY
         
         # VVBromo Settings
         self.google_service_account_json = GOOGLE_SERVICE_ACCOUNT_JSON
+        self.wb_supplies_google_drive_folder_id = WB_SUPPLIES_GOOGLE_DRIVE_FOLDER_ID
         self.vvbromo_google_sheet_id = VVBROMO_GOOGLE_SHEET_ID
         self.vvbromo_google_sheet_gid = VVBROMO_GOOGLE_SHEET_GID
         self.vvbromo_google_sheet_name = VVBROMO_GOOGLE_SHEET_NAME
         self.vvbromo_google_sheet_range = VVBROMO_GOOGLE_SHEET_RANGE
         self.vvbromo_google_sheet_enabled = VVBROMO_GOOGLE_SHEET_ENABLED.lower() in {"1", "true", "yes", "on"}
         self.wb_comm_real_send_enabled = WB_COMM_REAL_SEND_ENABLED.lower() in {"1", "true", "yes", "on"}
+        self.ozon_comm_real_send_enabled = OZON_COMM_REAL_SEND_ENABLED.lower() in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

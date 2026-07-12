@@ -6,6 +6,7 @@
 """
 import os
 import sys
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -13,7 +14,7 @@ from typing import Any, Dict, List, Optional
 src_path = Path(__file__).parent.parent
 sys.path.insert(0, str(src_path))
 
-from config.settings import GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_SHEET_ID
+from config.settings import GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SHEET_ID
 from utils.logger import get_logger
 
 
@@ -24,6 +25,7 @@ class GoogleSheetsClient:
         self,
         credentials_path: str = None,
         spreadsheet_id: str = None,
+        scopes: Optional[List[str]] = None,
     ):
         """
         Инициализировать клиент.
@@ -35,6 +37,10 @@ class GoogleSheetsClient:
         self.logger = get_logger("google_sheets_client")
         self.credentials_path = credentials_path or GOOGLE_APPLICATION_CREDENTIALS
         self.spreadsheet_id = spreadsheet_id or GOOGLE_SHEET_ID
+        self.scopes = scopes or [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
         self._service = None
         self._credentials = None
 
@@ -44,26 +50,29 @@ class GoogleSheetsClient:
             try:
                 from google.oauth2 import service_account
                 from googleapiclient.discovery import build
-                
-                SCOPES = [
-                    "https://www.googleapis.com/auth/spreadsheets",
-                    "https://www.googleapis.com/auth/drive",
-                ]
-                
+
                 creds_path = Path(self.credentials_path) if self.credentials_path else None
-                
-                if not creds_path or not creds_path.exists():
+
+                if GOOGLE_SERVICE_ACCOUNT_JSON:
+                    info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+                    self._credentials = service_account.Credentials.from_service_account_info(
+                        info,
+                        scopes=self.scopes,
+                    )
+                elif creds_path and creds_path.exists():
+                    self._credentials = service_account.Credentials.from_service_account_file(
+                        str(creds_path),
+                        scopes=self.scopes,
+                    )
+                else:
                     self.logger.warning(
-                        f"Credentials file not found: {self.credentials_path}. "
+                        "Google service account credentials not found. "
                         "Google Sheets functionality will be limited."
                     )
                     return None
-                
-                self._credentials = service_account.Credentials.from_service_account_file(
-                    str(creds_path), scopes=SCOPES
-                )
+
                 self._service = build("sheets", "v4", credentials=self._credentials)
-                
+
             except ImportError:
                 self.logger.warning(
                     "Google API libraries not installed. "

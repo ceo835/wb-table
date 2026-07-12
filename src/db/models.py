@@ -1131,6 +1131,56 @@ class FactWbSellerPriceSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class WbSupplySourceFile(Base):
+    __tablename__ = "wb_supply_source_files"
+    __table_args__ = (
+        UniqueConstraint("google_file_id", name="uq_wb_supply_source_files_google_file_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    google_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    google_file_name: Mapped[str] = mapped_column(Text, nullable=False)
+    google_modified_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    detected_warehouse: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    raw_rows_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parsed_rows_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class WbSupplyRow(Base):
+    __tablename__ = "wb_supply_rows"
+    __table_args__ = (
+        UniqueConstraint("google_file_id", "sheet_name", "row_number", name="uq_wb_supply_rows_file_sheet_row"),
+        Index("idx_wb_supply_rows_nm_id", "nm_id"),
+        Index("idx_wb_supply_rows_barcode", "barcode"),
+        Index("idx_wb_supply_rows_vendor_code", "vendor_code"),
+        Index("idx_wb_supply_rows_file", "google_file_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    google_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    google_file_name: Mapped[str] = mapped_column(Text, nullable=False)
+    sheet_name: Mapped[str] = mapped_column(Text, nullable=False)
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    warehouse_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    nm_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    barcode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vendor_code: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    product_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supply_quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    row_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+
 class FactIvanStockSheetDay(Base, TimestampMixin):
     __tablename__ = "fact_ivan_stock_sheet_day"
     __table_args__ = (
