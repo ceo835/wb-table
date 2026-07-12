@@ -10739,8 +10739,8 @@ def render_ad_campaign_product_tab(
 
 
 def main() -> None:
-    st.set_page_config(page_title="VVBromo MP Control Center", layout="wide")
-    st.title("VVBromo MP Control Center")
+    st.set_page_config(page_title="MP Control Center", layout="wide")
+    st.title("MP Control Center")
     st.caption("Остатки, реклама, цены, поставки и коммуникации")
     initialize_background_services()
     render_password_gate()
