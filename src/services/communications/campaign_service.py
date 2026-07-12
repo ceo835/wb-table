@@ -120,7 +120,12 @@ class CampaignService:
             raise ValueError(f"Campaign {campaign_id} not found")
 
         # Проверяем разрешение реальной отправки в окружении (строгое И/AND)
-        is_real_send_allowed = settings.wb_comm_real_send_enabled and bool(settings.wb_token)
+        if campaign.marketplace == "wb":
+            is_real_send_allowed = settings.wb_comm_real_send_enabled and bool(settings.wb_token)
+        elif campaign.marketplace == "ozon":
+            is_real_send_allowed = settings.ozon_comm_real_send_enabled and bool(settings.ozon_client_id and settings.ozon_api_key)
+        else:
+            raise ValueError(f"Unknown marketplace: {campaign.marketplace}")
         is_simulation = dry_run or not is_real_send_allowed
 
         logger.info(

@@ -1,0 +1,273 @@
+from __future__ import annotations
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+
+from src.config.settings import settings
+from src.db.base import Base
+from src.db.communications_models import CampaignRecipient, ChatRegistry
+from src.services.communications.campaign_service import CampaignService
+from src.services.communications.providers import OzonChatProvider
+
+
+class FakeOzonChatsClient:
+    def __init__(self) -> None:
+        self.last_known_good_result = {"status_code": 200}
+        self.last_chat_list_result = None
+        self.last_history_results = []
+
+    def validate_known_good_access(self):
+        return {
+            "operation": "known_good_readonly_check",
+            "endpoint": "/v3/product/list",
+            "status_code": 200,
+            "elapsed_ms": 10,
+            "payload_sent": {"filter": {"visibility": "ALL"}, "limit": 1, "last_id": ""},
+            "payload": {"result": {"items": [{"offer_id": "x"}], "last_id": ""}},
+            "response_top_level_type": "object",
+            "response_top_level_keys": ["result"],
+            "item_count": 1,
+            "pagination": {"keys_found": ["result.last_id"], "values": {"result.last_id": ""}, "has_pagination_signals": True},
+            "rate_limit_headers": {},
+            "error": "",
+            "is_success": True,
+            "is_role_error": False,
+            "is_not_found": False,
+            "is_bad_request": False,
+            "is_auth_error": False,
+        }
+
+    def list_chats(self):
+        result = {
+            "operation": "chat_list",
+            "endpoint": "/v3/chat/list",
+            "attempts": [
+                {
+                    "operation": "chat_list",
+                    "endpoint": "/v3/chat/list",
+                    "status_code": 200,
+                    "elapsed_ms": 15,
+                    "payload_sent": {"limit": 100},
+                    "payload": {
+                        "chats": [
+                            {
+                                "chat": {
+                                    "chat_id": "oz-1",
+                                    "chat_status": "Opened",
+                                    "created_at": "2026-07-01T10:00:00Z",
+                                },
+                                "sku": 501,
+                                "updated_at": "2026-07-10T10:00:00Z",
+                                "senderType": "buyer",
+                                "can_reply": True,
+                                "posting_number": "P-1",
+                            },
+                            {
+                                "chat": {
+                                    "chat_id": "oz-2",
+                                    "chat_status": "Closed",
+                                    "created_at": "2026-07-02T10:00:00Z",
+                                },
+                                "product_id": 777,
+                                "updated_at": "2026-07-11T10:00:00Z",
+                                "senderType": "seller",
+                            },
+                        ]
+                    },
+                    "response_top_level_type": "object",
+                    "response_top_level_keys": ["chats"],
+                    "item_count": 2,
+                    "pagination": {"keys_found": [], "values": {}, "has_pagination_signals": False},
+                    "rate_limit_headers": {},
+                    "error": "",
+                    "is_success": True,
+                    "is_role_error": False,
+                    "is_not_found": False,
+                    "is_bad_request": False,
+                    "is_auth_error": False,
+                }
+            ],
+        }
+        result["result"] = result["attempts"][0]
+        self.last_chat_list_result = result
+        return result
+
+    def get_chat_history(self, chat_id: str):
+        payload = {
+            "result": {
+                "messages": [
+                    {
+                        "chat_id": chat_id,
+                        "product_id": 501 if chat_id == "oz-1" else 777,
+                        "created_at": "2026-07-01T09:00:00Z" if chat_id == "oz-1" else "2026-07-02T09:00:00Z",
+                        "updated_at": "2026-07-10T11:00:00Z" if chat_id == "oz-1" else "2026-07-11T11:00:00Z",
+                        "senderType": "seller" if chat_id == "oz-1" else "buyer",
+                    }
+                ]
+            }
+        }
+        result = {
+            "operation": "chat_history",
+            "endpoint": "/v1/chat/history",
+            "attempts": [
+                {
+                    "operation": "chat_history",
+                    "endpoint": "/v1/chat/history",
+                    "status_code": 200,
+                    "elapsed_ms": 12,
+                    "payload_sent": {"chat_id": chat_id},
+                    "payload": payload,
+                    "response_top_level_type": "object",
+                    "response_top_level_keys": ["result"],
+                    "item_count": 1,
+                    "pagination": {"keys_found": [], "values": {}, "has_pagination_signals": False},
+                    "rate_limit_headers": {},
+                    "error": "",
+                    "is_success": True,
+                    "is_role_error": False,
+                    "is_not_found": False,
+                    "is_bad_request": False,
+                    "is_auth_error": False,
+                }
+            ],
+        }
+        result["result"] = result["attempts"][0]
+        self.last_history_results.append(result)
+        return result
+
+
+@pytest.fixture
+def db_session():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, future=True)
+    session = Session()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def test_build_ozon_chat_registry_from_provider(db_session, monkeypatch):
+    fake_client = FakeOzonChatsClient()
+    monkeypatch.setattr("src.services.communications.providers.OzonChatsClient", lambda **kwargs: fake_client)
+
+    provider = OzonChatProvider(client_id="cid", api_key="key")
+    count = provider.build_chat_registry(db_session, max_event_pages=5)
+    db_session.commit()
+
+    assert count == 2
+    rows = list(db_session.scalars(select(ChatRegistry).where(ChatRegistry.marketplace == "ozon").order_by(ChatRegistry.chat_id)).all())
+    assert [row.chat_id for row in rows] == ["oz-1", "oz-2"]
+    assert rows[0].product_ids == [501]
+    assert rows[0].current_chat_exists is True
+    assert rows[0].source == "v3_chat_list"
+    assert rows[1].product_ids == [777]
+    assert provider.last_sync_diagnostics["known_good_status_code"] == 200
+    assert provider.last_sync_diagnostics["chat_list_status_code"] == 200
+    assert provider.last_sync_diagnostics["fetched_chats_count"] == 2
+    assert provider.last_sync_diagnostics["prepared_records_count"] == 2
+    assert provider.last_sync_diagnostics["committed"] is False
+    assert provider.last_sync_diagnostics["chat_registry_count_ozon"] == 2
+    assert provider.last_sync_diagnostics["chats_with_order_linkage"] == 1
+    assert provider.last_sync_diagnostics["reply_capable_chat_count"] == 1
+    assert provider.last_sync_diagnostics["history_status"] == 200
+    assert provider.last_sync_diagnostics["history_confirmed"] is True
+    assert provider.last_sync_diagnostics["skipped_history"] is False
+    assert provider.last_sync_diagnostics["used_chat_list_probe"] == "POST /v3/chat/list"
+    assert provider.last_sync_diagnostics["used_chat_events_probe"] == "POST /v1/chat/history"
+
+
+def test_ozon_campaign_send_stays_simulation_when_flag_disabled(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "wb_comm_real_send_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "wb_token", "wb-token", raising=False)
+    monkeypatch.setattr(settings, "ozon_comm_real_send_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "ozon_client_id", "cid", raising=False)
+    monkeypatch.setattr(settings, "ozon_api_key", "key", raising=False)
+
+    monkeypatch.setattr(
+        "src.services.communications.providers.OzonChatProvider.send_message",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("real send should not be called")),
+    )
+
+    campaign = CampaignService.create_campaign(
+        session=db_session,
+        marketplace="ozon",
+        campaign_type="custom",
+        name="Ozon test",
+        message_text="hello",
+    )
+    db_session.commit()
+
+    recipient = CampaignRecipient(
+        campaign_id=campaign.id,
+        marketplace="ozon",
+        chat_id="oz-1",
+        recipient_status="ready",
+        selected=True,
+    )
+    db_session.add(recipient)
+    db_session.commit()
+
+    result = CampaignService.send_campaign_messages(
+        session=db_session,
+        campaign_id=campaign.id,
+        recipient_ids=[recipient.id],
+        dry_run=False,
+        batch_limit=10,
+    )
+    db_session.commit()
+
+    assert result["is_simulation"] is True
+    assert result["processed_count"] == 1
+    assert result["sent_count"] == 1
+    assert recipient.recipient_status == "sent"
+
+
+def test_build_ozon_chat_registry_keeps_sync_when_history_is_404(db_session, monkeypatch):
+    class FakeOzon404HistoryClient(FakeOzonChatsClient):
+        def get_chat_history(self, chat_id: str):
+            result = {
+                "operation": "chat_history",
+                "endpoint": "/v1/chat/history",
+                "attempts": [
+                    {
+                        "operation": "chat_history",
+                        "endpoint": "/v1/chat/history",
+                        "status_code": 404,
+                        "elapsed_ms": 12,
+                        "payload_sent": {"chat_id": chat_id},
+                        "payload": {"message": "404 page not found"},
+                        "response_top_level_type": "object",
+                        "response_top_level_keys": ["message"],
+                        "item_count": 0,
+                        "pagination": {"keys_found": [], "values": {}, "has_pagination_signals": False},
+                        "rate_limit_headers": {},
+                        "error": "404 page not found",
+                        "is_success": False,
+                        "is_role_error": False,
+                        "is_not_found": True,
+                        "is_bad_request": False,
+                        "is_auth_error": False,
+                    }
+                ],
+            }
+            result["result"] = result["attempts"][0]
+            self.last_history_results.append(result)
+            return result
+
+    fake_client = FakeOzon404HistoryClient()
+    monkeypatch.setattr("src.services.communications.providers.OzonChatsClient", lambda **kwargs: fake_client)
+
+    provider = OzonChatProvider(client_id="cid", api_key="key")
+    count = provider.build_chat_registry(db_session, max_event_pages=5)
+    db_session.commit()
+
+    rows = list(db_session.scalars(select(ChatRegistry).where(ChatRegistry.marketplace == "ozon")).all())
+    assert count == 2
+    assert len(rows) == 2
+    assert provider.last_sync_diagnostics["history_status"] == 404
+    assert provider.last_sync_diagnostics["history_confirmed"] is False
+    assert provider.last_sync_diagnostics["skipped_history"] is True
+    assert provider.last_sync_diagnostics["prepared_records_count"] == 2

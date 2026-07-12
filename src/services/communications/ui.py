@@ -6,12 +6,13 @@ from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 from src.config.settings import settings
-from sqlalchemy import select
+from sqlalchemy import func, select
 from src.db.session import session_scope
 from src.db.communications_models import Campaign, ChatRegistry, CampaignRecipient, SendLog
 from src.services.communications.campaign_service import CampaignService
 from src.services.communications.audience_service import AudienceService
-from src.services.communications.providers import WBChatProvider
+from src.services.communications.providers import OzonChatProvider, WBChatProvider
+from src.utils.logger import get_logger
 
 
 def render_communications_tab() -> None:
@@ -25,6 +26,7 @@ def render_communications_tab() -> None:
         st.warning("🟡 **Режим симуляции по умолчанию** (`WB_COMM_REAL_SEND_ENABLED=false`). Все рассылки будут выполняться в режиме симуляции (Dry-run).")
 
     # Разделение по маркетплейсам
+    st.info("Реальная отправка Ozon отключена (`OZON_COMM_REAL_SEND_ENABLED=false`). В техническом разделе доступны только safe read-only проверки и sync реестра.")
     tab_wb, tab_ozon = st.tabs(["Wildberries", "Ozon"])
     
     with tab_wb:
@@ -42,17 +44,23 @@ def render_communications_tab() -> None:
             elif wb_sub_tab == "Реестр WB-чатов":
                 render_chats_registry_subtab(session)
             elif wb_sub_tab == "История отправок WB":
-                render_history_subtab(session)
+                render_history_subtab(session, marketplace="wb")
 
     with tab_ozon:
-        st.info("ℹ️ **Ozon-коммуникации будут добавлены позже после аудита API**")
-        st.radio(
-            "Раздел Ozon (в разработке):",
-            options=["Кампании Ozon", "Реестр Ozon-чатов", "История отправок Ozon"],
+        ozon_sub_tab = st.radio(
+            "Раздел Ozon:",
+            options=["Диагностика Ozon", "Реестр Ozon-чатов", "История отправок Ozon"],
             horizontal=True,
-            disabled=True,
             key="comm_ozon_sub_tab"
         )
+        st.write("---")
+        with session_scope() as session:
+            if ozon_sub_tab == "Диагностика Ozon":
+                render_ozon_diagnostics_subtab(session)
+            elif ozon_sub_tab == "Реестр Ozon-чатов":
+                render_ozon_registry_subtab(session)
+            elif ozon_sub_tab == "История отправок Ozon":
+                render_history_subtab(session, marketplace="ozon")
 
 
 def render_campaigns_subtab(session) -> None:
@@ -445,82 +453,259 @@ def render_audience_and_send_block(session, campaign: Campaign) -> None:
             st.rerun()
 
 
+def _format_chat_dt(value: Optional[datetime]) -> str:
+    return value.strftime("%Y-%m-%d %H:%M") if value else "-"
+
+
 def render_chats_registry_subtab(session) -> None:
     st.subheader("Реестр чатов Wildberries")
-    st.write("Сводная информация по чатам, найденным через `/seller/events` (история) и `/seller/chats` (актуальные).")
+    st.write("Сводная информация по чатам, найденным через `/seller/events` и `/seller/chats`.")
 
     if st.button("🔄 Синхронизировать реестр из API", type="primary"):
         with st.spinner("Загрузка данных из Wildberries..."):
             try:
-                from sqlalchemy import func
-                from src.utils.logger import get_logger
-                ui_logger = get_logger("communications_ui")
-                
                 provider = WBChatProvider()
                 prepared_count = provider.build_chat_registry(session, max_event_pages=10)
-                
-                # Явно коммитим сессию
                 session.commit()
-                committed = True
-                
-                # Получаем диагностические данные
-                total_count = session.scalar(select(func.count()).select_from(ChatRegistry))
-                wb_count = session.scalar(select(func.count()).select_from(ChatRegistry).where(ChatRegistry.marketplace == "wb"))
-                marketplaces = list(session.scalars(select(ChatRegistry.marketplace).distinct()).all())
-                
-                min_act = session.scalar(select(func.min(ChatRegistry.last_activity_at)))
-                max_act = session.scalar(select(func.max(ChatRegistry.last_activity_at)))
-                
-                ui_logger.info(
-                    f"Sync diagnostics:\n"
-                    f"- prepared records count: {prepared_count}\n"
-                    f"- committed: {committed}\n"
-                    f"- ChatRegistry total count after commit: {total_count}\n"
-                    f"- ChatRegistry count for marketplace='wb': {wb_count}\n"
-                    f"- distinct marketplace values: {marketplaces}\n"
-                    f"- min/max last_activity_at: {min_act} / {max_act}"
-                )
-                
-                st.success(f"Синхронизация завершена. Добавлено/обновлено: {prepared_count} записей. Всего в реестре чатов WB: {wb_count} (всего в БД: {total_count}).")
-                st.rerun()
-            except Exception as e:
-                import logging
-                logging.getLogger("communications_ui").error(f"Error during registry sync: {e}", exc_info=True)
-                st.error(f"Ошибка при синхронизации чатов: {e}")
 
-    stmt = select(ChatRegistry).order_by(ChatRegistry.last_activity_at.desc())
+                total_count = session.scalar(select(func.count()).select_from(ChatRegistry))
+                wb_count = session.scalar(
+                    select(func.count()).select_from(ChatRegistry).where(ChatRegistry.marketplace == "wb")
+                )
+                marketplaces = list(session.scalars(select(ChatRegistry.marketplace).distinct()).all())
+                min_act = session.scalar(
+                    select(func.min(ChatRegistry.last_activity_at)).where(ChatRegistry.marketplace == "wb")
+                )
+                max_act = session.scalar(
+                    select(func.max(ChatRegistry.last_activity_at)).where(ChatRegistry.marketplace == "wb")
+                )
+
+                get_logger("communications_ui").info(
+                    "WB chat registry sync diagnostics: "
+                    f"prepared={prepared_count}, committed=True, total={total_count}, wb={wb_count}, "
+                    f"marketplaces={marketplaces}, min_last_activity_at={min_act}, max_last_activity_at={max_act}"
+                )
+                st.success(
+                    f"Синхронизация WB завершена. Подготовлено/обновлено: {prepared_count}. Чатов WB в реестре: {wb_count}."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Ошибка при sync WB-реестра: {exc}")
+
+    stmt = select(ChatRegistry).where(ChatRegistry.marketplace == "wb").order_by(ChatRegistry.last_activity_at.desc())
     chats = list(session.scalars(stmt).all())
-    
     if not chats:
-        st.info("Реестр чатов пока пуст. Выполните синхронизацию.")
+        st.info("WB-реестр пока пуст. Выполните синхронизацию из API.")
         return
 
-    chat_rows = []
-    for c in chats:
-        chat_rows.append({
-            "Chat ID": c.chat_id,
-            "Товары (nmIDs)": ", ".join(map(str, c.product_ids or [])),
-            "Последний отправитель": c.last_sender or "—",
-            "Есть в seller/chats": "Да" if c.current_chat_exists else "Нет",
-            "replySign": "Есть" if c.reply_sign else "Нет",
-            "Первое событие": c.first_activity_at.strftime("%Y-%m-%d %H:%M") if c.first_activity_at else "—",
-            "Последнее событие": c.last_activity_at.strftime("%Y-%m-%d %H:%M") if c.last_activity_at else "—",
-        })
-
+    chat_rows = [
+        {
+            "Chat ID": chat.chat_id,
+            "Product IDs": ", ".join(map(str, chat.product_ids or [])),
+            "Reply sign": chat.reply_sign or "-",
+            "First activity": _format_chat_dt(chat.first_activity_at),
+            "Last activity": _format_chat_dt(chat.last_activity_at),
+            "Source": chat.source or "-",
+        }
+        for chat in chats
+    ]
     df_chats = pd.DataFrame(chat_rows)
     df_chats.attrs.clear()
     st.dataframe(df_chats, width="stretch", hide_index=True)
 
 
-def render_history_subtab(session) -> None:
-    st.subheader("История отправок WB")
-    st.write("История отправленных сообщений по кампаниям WB.")
+def render_ozon_diagnostics_subtab(session) -> None:
+    st.subheader("Диагностика Ozon")
+    st.info("Раздел Ozon работает только в техническом read-only режиме.")
+    st.caption("Chat API доступен: `POST /v3/chat/list` OK. History endpoint: not confirmed, `POST /v1/chat/history` returned 404. Реальная отправка Ozon отключена.")
 
-    stmt = select(SendLog).order_by(SendLog.sent_at.desc())
+    col_actions = st.columns(2)
+    if col_actions[0].button("Проверить доступ Ozon Chat API", type="primary"):
+        with st.spinner("Проверка Ozon Chat API..."):
+            try:
+                provider = OzonChatProvider()
+                st.session_state["comm_ozon_api_diag"] = provider.client.probe_readonly_access()
+                st.success("Диагностика Ozon Chat API обновлена.")
+            except Exception as exc:
+                st.error(f"Ошибка при проверке Ozon Chat API: {exc}")
+
+    if col_actions[1].button("Синхронизировать реестр Ozon-чатов"):
+        with st.spinner("Синхронизация Ozon read-only реестра..."):
+            try:
+                provider = OzonChatProvider()
+                prepared_count = provider.build_chat_registry(session, max_event_pages=3)
+                session.commit()
+
+                total_count = session.scalar(select(func.count()).select_from(ChatRegistry))
+                ozon_count = session.scalar(
+                    select(func.count()).select_from(ChatRegistry).where(ChatRegistry.marketplace == "ozon")
+                )
+                marketplaces = list(session.scalars(select(ChatRegistry.marketplace).distinct()).all())
+                min_act = session.scalar(
+                    select(func.min(ChatRegistry.last_activity_at)).where(ChatRegistry.marketplace == "ozon")
+                )
+                max_act = session.scalar(
+                    select(func.max(ChatRegistry.last_activity_at)).where(ChatRegistry.marketplace == "ozon")
+                )
+
+                sync_diag = dict(provider.last_sync_diagnostics)
+                sync_diag.update(
+                    {
+                        "committed": True,
+                        "ChatRegistry total count after commit": total_count,
+                        "ChatRegistry count for marketplace='ozon'": ozon_count,
+                        "distinct marketplace values": marketplaces,
+                        "min last_activity_at": str(min_act) if min_act else None,
+                        "max last_activity_at": str(max_act) if max_act else None,
+                    }
+                )
+                st.session_state["comm_ozon_sync_diag"] = sync_diag
+
+                get_logger("communications_ui").info(
+                    "Ozon sync diagnostics: "
+                    f"prepared={prepared_count}, committed=True, total={total_count}, ozon={ozon_count}, "
+                    f"marketplaces={marketplaces}, min_last_activity_at={min_act}, max_last_activity_at={max_act}, "
+                    f"known_good_status={sync_diag.get('known_good_status_code')}, "
+                    f"chat_list_status={sync_diag.get('chat_list_status_code')}, "
+                    f"history_status={sync_diag.get('history_status')}, "
+                    f"history_confirmed={sync_diag.get('history_confirmed')}, "
+                    f"skipped_history={sync_diag.get('skipped_history')}"
+                )
+                st.success(
+                    f"Read-only sync завершён. Подготовлено/обновлено: {prepared_count}. Чатов Ozon в реестре: {ozon_count}."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Ошибка при sync Ozon-реестра: {exc}")
+
+    diag = st.session_state.get("comm_ozon_api_diag")
+    if diag:
+        known_good = diag.get("known_good", {})
+        chat_list_summary = diag.get("chat_list", {})
+        chat_list_result = chat_list_summary.get("result", {})
+        history_results = diag.get("chat_history", [])
+        first_history_result = history_results[0].get("result", {}) if history_results else {}
+
+        status_rows = [
+            {"metric": "Client ID найден", "value": "Да" if diag.get("credentials", {}).get("client_id_present") else "Нет"},
+            {"metric": "API Key найден", "value": "Да" if diag.get("credentials", {}).get("api_key_present") else "Нет"},
+            {"metric": "Known-good endpoint", "value": f"status {known_good.get('status_code')}"},
+            {
+                "metric": "Chat API доступен",
+                "value": "POST /v3/chat/list OK" if chat_list_result.get("status_code") == 200 else f"status {chat_list_result.get('status_code')}",
+            },
+            {"metric": "Найдено чатов", "value": diag.get("chat_count", 0)},
+            {
+                "metric": "History endpoint",
+                "value": "not confirmed, POST /v1/chat/history returned 404" if first_history_result.get("status_code") == 404 else (f"status {first_history_result.get('status_code')}" if history_results else "не вызывался"),
+            },
+        ]
+        st.write("#### Статус credentials и API")
+        st.dataframe(pd.DataFrame(status_rows), width="stretch", hide_index=True)
+        if first_history_result.get("status_code") == 404:
+            st.warning("History endpoint: not confirmed, `POST /v1/chat/history` returned 404. Sync из `POST /v3/chat/list` это не ломает.")
+
+        probe_rows = [
+            {
+                "Operation": known_good.get("operation"),
+                "Endpoint": known_good.get("endpoint"),
+                "Status": known_good.get("status_code") or "ERR",
+                "Items": known_good.get("item_count") if known_good.get("item_count") is not None else "-",
+                "Payload": str(known_good.get("payload_sent")),
+                "Error": known_good.get("error") or "-",
+            }
+        ]
+        for attempt in chat_list_summary.get("attempts", []):
+            probe_rows.append(
+                {
+                    "Operation": attempt.get("operation"),
+                    "Endpoint": attempt.get("endpoint"),
+                    "Status": attempt.get("status_code") or "ERR",
+                    "Items": attempt.get("item_count") if attempt.get("item_count") is not None else "-",
+                    "Payload": str(attempt.get("payload_sent")),
+                    "Error": attempt.get("error") or "-",
+                }
+            )
+        for history_summary in history_results:
+            for attempt in history_summary.get("attempts", []):
+                probe_rows.append(
+                    {
+                        "Operation": attempt.get("operation"),
+                        "Endpoint": attempt.get("endpoint"),
+                        "Status": attempt.get("status_code") or "ERR",
+                        "Items": attempt.get("item_count") if attempt.get("item_count") is not None else "-",
+                        "Payload": str(attempt.get("payload_sent")),
+                        "Error": attempt.get("error") or "-",
+                    }
+                )
+        st.write("#### Диагностика confirmed methods")
+        st.dataframe(pd.DataFrame(probe_rows), width="stretch", hide_index=True)
+
+    sync_diag = st.session_state.get("comm_ozon_sync_diag")
+    if sync_diag:
+        st.write("#### Диагностика последнего sync")
+        sync_df = pd.DataFrame([{"metric": key, "value": value} for key, value in sync_diag.items()])
+        st.dataframe(sync_df, width="stretch", hide_index=True)
+        if sync_diag.get("history_status") == 404:
+            st.warning("History endpoint: not confirmed, `POST /v1/chat/history` returned 404. Enrichment из этого endpoint пропущен.")
+
+    ozon_registry_count = session.scalar(
+        select(func.count()).select_from(ChatRegistry).where(ChatRegistry.marketplace == "ozon")
+    )
+    st.write("#### Текущий статус реестра")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"metric": "Ozon registry records", "value": ozon_registry_count or 0},
+                {"metric": "Реальная отправка Ozon", "value": "отключена"},
+                {"metric": "Запрещённые методы", "value": "start/send/read/file не вызываются"},
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
+
+
+def render_ozon_registry_subtab(session) -> None:
+    st.subheader("Реестр Ozon-чатов")
+    st.caption("Реестр строится из `POST /v3/chat/list`. History endpoint: not confirmed, `POST /v1/chat/history` returned 404, но sync не считается проваленным.")
+
+    stmt = select(ChatRegistry).where(ChatRegistry.marketplace == "ozon").order_by(ChatRegistry.last_activity_at.desc())
+    chats = list(session.scalars(stmt).all())
+    if not chats:
+        st.info("Ozon-реестр пока пуст. Сначала выполните проверку доступа Ozon Chat API, затем sync реестра.")
+        st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
+        return
+
+    chat_rows = [
+        {
+            "Chat ID": chat.chat_id,
+            "Product IDs": ", ".join(map(str, chat.product_ids or [])),
+            "Last sender": chat.last_sender or "-",
+            "First activity": _format_chat_dt(chat.first_activity_at),
+            "Last activity": _format_chat_dt(chat.last_activity_at),
+            "Current chat exists": "Да" if chat.current_chat_exists else "Нет",
+            "Source": chat.source or "-",
+        }
+        for chat in chats
+    ]
+    df_chats = pd.DataFrame(chat_rows)
+    df_chats.attrs.clear()
+    st.dataframe(df_chats, width="stretch", hide_index=True)
+    st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
+
+
+def render_history_subtab(session, marketplace: str = "wb") -> None:
+    title = "История отправок WB" if marketplace == "wb" else "История отправок Ozon"
+    st.subheader(title)
+    st.write(f"История отправок по маркетплейсу `{marketplace}`.")
+
+    stmt = select(SendLog).where(SendLog.marketplace == marketplace).order_by(SendLog.sent_at.desc())
     logs = list(session.scalars(stmt).all())
 
     if not logs:
-        st.info("Сообщения еще не отправлялись.")
+        st.info("Сообщения по этому маркетплейсу еще не отправлялись.")
         return
 
     log_rows = []
@@ -531,7 +716,7 @@ def render_history_subtab(session) -> None:
             "Чат ID": l.chat_id,
             "Текст сообщения": l.message_text,
             "Статус": l.send_status.upper(),
-            "Ошибка API": l.error_message or "—",
+            "Ошибка API": l.error_message or "-",
         })
 
     df_logs = pd.DataFrame(log_rows)
