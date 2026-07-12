@@ -10581,9 +10581,9 @@ def render_ad_campaign_product_tab(
 
 
 def main() -> None:
-    st.set_page_config(page_title="WB ИТОГО", layout="wide")
-    st.title("WB ИТОГО")
-    st.caption("Витрина по товарам на основе mart_total_report v2")
+    st.set_page_config(page_title="VVBromo MP Control Center", layout="wide")
+    st.title("VVBromo MP Control Center")
+    st.caption("Остатки, реклама, цены, поставки и коммуникации")
     initialize_background_services()
     render_password_gate()
     if st.button("Обновить данные из источника", width="content"):
