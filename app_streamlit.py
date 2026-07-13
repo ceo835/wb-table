@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from html import escape
 from io import BytesIO
@@ -6722,13 +6723,65 @@ def _sanitize_numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(replaced, errors="coerce")
 
 
+def _sanitize_streamlit_object_cell(
+    value: object,
+    *,
+    force_object_strings: bool = False,
+) -> object:
+    if isinstance(value, Decimal):
+        value = float(value)
+
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return bytes(value).decode("utf-8")
+        except UnicodeDecodeError:
+            return bytes(value).decode("utf-8", errors="replace")
+
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+
+    if isinstance(value, (pd.DataFrame, pd.Series)) or isinstance(value, complex):
+        return str(value)
+
+    if value is None:
+        return ""
+
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+
+    if force_object_strings:
+        return str(value)
+
+    return value
+
+
+
+def _sanitize_object_series_for_streamlit_display(
+    series: pd.Series,
+    *,
+    force_object_strings: bool = False,
+) -> pd.Series:
+    sanitized_values = [
+        _sanitize_streamlit_object_cell(value, force_object_strings=force_object_strings)
+        for value in series.tolist()
+    ]
+    return pd.Series(sanitized_values, index=series.index, dtype=object)
+
+
+
 def sanitize_dataframe_for_streamlit_display(
     df: pd.DataFrame,
     *,
     numeric_columns: set[str] | None = None,
+    force_object_strings: bool = False,
 ) -> pd.DataFrame:
-    safe_df = df.copy()
+    safe_df = df.copy(deep=True)
     safe_df.attrs.clear()
+    safe_df.columns = pd.Index([str(column_name) for column_name in safe_df.columns], dtype=object)
+    safe_df.index = pd.RangeIndex(len(safe_df))
     numeric_columns = numeric_columns or set()
 
     for column_name in safe_df.columns:
@@ -6743,7 +6796,45 @@ def sanitize_dataframe_for_streamlit_display(
     if "Поставки на WB" in safe_df.columns:
         safe_df["Поставки на WB"] = _normalize_nullable_int_display_series(safe_df["Поставки на WB"])
 
+    for column_name in safe_df.columns:
+        if column_name in numeric_columns:
+            continue
+        series = safe_df[column_name]
+        if (
+            series.dtype == object
+            or pd.api.types.is_string_dtype(series.dtype)
+            or str(series.dtype).startswith("string[")
+        ):
+            safe_df[column_name] = _sanitize_object_series_for_streamlit_display(
+                series,
+                force_object_strings=force_object_strings,
+            )
+
     return safe_df
+
+
+
+def _get_streamlit_display_numeric_columns() -> set[str]:
+    return set(NUMERIC_COLUMNS) | DISPLAY_DELTA_COLUMNS_HIGHER_IS_BETTER | DISPLAY_DELTA_COLUMNS_LOWER_IS_BETTER | {
+        "technical_ad_campaign_spend_total",
+    }
+
+
+
+def safe_st_dataframe(
+    df: pd.DataFrame,
+    *,
+    numeric_columns: set[str] | None = None,
+    force_object_strings: bool = False,
+    **kwargs: Any,
+):
+    safe_df = sanitize_dataframe_for_streamlit_display(
+        df,
+        numeric_columns=numeric_columns,
+        force_object_strings=force_object_strings,
+    )
+    return st.dataframe(safe_df, **kwargs)
+
 
 
 def build_product_timeline_dataset(product_rows: pd.DataFrame) -> pd.DataFrame:
@@ -6888,13 +6979,12 @@ def prepare_dataframe_for_streamlit_display(
     df: pd.DataFrame,
     status_column: str | None = None,
 ) -> pd.DataFrame | pd.io.formats.style.Styler:
-    numeric_columns = set(NUMERIC_COLUMNS) | DISPLAY_DELTA_COLUMNS_HIGHER_IS_BETTER | DISPLAY_DELTA_COLUMNS_LOWER_IS_BETTER | {
-        "technical_ad_campaign_spend_total",
-    }
+    numeric_columns = _get_streamlit_display_numeric_columns()
     safe_df = sanitize_dataframe_for_streamlit_display(df, numeric_columns=numeric_columns)
     if safe_df.shape[0] * max(safe_df.shape[1], 1) > STYLER_MAX_CELLS:
         return safe_df
     return style_table_recent_window(safe_df, status_column=status_column)
+
 
 
 def build_export_dataframe(table_df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
@@ -7314,16 +7404,15 @@ def render_overview_tab(
     )
     with st.expander("Debug фильтрации и экспорта"):
         st.caption("Экспорт CSV строится не из полного load_dataset_from_db(), а из текущего table_df после всех применённых фильтров.")
-        st.dataframe(build_debug_trace_frame(filter_debug_trace), width="stretch", hide_index=True)
-        st.dataframe(build_debug_trace_frame(export_debug_trace), width="stretch", hide_index=True)
+        safe_st_dataframe(build_debug_trace_frame(filter_debug_trace), width="stretch", hide_index=True, force_object_strings=True)
+        safe_st_dataframe(build_debug_trace_frame(export_debug_trace), width="stretch", hide_index=True, force_object_strings=True)
         if display_coverage is not None and not display_coverage.empty:
             st.caption("Coverage по display-заменам: сколько значений были NULL, сколько стали 0 по правилам display-слоя, сколько осталось реально > 0.")
-            st.dataframe(display_coverage, width="stretch", hide_index=True)
-    st.dataframe(
-        prepare_dataframe_for_streamlit_display(
-            table_display_df,
-            status_column=status_column,
-        ),
+            safe_st_dataframe(display_coverage, width="stretch", hide_index=True, force_object_strings=True)
+    safe_st_dataframe(
+        table_display_df,
+        numeric_columns=_get_streamlit_display_numeric_columns(),
+        force_object_strings=True,
         width="stretch",
         hide_index=True,
         height=720,

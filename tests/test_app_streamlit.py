@@ -6,6 +6,7 @@ from io import BytesIO
 
 import app_streamlit
 import pandas as pd
+import pytest
 from pandas.io.formats.style import Styler
 
 from app_streamlit import (
@@ -7143,3 +7144,35 @@ def test_sanitize_dataframe_for_streamlit_display_normalizes_wb_supply_column() 
     assert str(result["Поставки на WB"].dtype) == "Int64"
     assert result["Поставки на WB"].tolist() == [5, 0, 12]
     assert result.attrs == {}
+
+
+
+def test_sanitize_dataframe_for_streamlit_display_force_object_strings_is_pyarrow_safe() -> None:
+    pyarrow = pytest.importorskip("pyarrow")
+    df = pd.DataFrame(
+        {
+            "mixed": ["text", 1, 2.5, None, [1, 2], {"a": 1}, b"bytes"],
+            "label": ["A", "B", "C", "D", "E", "F", "G"],
+        },
+        dtype=object,
+    )
+    df.attrs["nested"] = pd.DataFrame([{"x": 1}])
+
+    result = app_streamlit.sanitize_dataframe_for_streamlit_display(df, force_object_strings=True)
+
+    assert result.attrs == {}
+    assert isinstance(result.index, pd.RangeIndex)
+    assert list(result.columns) == ["mixed", "label"]
+    assert str(result["mixed"].dtype) == "object"
+    assert all(str(dtype) != "string[pyarrow]" for dtype in result.dtypes)
+    assert result.loc[0, "mixed"] == "text"
+    assert result.loc[1, "mixed"] == "1"
+    assert result.loc[2, "mixed"] == "2.5"
+    assert result.loc[3, "mixed"] == ""
+    assert result.loc[4, "mixed"] == "[1, 2]"
+    assert result.loc[5, "mixed"] == '{"a": 1}'
+    assert result.loc[6, "mixed"] == "bytes"
+
+    table = pyarrow.Table.from_pandas(result, preserve_index=False)
+
+    assert table.num_rows == len(result)
