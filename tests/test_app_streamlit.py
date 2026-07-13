@@ -7176,3 +7176,58 @@ def test_sanitize_dataframe_for_streamlit_display_force_object_strings_is_pyarro
     table = pyarrow.Table.from_pandas(result, preserve_index=False)
 
     assert table.num_rows == len(result)
+
+
+
+def test_safe_st_html_table_renders_html_without_streamlit_dataframe(monkeypatch) -> None:
+    captions: list[str] = []
+    markdown_calls: list[tuple[str, bool]] = []
+    download_calls: list[tuple[str, bytes, str, str]] = []
+
+    def fail_dataframe(*args, **kwargs):
+        raise AssertionError("st.dataframe should not be called")
+
+    def record_markdown(body: str, unsafe_allow_html: bool = False, **kwargs) -> None:
+        markdown_calls.append((body, unsafe_allow_html))
+
+    def record_download(label: str, data: bytes, file_name: str, mime: str, **kwargs) -> None:
+        download_calls.append((label, data, file_name, mime))
+
+    monkeypatch.setattr(app_streamlit.st, "dataframe", fail_dataframe)
+    monkeypatch.setattr(app_streamlit.st, "caption", captions.append)
+    monkeypatch.setattr(app_streamlit.st, "markdown", record_markdown)
+    monkeypatch.setattr(app_streamlit.st, "download_button", record_download)
+
+    df = pd.DataFrame(
+        {
+            "mixed": ["<b>x</b>", [1, 2], {"a": 1}, b"bytes"],
+            "label": ["A", "B", "C", "D"],
+        },
+        dtype=object,
+    )
+    df.attrs["nested"] = pd.DataFrame([{"x": 1}])
+
+    result = app_streamlit.safe_st_html_table(
+        df,
+        max_rows=2,
+        caption="HTML fallback",
+        force_object_strings=True,
+    )
+
+    assert result.attrs == {}
+    assert isinstance(result.index, pd.RangeIndex)
+    assert len(markdown_calls) == 1
+    html, unsafe = markdown_calls[0]
+    assert unsafe is True
+    assert "&lt;b&gt;x&lt;/b&gt;" in html
+    assert "[1, 2]" in html
+    assert '{"a": 1}' not in html
+    assert "bytes" not in html
+    assert len(download_calls) == 1
+    assert download_calls[0][0] == "Скачать CSV"
+    assert download_calls[0][2] == "overview.csv"
+    assert download_calls[0][3] == "text/csv"
+    csv_text = download_calls[0][1].decode("utf-8-sig")
+    assert '"{""a"": 1}"' in csv_text
+    assert "bytes" in csv_text
+    assert captions == ["HTML fallback", "Показаны первые 2 строк из 4"]

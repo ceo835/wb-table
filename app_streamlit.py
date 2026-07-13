@@ -6837,6 +6837,44 @@ def safe_st_dataframe(
 
 
 
+def safe_st_html_table(
+    df: pd.DataFrame,
+    *,
+    max_rows: int = 500,
+    caption: str | None = None,
+    numeric_columns: set[str] | None = None,
+    force_object_strings: bool = False,
+    download_label: str = "Скачать CSV",
+    file_name: str = "overview.csv",
+) -> pd.DataFrame:
+    safe_df = sanitize_dataframe_for_streamlit_display(
+        df,
+        numeric_columns=numeric_columns,
+        force_object_strings=force_object_strings,
+    )
+    safe_df = safe_df.copy(deep=True)
+    safe_df.attrs.clear()
+    safe_df.columns = [str(column_name) for column_name in safe_df.columns]
+    safe_df.index = pd.RangeIndex(len(safe_df))
+
+    if caption:
+        st.caption(caption)
+
+    csv = safe_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(download_label, csv, file_name, "text/csv")
+
+    if len(safe_df) > max_rows:
+        st.caption(f"Показаны первые {max_rows} строк из {len(safe_df)}")
+        view_df = safe_df.head(max_rows).copy()
+    else:
+        view_df = safe_df
+
+    html = view_df.to_html(index=False, escape=True)
+    st.markdown(html, unsafe_allow_html=True)
+    return safe_df
+
+
+
 def build_product_timeline_dataset(product_rows: pd.DataFrame) -> pd.DataFrame:
     timeline = product_rows.reindex(columns=PRODUCT_TIMELINE_COLUMNS).copy()
     return timeline.sort_values("report_date", ascending=False, na_position="last")
@@ -7409,119 +7447,11 @@ def render_overview_tab(
         if display_coverage is not None and not display_coverage.empty:
             st.caption("Coverage по display-заменам: сколько значений были NULL, сколько стали 0 по правилам display-слоя, сколько осталось реально > 0.")
             safe_st_dataframe(display_coverage, width="stretch", hide_index=True, force_object_strings=True)
-    safe_st_dataframe(
+    safe_st_html_table(
         table_display_df,
         numeric_columns=_get_streamlit_display_numeric_columns(),
         force_object_strings=True,
-        width="stretch",
-        hide_index=True,
-        height=720,
-        column_config={
-            "entry_impressions_total": st.column_config.NumberColumn("Показы из Точки входа", format="%.0f"),
-            "entry_card_clicks_total": st.column_config.NumberColumn("Переходы из Точки входа", format="%.0f"),
-            "entry_ctr_calc": st.column_config.NumberColumn("CTR из Точки входа", format="%.6f"),
-            "entry_cart_total": st.column_config.NumberColumn("Корзины из Точки входа", format="%.0f"),
-            "entry_orders_total": st.column_config.NumberColumn("Заказы из Точки входа", format="%.0f"),
-            "entry_point_source_label": st.column_config.TextColumn("Источник точки входа", width="medium"),
-            "orders_geography_source_label": st.column_config.TextColumn("Источник географии", width="medium"),
-            "vbro_status_label": st.column_config.TextColumn("ВБро", width="medium"),
-            "organic_formula_status_label": st.column_config.TextColumn("Статус формулы органики", width="medium"),
-            "product_group_label": st.column_config.TextColumn("Группа товара", width="medium"),
-            "report_date": st.column_config.DateColumn("Дата"),
-            "comparison_date": st.column_config.DateColumn("Сравнение с датой"),
-            "supplier_article": st.column_config.TextColumn("Артикул продавца", width="medium"),
-            "nm_id": st.column_config.NumberColumn("Артикул WB", format="%d"),
-            "title": st.column_config.TextColumn("Название", width="large"),
-            "brand": st.column_config.TextColumn("Бренд"),
-            "subject": st.column_config.TextColumn("Предмет"),
-            "wb_buyer_price": st.column_config.NumberColumn("Цена WB", format="%.2f"),
-            "wb_seller_price": st.column_config.NumberColumn("Цена продавца ЛК", format="%.2f"),
-            "spp_rub": st.column_config.NumberColumn("СПП, ₽", format="%.2f"),
-            "spp_pct": st.column_config.NumberColumn("СПП, %", format="%.2f"),
-            "impressions": st.column_config.NumberColumn("Показы общие", format="%.0f"),
-            "card_clicks": st.column_config.NumberColumn("Переходы в карточку", format="%.0f"),
-            "ctr_calc": st.column_config.NumberColumn("CTR общий", format="%.2f"),
-            "impressions_delta": st.column_config.NumberColumn("Δ Показы", format="%.0f"),
-            "cart_count": st.column_config.NumberColumn("Положили в корзину", format="%.0f"),
-            "add_to_cart_conversion_calc": st.column_config.NumberColumn("Конверсия в корзину", format="%.2f"),
-            "cart_count_delta": st.column_config.NumberColumn("Δ Корзины", format="%.0f"),
-            "order_count": st.column_config.NumberColumn("Заказы", format="%.0f"),
-            "order_count_delta": st.column_config.NumberColumn("Δ Заказы", format="%.0f"),
-            "order_sum": st.column_config.NumberColumn("Заказали на сумму", format="%.2f"),
-            "order_sum_delta": st.column_config.NumberColumn("Δ Сумма заказов", format="%.2f"),
-            "buyout_count": st.column_config.NumberColumn("Выкупы, шт", format="%.0f"),
-            "buyout_sum": st.column_config.NumberColumn("Выкупы, сумма", format="%.2f"),
-            "buyout_percent": st.column_config.NumberColumn("Процент выкупа, %", format="%.2f"),
-            "cart_to_order_conversion_calc": st.column_config.NumberColumn("Конверсия в заказ", format="%.2f"),
-            "ad_cost_writeoff_total": st.column_config.NumberColumn("Списания рекламы", format="%.2f"),
-            "ad_campaign_spend_total": st.column_config.NumberColumn("Сумма кампании", format="%.2f"),
-            "legacy_cost_per_card_click_calc": st.column_config.NumberColumn("Цена перехода по общим переходам", format="%.2f"),
-            "legacy_cost_per_all_carts_calc": st.column_config.NumberColumn("Расход на все корзины", format="%.2f"),
-            "legacy_cost_per_order_calc": st.column_config.NumberColumn("Расход на все заказы", format="%.2f"),
-            "legacy_ad_share_of_order_sum_pct": st.column_config.NumberColumn("Доля рекламы от суммы заказов, %", format="%.2f"),
-            "technical_ad_campaign_spend_total": st.column_config.NumberColumn("Расход РК по статистике", format="%.2f"),
-            "ad_campaign_spend_delta": st.column_config.NumberColumn("Δ Расход РК", format="%.2f"),
-            "ad_views_total": st.column_config.NumberColumn("Показы РК", format="%.0f"),
-            "ad_clicks_total": st.column_config.NumberColumn("Клики РК", format="%.0f"),
-            "ad_atbs_total": st.column_config.NumberColumn("Корзины РК", format="%.0f"),
-            "ad_atbs_delta": st.column_config.NumberColumn("Δ Корзины РК", format="%.0f"),
-            "ad_orders_total": st.column_config.NumberColumn("Заказы РК", format="%.0f"),
-            "ad_orders_delta": st.column_config.NumberColumn("Δ Заказы РК", format="%.0f"),
-            "ad_cpc_calc": st.column_config.NumberColumn("CPC РК", format="%.2f"),
-            "ad_cpm_calc": st.column_config.NumberColumn("CPM РК", format="%.2f"),
-            "ad_cost_per_cart_calc": st.column_config.NumberColumn("Цена корзины РК", format="%.2f"),
-            "ad_cpo_calc": st.column_config.NumberColumn("CPO РК", format="%.2f"),
-            "ad_cpo_delta": st.column_config.NumberColumn("Δ CPO", format="%.2f"),
-            "ad_share_of_revenue_calc": st.column_config.NumberColumn("Доля рекламы от суммы заказов, %", format="%.2f"),
-            "direct_ad_atbs": st.column_config.NumberColumn("Прямые корзины РК", format="%.0f"),
-            "associated_ad_atbs": st.column_config.NumberColumn("Ассоциированные корзины РК", format="%.0f"),
-            "multicard_ad_atbs": st.column_config.NumberColumn("Мультикарточка корзины РК", format="%.0f"),
-            "unknown_ad_atbs": st.column_config.NumberColumn("Unknown корзины РК", format="%.0f"),
-            "associated_atbs_percent_calc": st.column_config.NumberColumn("Ассоциированные корзины, %", format="%.2f"),
-            "organic_cart_count": st.column_config.NumberColumn("Органические корзины", format="%.0f"),
-            "organic_cart_share_calc": st.column_config.NumberColumn("Процент органики от рекламных корзин", format="%.2f"),
-            "vvbromo_organic_sales": st.column_config.NumberColumn("Продажи органические VVBromo", format="%.0f"),
-            "vvbromo_operating_profit": st.column_config.NumberColumn("Операционная прибыль VVBromo", format="%.2f"),
-            "vvbromo_operating_profit_per_unit": st.column_config.NumberColumn("Опер. прибыль/ед. VVBromo", format="%.2f"),
-            "crm_common_calc": st.column_config.NumberColumn("CRM по общим заказам", format="%.2f"),
-            "ad_cost_per_all_carts_calc": st.column_config.NumberColumn("Тех: расход на все корзины (с assoc.)", format="%.2f"),
-            "avg_delivery_time": st.column_config.NumberColumn("Среднее время доставки", format="%.2f"),
-            "organic_cart_share_status": st.column_config.TextColumn("Статус формулы органики", width="medium"),
-            "search_queries_count": st.column_config.NumberColumn("Поисковые запросы", format="%.0f"),
-            "search_avg_position": st.column_config.NumberColumn("Средняя позиция поиска", format="%.2f"),
-            "search_visibility": st.column_config.NumberColumn("Видимость поиска", format="%.2f"),
-            "search_clicks": st.column_config.NumberColumn("Клики из поиска", format="%.0f"),
-            "search_cart": st.column_config.NumberColumn("Корзины из поиска", format="%.0f"),
-            "search_orders": st.column_config.NumberColumn("Заказы из поиска", format="%.0f"),
-            "search_queries_delta": st.column_config.NumberColumn("Δ Поиск", format="%.0f"),
-            "current_stock_qty": st.column_config.NumberColumn("Остаток WB", format="%.0f"),
-            "current_stock_sum": st.column_config.NumberColumn("Сумма остатков", format="%.2f"),
-            "current_mp_stock_qty": st.column_config.NumberColumn("Остаток МП", format="%.0f"),
-            "local_orders_percent": st.column_config.NumberColumn("Локальные заказы, %", format="%.2f"),
-            "localization_orders_total_qty": st.column_config.NumberColumn("Локализация: заказы, шт", format="%.0f"),
-            "localization_regions_count": st.column_config.NumberColumn("Локализация: регионов", format="%.0f"),
-            "stock_delta": st.column_config.NumberColumn("Δ Остаток", format="%.0f"),
-            "has_funnel": st.column_config.CheckboxColumn("Есть воронка"),
-            "has_stock": st.column_config.CheckboxColumn("Есть остатки"),
-            "has_ad_cost": st.column_config.CheckboxColumn("Есть списания"),
-            "has_ad_campaign": st.column_config.CheckboxColumn("Есть fullstats"),
-            "has_search": st.column_config.CheckboxColumn("Есть поиск"),
-            "has_localization_partial": st.column_config.CheckboxColumn("Есть partial localization"),
-            "entry_point_status": st.column_config.TextColumn("Статус точки входа", width="medium"),
-            "orders_geography_status": st.column_config.TextColumn("Статус географии", width="medium"),
-            "vbro_status": st.column_config.TextColumn("Статус ВБро", width="medium"),
-            "card_comparison_status": st.column_config.TextColumn("Статус сравнения карточек", width="medium"),
-            "data_quality_status": st.column_config.TextColumn("Технический статус данных", width="medium"),
-            "data_quality_label": st.column_config.TextColumn("Статус данных", width="medium"),
-            "funnel_data_note": st.column_config.TextColumn("Note: Воронка", width="large"),
-            "ad_data_note": st.column_config.TextColumn("Note: Реклама", width="medium"),
-            "card_clicks_note": st.column_config.TextColumn("Note: Переходы в карточку", width="large"),
-            "search_data_note": st.column_config.TextColumn("Note: Поиск", width="large"),
-            "stock_data_note": st.column_config.TextColumn("Note: Остатки", width="large"),
-            "localization_data_note": st.column_config.TextColumn("Note: География", width="large"),
-            "entry_point_data_note": st.column_config.TextColumn("Note: Точка входа", width="large"),
-            "vbro_data_note": st.column_config.TextColumn("Note: ВБро", width="large"),
-        },
+        file_name="overview.csv",
     )
     return len(filtered), len(table_df)
 
