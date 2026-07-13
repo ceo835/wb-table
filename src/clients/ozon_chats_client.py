@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from datetime import UTC, datetime
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -234,6 +235,15 @@ def coerce_int(value: Any) -> Optional[int]:
         return int(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def mask_secret(value: Any, *, prefix: int = 4, suffix: int = 2) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    if len(text) <= prefix + suffix:
+        return f"{text[:1]}...****"
+    return f"{text[:prefix]}...{text[-suffix:]}"
 
 
 class OzonChatsClient(BaseAPIClient):
@@ -473,6 +483,27 @@ class OzonChatsClient(BaseAPIClient):
         self.last_history_results.append(summary)
         return summary
 
+    def _build_runtime_diagnostics(self) -> dict[str, Any]:
+        env_client_id = (os.getenv("OZON_CLIENT_ID") or "").strip()
+        env_api_key = (os.getenv("OZON_API_KEY") or "").strip()
+        env_api_token = (os.getenv("OZON_API_TOKEN") or "").strip()
+        effective_env_api_key = env_api_key or env_api_token
+        return {
+            "credentials_present": self.has_credentials(),
+            "masked_client_id": mask_secret(self.client_id),
+            "base_url": self.base_url,
+            "known_good_endpoint": KNOWN_GOOD_READONLY_ENDPOINT,
+            "chat_list_endpoint": CHAT_LIST_ENDPOINT,
+            "chat_history_endpoint": CHAT_HISTORY_ENDPOINT,
+            "chat_list_payload_variants": [dict(payload) for payload in self._chat_list_payloads()],
+            "settings_loader": "src.config.settings -> load_dotenv(BASE_DIR/.env) + os.getenv; Ozon credentials are not read from st.secrets",
+            "env_ozon_client_id_present": bool(env_client_id),
+            "env_ozon_api_key_present": bool(env_api_key),
+            "env_ozon_api_token_present": bool(env_api_token),
+            "settings_client_id_matches_env": bool(self.client_id and env_client_id and self.client_id == env_client_id),
+            "settings_api_key_matches_env": bool(self.api_key and effective_env_api_key and self.api_key == effective_env_api_key),
+        }
+
     def probe_readonly_access(self, *, history_chat_ids: Optional[Sequence[str]] = None) -> dict[str, Any]:
         known_good = self.validate_known_good_access()
         chat_list = self.list_chats()
@@ -500,6 +531,7 @@ class OzonChatsClient(BaseAPIClient):
                 "client_id_present": bool(self.client_id),
                 "api_key_present": bool(self.api_key),
             },
+            "runtime": self._build_runtime_diagnostics(),
             "known_good": known_good,
             "chat_list": chat_list,
             "chat_history": history_results,

@@ -5031,9 +5031,12 @@ def test_build_stock_all_display_dataframe_product_mode_uses_safe_rename_and_kee
     assert result.iloc[0]["Банда"] == "Трусы женские"
     assert result.iloc[0]["Артикул WB"] == 101
     assert result.iloc[0]["Остаток 1С"] == 4
+    assert result.iloc[0]["Поставки на WB"] == 0
+    assert str(result["Поставки на WB"].dtype) == "Int64"
     assert "Разница WB - 1С" not in result.columns
     assert "Разница WB - 1С" not in numeric_cols
     assert "Артикул WB" in numeric_cols
+    assert "Поставки на WB" in numeric_cols
     assert "Скорость продаж за позавчера" in numeric_cols
     assert "Скорость продаж за прошедшую неделю" in numeric_cols
     assert "Прогноз остатков по скорости позавчера" in numeric_cols
@@ -7045,3 +7048,20 @@ def test_build_stock_all_band_level_sums_wb_supply_qty() -> None:
     result = app_streamlit.build_stock_all_band_level(product_df)
 
     assert result.iloc[0]["wb_supply_qty"] == 13
+
+
+def test_sanitize_dataframe_for_streamlit_display_normalizes_wb_supply_column() -> None:
+    df = pd.DataFrame(
+        [
+            {"Поставки на WB": 5.0, "Название": "A"},
+            {"Поставки на WB": pd.NA, "Название": "B"},
+            {"Поставки на WB": "12", "Название": "C"},
+        ]
+    )
+    df.attrs["debug"] = "value"
+
+    result = app_streamlit.sanitize_dataframe_for_streamlit_display(df)
+
+    assert str(result["Поставки на WB"].dtype) == "Int64"
+    assert result["Поставки на WB"].tolist() == [5, 0, 12]
+    assert result.attrs == {}

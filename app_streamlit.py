@@ -148,6 +148,10 @@ def _clip_non_negative_numeric_series(series: "pd.Series") -> "pd.Series":
     numeric = pd.to_numeric(series, errors="coerce")
     return numeric.clip(lower=0)
 
+
+def _normalize_nullable_int_display_series(series: "pd.Series") -> "pd.Series":
+    return pd.to_numeric(series, errors="coerce").fillna(0).astype("Int64")
+
 DISPLAY_DELTA_COLUMNS_HIGHER_IS_BETTER = {
     "impressions_delta",
     "cart_count_delta",
@@ -5603,6 +5607,7 @@ def build_stock_all_display_dataframe(
 
     numeric_cols = set(numeric_cols)
     numeric_cols.add(one_c_label)
+    numeric_cols.add(supply_label)
 
     # Разницу не выводим в UI ни на уровне товаров, ни на уровне банд
 
@@ -5657,7 +5662,11 @@ def build_stock_all_display_dataframe(
     for column_name in ordered_columns:
         if column_name not in display_df.columns:
             display_df[column_name] = pd.NA
-    return display_df[ordered_columns].copy(), numeric_cols
+    if supply_label in display_df.columns:
+        display_df[supply_label] = _normalize_nullable_int_display_series(display_df[supply_label])
+    display_df = display_df[ordered_columns].copy()
+    display_df.attrs.clear()
+    return display_df, numeric_cols
 
 
 def _resolve_size_sales_metrics_by_row(
@@ -6013,7 +6022,7 @@ def render_stock_all_tab(
     display_df_raw = display_df.copy()
 
     # null-колонки — явно "нет данных", не 0
-    null_columns = ("Остаток 1С", "Поставки на WB")
+    null_columns = ("Остаток 1С",)
     if level == "По размерам":
         null_columns = ("Остаток 1С по размеру",)
     for null_col in null_columns:
@@ -6699,7 +6708,7 @@ def sanitize_dataframe_for_streamlit_display(
     numeric_columns: set[str] | None = None,
 ) -> pd.DataFrame:
     safe_df = df.copy()
-    safe_df.attrs = {}
+    safe_df.attrs.clear()
     numeric_columns = numeric_columns or set()
 
     for column_name in safe_df.columns:
@@ -6710,6 +6719,9 @@ def sanitize_dataframe_for_streamlit_display(
     for column_name in numeric_columns:
         if column_name in safe_df.columns:
             safe_df[column_name] = _sanitize_numeric_series(safe_df[column_name])
+
+    if "Поставки на WB" in safe_df.columns:
+        safe_df["Поставки на WB"] = _normalize_nullable_int_display_series(safe_df["Поставки на WB"])
 
     return safe_df
 

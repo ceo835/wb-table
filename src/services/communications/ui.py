@@ -15,6 +15,16 @@ from src.services.communications.providers import OzonChatProvider, WBChatProvid
 from src.utils.logger import get_logger
 
 
+def _prepare_diagnostics_dataframe(rows: pd.DataFrame | list[dict[str, Any]]) -> pd.DataFrame:
+    diagnostics_df = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
+    diagnostics_df = diagnostics_df.copy()
+    diagnostics_df.attrs.clear()
+    for column_name in diagnostics_df.columns:
+        if column_name == "value" or diagnostics_df[column_name].dtype == object:
+            diagnostics_df[column_name] = diagnostics_df[column_name].fillna("").astype(str)
+    return diagnostics_df
+
+
 def render_communications_tab() -> None:
     st.header("Центр коммуникаций")
     
@@ -586,9 +596,12 @@ def render_ozon_diagnostics_subtab(session) -> None:
         history_results = diag.get("chat_history", [])
         first_history_result = history_results[0].get("result", {}) if history_results else {}
 
+        runtime_diag = diag.get("runtime", {})
         status_rows = [
             {"metric": "Client ID найден", "value": "Да" if diag.get("credentials", {}).get("client_id_present") else "Нет"},
             {"metric": "API Key найден", "value": "Да" if diag.get("credentials", {}).get("api_key_present") else "Нет"},
+            {"metric": "Masked Client ID", "value": runtime_diag.get("masked_client_id", "-")},
+            {"metric": "Credentials present", "value": runtime_diag.get("credentials_present", False)},
             {"metric": "Known-good endpoint", "value": f"status {known_good.get('status_code')}"},
             {
                 "metric": "Chat API доступен",
@@ -599,9 +612,18 @@ def render_ozon_diagnostics_subtab(session) -> None:
                 "metric": "History endpoint",
                 "value": "not confirmed, POST /v1/chat/history returned 404" if first_history_result.get("status_code") == 404 else (f"status {first_history_result.get('status_code')}" if history_results else "не вызывался"),
             },
+            {"metric": "Base URL", "value": runtime_diag.get("base_url", "-")},
+            {"metric": "Chat list endpoint path", "value": runtime_diag.get("chat_list_endpoint", "-")},
+            {"metric": "Known-good endpoint path", "value": runtime_diag.get("known_good_endpoint", "-")},
+            {"metric": "Settings loading", "value": runtime_diag.get("settings_loader", "-")},
+            {"metric": "env OZON_CLIENT_ID present", "value": runtime_diag.get("env_ozon_client_id_present", False)},
+            {"metric": "env OZON_API_KEY present", "value": runtime_diag.get("env_ozon_api_key_present", False)},
+            {"metric": "env OZON_API_TOKEN present", "value": runtime_diag.get("env_ozon_api_token_present", False)},
+            {"metric": "settings client_id matches env", "value": runtime_diag.get("settings_client_id_matches_env", False)},
+            {"metric": "settings api key matches env", "value": runtime_diag.get("settings_api_key_matches_env", False)},
         ]
         st.write("#### Статус credentials и API")
-        st.dataframe(pd.DataFrame(status_rows), width="stretch", hide_index=True)
+        st.dataframe(_prepare_diagnostics_dataframe(status_rows), width="stretch", hide_index=True)
         if first_history_result.get("status_code") == 404:
             st.warning("History endpoint: not confirmed, `POST /v1/chat/history` returned 404. Sync из `POST /v3/chat/list` это не ломает.")
 
@@ -639,12 +661,12 @@ def render_ozon_diagnostics_subtab(session) -> None:
                     }
                 )
         st.write("#### Диагностика confirmed methods")
-        st.dataframe(pd.DataFrame(probe_rows), width="stretch", hide_index=True)
+        st.dataframe(_prepare_diagnostics_dataframe(probe_rows), width="stretch", hide_index=True)
 
     sync_diag = st.session_state.get("comm_ozon_sync_diag")
     if sync_diag:
         st.write("#### Диагностика последнего sync")
-        sync_df = pd.DataFrame([{"metric": key, "value": value} for key, value in sync_diag.items()])
+        sync_df = _prepare_diagnostics_dataframe([{"metric": key, "value": value} for key, value in sync_diag.items()])
         st.dataframe(sync_df, width="stretch", hide_index=True)
         if sync_diag.get("history_status") == 404:
             st.warning("History endpoint: not confirmed, `POST /v1/chat/history` returned 404. Enrichment из этого endpoint пропущен.")
@@ -654,7 +676,7 @@ def render_ozon_diagnostics_subtab(session) -> None:
     )
     st.write("#### Текущий статус реестра")
     st.dataframe(
-        pd.DataFrame(
+        _prepare_diagnostics_dataframe(
             [
                 {"metric": "Ozon registry records", "value": ozon_registry_count or 0},
                 {"metric": "Реальная отправка Ozon", "value": "отключена"},

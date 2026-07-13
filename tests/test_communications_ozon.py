@@ -4,11 +4,13 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
+from src.clients.ozon_chats_client import OzonChatsClient
 from src.config.settings import settings
 from src.db.base import Base
 from src.db.communications_models import CampaignRecipient, ChatRegistry
 from src.services.communications.campaign_service import CampaignService
 from src.services.communications.providers import OzonChatProvider
+from src.services.communications.ui import _prepare_diagnostics_dataframe
 
 
 class FakeOzonChatsClient:
@@ -271,3 +273,47 @@ def test_build_ozon_chat_registry_keeps_sync_when_history_is_404(db_session, mon
     assert provider.last_sync_diagnostics["history_confirmed"] is False
     assert provider.last_sync_diagnostics["skipped_history"] is True
     assert provider.last_sync_diagnostics["prepared_records_count"] == 2
+
+
+def test_prepare_diagnostics_dataframe_casts_value_column_to_string() -> None:
+    diagnostics_df = _prepare_diagnostics_dataframe(
+        [
+            {"metric": "records", "value": 0},
+            {"metric": "send", "value": "отключена"},
+        ]
+    )
+
+    assert diagnostics_df["value"].tolist() == ["0", "отключена"]
+    assert diagnostics_df.attrs == {}
+
+
+def test_probe_readonly_access_exposes_runtime_diagnostics(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ozon_client_id", "client-123456", raising=False)
+    monkeypatch.setattr(settings, "ozon_api_key", "api-key-abcdef", raising=False)
+    monkeypatch.setenv("OZON_CLIENT_ID", "client-123456")
+    monkeypatch.setenv("OZON_API_KEY", "api-key-abcdef")
+
+    client = OzonChatsClient(client_id="client-123456", api_key="api-key-abcdef")
+    monkeypatch.setattr(client, "validate_known_good_access", lambda: {"status_code": 404, "payload_sent": {"limit": 1}})
+    monkeypatch.setattr(
+        client,
+        "list_chats",
+        lambda: {
+            "operation": "chat_list",
+            "endpoint": "/v3/chat/list",
+            "attempts": [],
+            "result": {"status_code": 404, "payload": {"chats": []}},
+        },
+    )
+
+    result = client.probe_readonly_access()
+
+    runtime = result["runtime"]
+    assert runtime["credentials_present"] is True
+    assert runtime["masked_client_id"].startswith("clie")
+    assert runtime["base_url"] == "https://api-seller.ozon.ru"
+    assert runtime["chat_list_endpoint"] == "/v3/chat/list"
+    assert runtime["env_ozon_client_id_present"] is True
+    assert runtime["env_ozon_api_key_present"] is True
+    assert runtime["settings_client_id_matches_env"] is True
+    assert runtime["settings_api_key_matches_env"] is True
