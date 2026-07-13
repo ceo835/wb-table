@@ -24,6 +24,9 @@ def main() -> int:
     print(f"status_code: {summary.get('status_code')}")
     print(f"response_text_preview: {summary.get('response_text_preview', '')[:300]}")
     print(f"chat_count: {summary.get('chat_count', 0)}")
+    print(f"fetched_pages: {summary.get('fetched_pages')}")
+    print(f"unique_chats: {summary.get('unique_chats')}")
+    print(f"stop_reason: {summary.get('stop_reason')}")
     print(f"credentials_present: {summary.get('credentials_present', False)}")
     print(f"masked_client_id: {summary.get('masked_client_id', '-')}")
     return 0

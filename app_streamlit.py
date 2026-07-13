@@ -9,12 +9,14 @@ import os
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+from pandas.io.formats.style import Styler
 from sqlalchemy import func, select, text
 
 try:
@@ -88,6 +90,20 @@ from src.tracked_products import (
 from src.services.communications.ui import render_communications_tab
 
 logger = logging.getLogger(__name__)
+
+
+def _log_timing(event_name: str, started_at: float, **details: Any) -> None:
+    elapsed = perf_counter() - started_at
+    detail_suffix = ""
+    if details:
+        rendered_details = ", ".join(
+            f"{key}={value}"
+            for key, value in details.items()
+            if value is not None
+        )
+        if rendered_details:
+            detail_suffix = f" [{rendered_details}]"
+    logger.info("%s finished in %.3fs%s", event_name, elapsed, detail_suffix)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -971,6 +987,11 @@ def load_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@st.cache_data(show_spinner=False)
+def load_prepared_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+    return prepare_dataframe(load_dataset_from_db(cache_buster))
+
+
 def get_db_dataset_cache_buster() -> str:
     with session_scope() as session:
         mart_state = session.execute(
@@ -1269,6 +1290,7 @@ def attach_vvbromo_to_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    started_at = perf_counter()
     prepared = df.copy()
     if "report_date" in prepared.columns:
         prepared["report_date"] = pd.to_datetime(prepared["report_date"], errors="coerce").dt.date
@@ -1336,7 +1358,8 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for column in NUMERIC_COLUMNS:
         if column in enriched.columns:
             enriched[column] = pd.to_numeric(enriched[column], errors="coerce")
-    enriched.attrs["display_coverage"] = build_display_coverage_summary(prepared, enriched)
+    enriched.attrs["display_coverage"] = build_display_coverage_summary(prepared, enriched).to_dict(orient="records")
+    _log_timing("prepare_dataframe", started_at, rows_in=len(df), rows_out=len(enriched))
     return enriched
 
 
@@ -1536,6 +1559,7 @@ def build_display_coverage_summary(original_df: pd.DataFrame, enriched_df: pd.Da
 
 
 def load_app_dataset() -> tuple[pd.DataFrame, str]:
+    started_at = perf_counter()
     data_source = resolve_data_source()
     if data_source == "db":
         if not settings.database_url:
@@ -1543,7 +1567,7 @@ def load_app_dataset() -> tuple[pd.DataFrame, str]:
             st.stop()
         try:
             cache_buster = resolve_db_dataset_cache_buster()
-            df = prepare_dataframe(load_dataset_from_db(cache_buster))
+            df = load_prepared_dataset_from_db(cache_buster)
         except Exception as exc:
             logger.exception("Failed to load Streamlit dataset from PostgreSQL")
             st.error(
@@ -1555,12 +1579,15 @@ def load_app_dataset() -> tuple[pd.DataFrame, str]:
         if df.empty:
             st.warning("В mart_total_report нет строк. Переключите STREAMLIT_DATA_SOURCE=csv или наполните mart.")
             st.stop()
+        _log_timing("load_app_dataset", started_at, source="db", rows=len(df))
         return df, "db"
 
     if not DATASET_PATH.exists():
         st.error("Сначала соберите dataset командой scripts/export_streamlit_v1_dataset.py")
         st.stop()
-    return load_dataset(str(DATASET_PATH), DATASET_PATH.stat().st_mtime), "csv"
+    df = load_dataset(str(DATASET_PATH), DATASET_PATH.stat().st_mtime)
+    _log_timing("load_app_dataset", started_at, source="csv", rows=len(df))
+    return df, "csv"
 
 
 def resolve_streamlit_display_min_date() -> date | None:
@@ -1600,6 +1627,21 @@ def apply_display_min_date_filter(
     filtered = df.loc[report_dates.notna() & report_dates.ge(display_min_date)].copy()
     filtered.attrs = getattr(df, "attrs", {}).copy()
     return filtered
+
+
+def normalize_display_coverage_payload(payload: Any) -> pd.DataFrame | None:
+    if payload is None:
+        return None
+    if isinstance(payload, pd.DataFrame):
+        normalized = payload.copy()
+    elif isinstance(payload, list):
+        normalized = pd.DataFrame(payload)
+    elif isinstance(payload, Mapping):
+        normalized = pd.DataFrame([payload])
+    else:
+        return None
+    normalized.attrs.clear()
+    return normalized
 
 
 @st.cache_data(show_spinner=False)
@@ -2567,7 +2609,7 @@ def render_wb_price_monitor_content(cache_buster: str | None) -> None:
             )
 
     st.markdown("**Все проверенные цены за дату**")
-    st.dataframe(
+    safe_st_dataframe(
         style_wb_site_price_monitor_table(compact_df),
         width="stretch",
         hide_index=True,
@@ -2583,7 +2625,7 @@ def render_wb_price_monitor_content(cache_buster: str | None) -> None:
     if alert_display_df.empty:
         st.info("За выбранную дату скачков цены от 50 ₽ не найдено.")
     else:
-        st.dataframe(
+        safe_st_dataframe(
             style_wb_site_price_monitor_table(alert_display_df),
             width="stretch",
             hide_index=True,
@@ -2595,7 +2637,7 @@ def render_wb_price_monitor_content(cache_buster: str | None) -> None:
             },
         )
     with st.expander("Показать технические детали"):
-        st.dataframe(
+        safe_st_dataframe(
             technical_df,
             width="stretch",
             hide_index=True,
@@ -2660,7 +2702,7 @@ def render_ozon_price_monitor_content(cache_buster: str | None) -> None:
     
     compact_df = display_df[[column for column in compact_columns if column in display_df.columns]].copy()
     
-    st.dataframe(
+    safe_st_dataframe(
         style_ozon_site_price_monitor_table(compact_df),
         width="stretch",
         hide_index=True,
@@ -2687,7 +2729,7 @@ def render_ozon_price_monitor_content(cache_buster: str | None) -> None:
             "Ссылка на карточку",
         ]
         alert_compact_df = alert_display_df[[column for column in alert_columns if column in alert_display_df.columns]].copy()
-        st.dataframe(
+        safe_st_dataframe(
             style_ozon_site_price_monitor_table(alert_compact_df),
             width="stretch",
             hide_index=True,
@@ -2780,7 +2822,7 @@ def render_ozon_spp_content(cache_buster: str | None) -> None:
 
         return safe_df.style.apply(spp_row_style, axis=1)
 
-    st.dataframe(
+    safe_st_dataframe(
         style_spp_table(spp_df),
         width="stretch",
         hide_index=True,
@@ -6061,7 +6103,7 @@ def render_stock_all_tab(
     )
 
     display_df.attrs = {}
-    st.dataframe(
+    safe_st_dataframe(
         sanitize_dataframe_for_streamlit_display(display_df, numeric_columns=numeric_cols),
         width="stretch",
         hide_index=True,
@@ -6199,7 +6241,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="stock_problem_products_xlsx_download",
         )
-        st.dataframe(
+        safe_st_dataframe(
             prepare_stock_warehouse_table_for_display(problem_display, []),
             width="stretch",
             hide_index=True,
@@ -6235,7 +6277,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="stock_warehouses_xlsx_download",
         )
-        st.dataframe(
+        safe_st_dataframe(
             prepare_stock_warehouse_table_for_display(table_display, warehouse_display_columns),
             width="stretch",
             hide_index=True,
@@ -6313,7 +6355,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
             lambda value: {"active": "Основной", "sellout": "Распродажа"}.get(str(value), value)
         )
         st.caption("`NO_DATA` показывается отдельно и не считается нулевым остатком.")
-        st.dataframe(
+        safe_st_dataframe(
             sanitize_dataframe_for_streamlit_display(
                 history_display[
                     ["Дата", "Артикул WB", "Артикул", "Товар", "Статус товара", "Склад", "Остаток", "Статус остатка", "Загружено в БД"]
@@ -6347,7 +6389,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
                     df1 = pd.DataFrame([dict(row._mapping) for row in res1])
                     st.markdown("**Общая статистика по группам:**")
                     if not df1.empty:
-                        st.dataframe(df1)
+                        safe_st_dataframe(df1)
                     else:
                         st.write("Нет данных.")
 
@@ -6377,7 +6419,7 @@ def render_stock_warehouse_tab(data_source: str) -> None:
                     df2 = pd.DataFrame([dict(row._mapping) for row in res2])
                     st.markdown("**Dedupe-агрегат поисковых запросов:**")
                     if not df2.empty:
-                        st.dataframe(df2)
+                        safe_st_dataframe(df2)
                     else:
                         st.write("Нет данных.")
             except Exception as e:
@@ -6462,12 +6504,12 @@ def render_import_result(summary: dict[str, Any], report_name: str) -> None:
     preview_rows = summary.get("preview_rows") or []
     if preview_rows:
         st.write("**Первые нормализованные строки**")
-        st.dataframe(pd.DataFrame(preview_rows[:10]), width="stretch", hide_index=True)
+        safe_st_dataframe(pd.DataFrame(preview_rows[:10]), width="stretch", hide_index=True)
 
     skipped_rows_preview = summary.get("skipped_rows_preview") or []
     if skipped_rows_preview:
         st.write("**Пропущенные строки**")
-        st.dataframe(pd.DataFrame(skipped_rows_preview[:10]), width="stretch", hide_index=True)
+        safe_st_dataframe(pd.DataFrame(skipped_rows_preview[:10]), width="stretch", hide_index=True)
 
     source_status_counts = summary.get("source_status_counts")
     if source_status_counts:
@@ -6479,7 +6521,7 @@ def render_last_upload_result(last_result: dict[str, object] | None) -> None:
     if not last_result:
         return
     st.write("**Последние результаты загрузки**")
-    st.dataframe(pd.DataFrame([last_result]), width="stretch", hide_index=True)
+    safe_st_dataframe(pd.DataFrame([last_result]), width="stretch", hide_index=True)
 
 
 def clear_streamlit_data_caches() -> None:
@@ -6615,7 +6657,6 @@ def build_filtered_dataset(df: pd.DataFrame, data_source: str) -> tuple[pd.DataF
         debug_trace=debug_trace,
         tracked_metadata_state=tracked_metadata_state,
     )
-    filtered.attrs["data_debug"] = data_debug
     filtered.attrs["show_rows_without_data"] = bool(show_products_without_data)
     with st.sidebar.expander("DATA DEBUG"):
         st.json(data_debug)
@@ -6820,19 +6861,26 @@ def _get_streamlit_display_numeric_columns() -> set[str]:
 
 
 def safe_st_dataframe(
-    df: pd.DataFrame,
+    df: pd.DataFrame | Styler,
     *,
     numeric_columns: set[str] | None = None,
     force_object_strings: bool = False,
     **kwargs: Any,
 ):
+    if isinstance(df, Styler):
+        df.data = sanitize_dataframe_for_streamlit_display(
+            df.data,
+            numeric_columns=numeric_columns,
+            force_object_strings=force_object_strings,
+        )
+        return st.dataframe(df, **kwargs)
+
     safe_df = sanitize_dataframe_for_streamlit_display(
         df,
         numeric_columns=numeric_columns,
         force_object_strings=force_object_strings,
     )
     return st.dataframe(safe_df, **kwargs)
-
 
 
 def build_product_timeline_dataset(product_rows: pd.DataFrame) -> pd.DataFrame:
@@ -7329,7 +7377,7 @@ def render_entry_point_analytics_tab(filtered: pd.DataFrame) -> None:
             format="%.2f",
         )
 
-    st.dataframe(
+    safe_st_dataframe(
         style_entry_point_analytics_table(display_df),
         width="stretch",
         hide_index=True,
@@ -7347,6 +7395,7 @@ def render_overview_tab(
     filter_debug_trace: list[dict[str, object]],
     display_coverage: pd.DataFrame | None = None,
 ) -> tuple[int, int]:
+    started_at = perf_counter()
     view_mode = BY_DATE_MODE_LABEL
     show_empty_rows = bool(filtered.attrs.get("show_rows_without_data", False))
 
@@ -7521,6 +7570,7 @@ def render_overview_tab(
             "vbro_data_note": st.column_config.TextColumn("Note: ВБро", width="large"),
         },
     )
+    _log_timing("render_overview_tab", started_at, filtered_rows=len(filtered), displayed_rows=len(table_display_df))
     return len(filtered), len(table_df)
 
 
@@ -7565,7 +7615,7 @@ def build_key_value_table(rows: list[tuple[str, object, int | None]]) -> pd.Data
 
 def render_compact_metric_table(title: str, rows: list[tuple[str, object, int | None]]) -> None:
     st.subheader(title)
-    st.dataframe(
+    safe_st_dataframe(
         build_key_value_table(rows),
         width="stretch",
         hide_index=True,
@@ -7759,7 +7809,7 @@ def render_product_charts_section(product_rows: pd.DataFrame) -> None:
 def render_product_timeline_table(product_rows: pd.DataFrame) -> None:
     with st.expander("Таблица динамики по датам", expanded=False):
         timeline = build_product_timeline_dataset(product_rows)
-        st.dataframe(
+        safe_st_dataframe(
             timeline,
             width="stretch",
             hide_index=True,
@@ -9121,7 +9171,7 @@ def render_charts_tab(
     if breaches_df.empty:
         st.success("Превышений по выбранному периоду нет.")
     else:
-        st.dataframe(
+        safe_st_dataframe(
             breaches_df,
             width="stretch",
             hide_index=True,
@@ -9342,7 +9392,7 @@ def render_efficiency_charts(
         selected_subject = st.selectbox("Категория / предмет", options=category_options, index=0)
         if not category_summary_df.empty:
             st.caption("Сводка по категориям за выбранный период.")
-            st.dataframe(
+            safe_st_dataframe(
                 category_summary_df,
                 width="stretch",
                 hide_index=True,
@@ -9368,7 +9418,7 @@ def render_efficiency_charts(
         selected_band = st.selectbox("Банда", options=band_options, index=0)
         if not band_summary_df.empty:
             st.caption("Сводка по бандам за выбранный период.")
-            st.dataframe(
+            safe_st_dataframe(
                 band_summary_df,
                 width="stretch",
                 hide_index=True,
@@ -9655,7 +9705,7 @@ def render_efficiency_charts(
     if breaches_df.empty:
         st.success("Превышений по выбранному периоду нет.")
     else:
-        st.dataframe(
+        safe_st_dataframe(
             breaches_df,
             width="stretch",
             hide_index=True,
@@ -10531,7 +10581,7 @@ def render_sources_tab(latest_row: pd.Series) -> None:
             {"Источник": "Data quality", "Статус": fmt_text(latest_row.get("data_quality_status"))},
         ]
     )
-    st.dataframe(source_df, width="stretch", hide_index=True)
+    safe_st_dataframe(source_df, width="stretch", hide_index=True)
 
 
 def render_import_block(
@@ -10824,7 +10874,7 @@ def render_ad_campaign_product_tab(
         key="ad_campaign_product_xlsx_download",
     )
 
-    st.dataframe(
+    safe_st_dataframe(
         filtered.reindex(columns=AD_CAMPAIGN_PRODUCT_COLUMNS),
         width="stretch",
         hide_index=True,
@@ -10868,8 +10918,7 @@ def main() -> None:
         st.rerun()
 
     df, data_source = load_app_dataset()
-    display_coverage = df.attrs.get("display_coverage")
-    ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
+    display_coverage = normalize_display_coverage_payload(df.attrs.get("display_coverage"))
     render_compact_metric_css()
     render_available_dates_summary(df)
     filtered, filter_debug_trace = build_filtered_dataset(df, data_source)
@@ -10891,31 +10940,41 @@ def main() -> None:
         st.warning("После фильтров данных не осталось.")
         st.stop()
 
-    product_options, option_map = get_product_options(filtered)
-    selected_product_label = st.selectbox("Выбрать товар", options=product_options)
-    product_rows = get_selected_product_rows(filtered, selected_product_label, option_map)
-    product_context = get_latest_product_context(product_rows)
-    detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
-    default_detail_date = detail_dates[0]
-
     main_labels = build_main_tab_labels()
     tab_labels = main_labels[:-1] + ["Коммуникации", main_labels[-1]]
-    tabs = st.tabs(tab_labels)
-    tab_overview = tabs[0]
-    tab_entry_point = tabs[1]
-    tab_ad_campaign = tabs[2]
-    tab_product = tabs[3]
-    tab_charts = tabs[4]
-    tab_price_monitor = tabs[5]
-    tab_stock_warehouse = tabs[6]
-    tab_communications = tabs[7]
-    tab_upload = tabs[8]
+    selected_main_section = st.radio(
+        "Раздел",
+        options=tab_labels,
+        horizontal=True,
+        key="main_section",
+        label_visibility="collapsed",
+    )
 
-    with tab_overview:
+    selected_product_label: str | None = None
+    option_map: dict[str, dict[str, object]] = {}
+    product_rows = pd.DataFrame()
+    default_detail_date: object = None
+    ad_campaign_product_df = pd.DataFrame()
+    ad_campaign_product_error: str | None = None
+
+    needs_product_context = selected_main_section in {tab_labels[2], tab_labels[3], tab_labels[4]}
+    needs_ad_campaign_dataset = selected_main_section in {tab_labels[2], tab_labels[4]}
+
+    if needs_product_context:
+        product_options, option_map = get_product_options(filtered)
+        selected_product_label = st.selectbox("Выбрать товар", options=product_options)
+        product_rows = get_selected_product_rows(filtered, selected_product_label, option_map)
+        detail_dates = sorted(product_rows["report_date"].dropna().unique().tolist(), reverse=True)
+        default_detail_date = detail_dates[0] if detail_dates else None
+
+    if needs_ad_campaign_dataset:
+        ad_campaign_product_df, ad_campaign_product_error = load_ad_campaign_product_app_dataset(data_source)
+
+    if selected_main_section == tab_labels[0]:
         render_overview_tab(filtered, filter_debug_trace, display_coverage)
-    with tab_entry_point:
+    elif selected_main_section == tab_labels[1]:
         render_entry_point_analytics_tab(filtered)
-    with tab_ad_campaign:
+    elif selected_main_section == tab_labels[2]:
         render_ad_campaign_product_tab(
             ad_campaign_product_df,
             data_source,
@@ -10924,18 +10983,18 @@ def main() -> None:
             option_map=option_map,
             allowed_report_dates=sorted(d for d in filtered["report_date"].dropna().unique().tolist()),
         )
-    with tab_product:
+    elif selected_main_section == tab_labels[3]:
         render_product_tab(product_rows, default_detail_date)
-    with tab_charts:
+    elif selected_main_section == tab_labels[4]:
         render_charts_tab(filtered, selected_product_label, option_map, ad_campaign_product_df)
-    with tab_price_monitor:
+    elif selected_main_section == tab_labels[5]:
         render_wb_site_price_tab(data_source)
-    with tab_stock_warehouse:
+    elif selected_main_section == tab_labels[6]:
         render_stock_warehouse_tab(data_source)
-    with tab_upload:
-        render_upload_tab()
-    with tab_communications:
+    elif selected_main_section == tab_labels[7]:
         render_communications_tab()
+    else:
+        render_upload_tab()
 
 
 @st.cache_resource(show_spinner=False)

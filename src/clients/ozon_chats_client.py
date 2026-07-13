@@ -97,6 +97,87 @@ ORDER_ID_CANDIDATES = (
     "shipment_id",
     "shipmentId",
 )
+CHAT_STATUS_CANDIDATES = (
+    "chat.chat_status",
+    "chat_status",
+    "chatStatus",
+    "status",
+    "state",
+)
+CHAT_TYPE_CANDIDATES = (
+    "chat.chat_type",
+    "chat_type",
+    "chatType",
+    "type",
+)
+UNREAD_COUNT_CANDIDATES = (
+    "unread_count",
+    "unreadCount",
+    "total_unread_count",
+    "totalUnreadCount",
+)
+LAST_MESSAGE_ID_CANDIDATES = (
+    "last_message_id",
+    "lastMessageId",
+)
+FIRST_UNREAD_MESSAGE_ID_CANDIDATES = (
+    "first_unread_message_id",
+    "firstUnreadMessageId",
+)
+OFFER_ID_CANDIDATES = (
+    "offer_id",
+    "offerId",
+    "vendor_code",
+    "vendorCode",
+    "article",
+)
+PRODUCT_NUMERIC_ID_CANDIDATES = (
+    "product_id",
+    "productId",
+    "sku",
+    "sku_id",
+    "skuId",
+    "item.product_id",
+    "item.productId",
+)
+PRODUCT_NAME_CANDIDATES = (
+    "product_name",
+    "productName",
+    "item.name",
+    "item.title",
+    "title",
+    "name",
+)
+VENDOR_CODE_CANDIDATES = (
+    "vendor_code",
+    "vendorCode",
+    "offer_id",
+    "offerId",
+    "article",
+)
+LAST_MESSAGE_TEXT_CANDIDATES = (
+    "last_message_text",
+    "lastMessageText",
+    "message.text",
+    "message",
+    "text",
+)
+CURSOR_CANDIDATES = (
+    "cursor",
+    "next_cursor",
+    "nextCursor",
+    "next_page_token",
+    "nextPageToken",
+    "page_token",
+    "pageToken",
+)
+HAS_NEXT_CANDIDATES = (
+    "has_next",
+    "hasNext",
+    "has_more",
+    "hasMore",
+    "next",
+)
 PAGINATION_KEYS = (
     "limit",
     "offset",
@@ -235,6 +316,42 @@ def coerce_int(value: Any) -> Optional[int]:
         return int(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def normalize_bool_flag(value: Any) -> Optional[bool]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return None
+
+
+def build_chat_list_pagination_state(payload: Any, *, item_count: int) -> dict[str, Any]:
+    mapping = payload if isinstance(payload, Mapping) else {}
+    cursor = extract_first_value(mapping, CURSOR_CANDIDATES)
+    has_next = normalize_bool_flag(extract_first_value(mapping, HAS_NEXT_CANDIDATES))
+    offset = coerce_int(extract_first_value(mapping, ("offset",)))
+    page = coerce_int(extract_first_value(mapping, ("page",)))
+    total = coerce_int(extract_first_value(mapping, ("total", "total_count", "count")))
+    next_offset = offset + item_count if offset is not None else None
+    if next_offset is None and total is not None and item_count > 0 and total > item_count:
+        next_offset = item_count
+    return {
+        "cursor": str(cursor) if cursor not in (None, "") else None,
+        "has_next": has_next,
+        "offset": offset,
+        "page": page,
+        "total": total,
+        "next_offset": next_offset,
+    }
 
 
 def mask_secret(value: Any, *, prefix: int = 4, suffix: int = 2) -> str:
@@ -412,17 +529,40 @@ class OzonChatsClient(BaseAPIClient):
         self.last_known_good_result = result
         return result
 
-    def _chat_list_payloads(self) -> tuple[dict[str, Any], ...]:
+    def _chat_list_payloads(self, limit: int = 100) -> tuple[dict[str, Any], ...]:
         return (
-            {"limit": 100},
-            {"limit": 100, "offset": 0},
+            {"limit": limit},
+            {"limit": limit, "offset": 0},
         )
 
-    def _chat_history_payloads(self, chat_id: str) -> tuple[dict[str, Any], ...]:
-        return (
+    def _chat_history_payloads(
+        self,
+        chat_id: str,
+        context: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        context_row = context if isinstance(context, Mapping) else {}
+        last_message_id = extract_first_value(context_row, LAST_MESSAGE_ID_CANDIDATES)
+        first_unread_message_id = extract_first_value(context_row, FIRST_UNREAD_MESSAGE_ID_CANDIDATES)
+
+        payloads: list[dict[str, Any]] = [
             {"chat_id": chat_id},
-            {"chat_id": chat_id, "limit": 100},
-        )
+            {"chat_id": chat_id, "limit": 50},
+            {"chat": {"chat_id": chat_id}},
+        ]
+        if last_message_id not in (None, ""):
+            payloads.append({"chat_id": chat_id, "limit": 50, "last_message_id": last_message_id})
+        if first_unread_message_id not in (None, ""):
+            payloads.append({"chat_id": chat_id, "limit": 50, "from_message_id": first_unread_message_id})
+
+        unique_payloads: list[dict[str, Any]] = []
+        seen_payloads: set[str] = set()
+        for payload in payloads:
+            fingerprint = repr(payload)
+            if fingerprint in seen_payloads:
+                continue
+            seen_payloads.add(fingerprint)
+            unique_payloads.append(payload)
+        return tuple(unique_payloads)
 
     def _run_payload_variants(
         self,
@@ -474,11 +614,130 @@ class OzonChatsClient(BaseAPIClient):
         self.last_chat_list_result = summary
         return summary
 
+    def list_all_chats(self, *, max_pages: int = 50, limit: int = 100, sleep_seconds: float = 0.1) -> dict[str, Any]:
+        first_page_summary = self._run_payload_variants(
+            endpoint=CHAT_LIST_ENDPOINT,
+            operation="chat_list",
+            payload_variants=self._chat_list_payloads(limit=limit),
+        )
+        attempts = list(first_page_summary.get("attempts", []))
+        first_result = dict(first_page_summary.get("result") or {})
+        payload = first_result.get("payload")
+        page_rows = [item for item in discover_top_level_items(payload or {}) if isinstance(item, Mapping)]
+
+        unique_rows: list[dict[str, Any]] = []
+        seen_chat_ids: set[str] = set()
+        raw_chat_count = 0
+
+        def append_rows(rows: Sequence[Mapping[str, Any]]) -> int:
+            nonlocal raw_chat_count
+            new_chat_count = 0
+            for row in rows:
+                raw_chat_count += 1
+                chat_id_value = extract_first_value(row, CHAT_ID_CANDIDATES)
+                chat_id_text = str(chat_id_value) if chat_id_value not in (None, "") else f"__missing__:{raw_chat_count}"
+                if chat_id_text in seen_chat_ids:
+                    continue
+                seen_chat_ids.add(chat_id_text)
+                unique_rows.append(dict(row))
+                new_chat_count += 1
+            return new_chat_count
+
+        append_rows(page_rows)
+        pages_fetched = 1 if first_result.get("status_code") == 200 else 0
+        repeated_cursor = False
+        stop_reason = "initial_request_failed" if first_result.get("status_code") != 200 else "single_page"
+        seen_cursors: set[str] = set()
+        current_result = first_result
+
+        while first_result.get("status_code") == 200 and pages_fetched < max_pages:
+            payload = current_result.get("payload")
+            page_rows = [item for item in discover_top_level_items(payload or {}) if isinstance(item, Mapping)]
+            pagination_state = build_chat_list_pagination_state(payload, item_count=len(page_rows))
+            cursor = pagination_state.get("cursor")
+            has_next = pagination_state.get("has_next")
+            total = pagination_state.get("total")
+            next_offset = pagination_state.get("next_offset")
+
+            next_payload: dict[str, Any] | None = None
+            if cursor:
+                if cursor in seen_cursors:
+                    repeated_cursor = True
+                    stop_reason = "repeated_cursor"
+                    break
+                if has_next is False:
+                    stop_reason = "has_next_false"
+                    break
+                seen_cursors.add(cursor)
+                next_payload = {"limit": limit, "cursor": cursor}
+            elif has_next is False:
+                stop_reason = "has_next_false"
+                break
+            elif next_offset is not None and (total is None or raw_chat_count < total):
+                next_payload = {"limit": limit, "offset": next_offset}
+            else:
+                stop_reason = "no_pagination_signal"
+                break
+
+            next_result = self._post_json(
+                endpoint=CHAT_LIST_ENDPOINT,
+                payload=next_payload,
+                operation="chat_list_page",
+            )
+            attempts.append(next_result)
+            current_result = next_result
+            if next_result.get("status_code") != 200:
+                stop_reason = f"http_{next_result.get('status_code')}"
+                break
+
+            next_rows = [item for item in discover_top_level_items(next_result.get("payload") or {}) if isinstance(item, Mapping)]
+            if not next_rows:
+                stop_reason = "empty_page"
+                break
+
+            new_unique = append_rows(next_rows)
+            pages_fetched += 1
+            if new_unique == 0:
+                stop_reason = "no_new_chat_ids"
+                break
+
+            stop_reason = "max_pages_reached" if pages_fetched >= max_pages else "pagination_continues"
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+        aggregate_payload = dict(first_result.get("payload") or {}) if isinstance(first_result.get("payload"), Mapping) else {}
+        if unique_rows:
+            aggregate_payload["chats"] = unique_rows
+        aggregate_result = dict(first_result)
+        aggregate_result["payload"] = aggregate_payload
+        aggregate_result["item_count"] = len(unique_rows)
+        aggregate_result["payload_sent"] = first_result.get("payload_sent", {"limit": limit})
+
+        summary = {
+            "operation": "chat_list_paginated",
+            "endpoint": CHAT_LIST_ENDPOINT,
+            "attempts": attempts,
+            "result": aggregate_result,
+            "items": unique_rows,
+            "fetched_pages": pages_fetched,
+            "fetched_chats_raw": raw_chat_count,
+            "unique_chats": len(unique_rows),
+            "stop_reason": stop_reason,
+            "repeated_cursor": repeated_cursor,
+        }
+        self.last_chat_list_result = summary
+        return summary
+
     def probe_chat_list_only(self, summary: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
-        chat_list = dict(summary) if summary is not None else self.list_chats()
+        chat_list = dict(summary) if summary is not None else self.list_all_chats()
         result = chat_list.get("result", {}) if isinstance(chat_list, Mapping) else {}
-        payload = result.get("payload")
-        rows = [item for item in discover_top_level_items(payload or {}) if isinstance(item, Mapping)]
+        rows = [
+            item for item in chat_list.get("items", [])
+            if isinstance(item, Mapping)
+        ]
+        if not rows:
+            payload = result.get("payload")
+            rows = [item for item in discover_top_level_items(payload or {}) if isinstance(item, Mapping)]
 
         sample_chat_ids: list[str] = []
         for row in rows:
@@ -506,14 +765,17 @@ class OzonChatsClient(BaseAPIClient):
                 "chat_count": len(rows),
                 "credentials_present": self.has_credentials(),
                 "masked_client_id": mask_secret(self.client_id),
+                "fetched_pages": chat_list.get("fetched_pages"),
+                "unique_chats": chat_list.get("unique_chats"),
+                "stop_reason": chat_list.get("stop_reason"),
             },
         }
 
-    def get_chat_history(self, chat_id: str) -> dict[str, Any]:
+    def get_chat_history(self, chat_id: str, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
         summary = self._run_payload_variants(
             endpoint=CHAT_HISTORY_ENDPOINT,
             operation="chat_history",
-            payload_variants=self._chat_history_payloads(chat_id),
+            payload_variants=self._chat_history_payloads(chat_id, context=context),
         )
         self.last_history_results.append(summary)
         return summary
@@ -531,6 +793,7 @@ class OzonChatsClient(BaseAPIClient):
             "chat_list_endpoint": CHAT_LIST_ENDPOINT,
             "chat_history_endpoint": CHAT_HISTORY_ENDPOINT,
             "chat_list_payload_variants": [dict(payload) for payload in self._chat_list_payloads()],
+            "chat_history_payload_variants": [dict(payload) for payload in self._chat_history_payloads("sample-chat-id")],
             "settings_loader": "src.config.settings -> load_dotenv(BASE_DIR/.env) + os.getenv; Ozon credentials are not read from st.secrets",
             "env_ozon_client_id_present": bool(env_client_id),
             "env_ozon_api_key_present": bool(env_api_key),
@@ -543,12 +806,23 @@ class OzonChatsClient(BaseAPIClient):
         known_good = self.validate_known_good_access()
         chat_probe = self.probe_chat_list_only()
         chat_list = chat_probe["chat_list"]
-        list_items = discover_top_level_items(chat_list["result"].get("payload") or {})
+        list_items = [item for item in chat_list.get("items", []) if isinstance(item, Mapping)]
+        if not list_items:
+            list_items = discover_top_level_items(chat_list["result"].get("payload") or {})
         discovered_chat_ids = list(chat_probe.get("sample_chat_ids", []))
         requested_chat_ids = list(history_chat_ids or discovered_chat_ids)
+        history_context_by_id = {}
+        for row in list_items:
+            if not isinstance(row, Mapping):
+                continue
+            row_chat_id = extract_first_value(row, CHAT_ID_CANDIDATES)
+            if row_chat_id in (None, ""):
+                continue
+            history_context_by_id[str(row_chat_id)] = row
+
         history_results: list[dict[str, Any]] = []
         for chat_id in requested_chat_ids[:3]:
-            summary = self.get_chat_history(chat_id)
+            summary = self.get_chat_history(chat_id, context=history_context_by_id.get(chat_id))
             history_results.append(summary)
             result = summary.get("result", {})
             if result.get("status_code") == 404 or result.get("is_role_error") or result.get("is_auth_error"):
@@ -568,12 +842,12 @@ class OzonChatsClient(BaseAPIClient):
         }
 
     def health_check(self) -> bool:
-        summary = self.list_chats()
+        summary = self.list_all_chats(max_pages=1)
         result = summary.get("result", {})
         return bool(result.get("status_code") == 200)
 
     def fetch_current_chats(self) -> Optional[dict[str, Any]]:
-        summary = self.list_chats()
+        summary = self.list_all_chats(max_pages=1)
         result = summary.get("result") or {}
         payload = result.get("payload")
         return payload if isinstance(payload, Mapping) else None

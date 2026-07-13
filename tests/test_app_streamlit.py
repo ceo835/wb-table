@@ -934,12 +934,11 @@ def test_load_app_dataset_db_uses_cache_buster_for_db_loader(monkeypatch) -> Non
 
     calls: list[str | None] = []
 
-    def fake_load_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+    def fake_load_prepared_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
         calls.append(cache_buster)
         return pd.DataFrame([{"report_date": "2026-06-18", "nm_id": 1, "has_funnel": True}])
 
-    monkeypatch.setattr(app_streamlit, "load_dataset_from_db", fake_load_dataset_from_db)
-    monkeypatch.setattr(app_streamlit, "prepare_dataframe", lambda df: df)
+    monkeypatch.setattr(app_streamlit, "load_prepared_dataset_from_db", fake_load_prepared_dataset_from_db)
 
     df, source = app_streamlit.load_app_dataset()
 
@@ -1022,18 +1021,44 @@ def test_load_app_dataset_db_falls_back_when_cache_buster_raises(monkeypatch) ->
 
     calls: list[str | None] = []
 
-    def fake_load_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+    def fake_load_prepared_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
         calls.append(cache_buster)
         return pd.DataFrame([{"report_date": "2026-06-18", "nm_id": 1, "has_funnel": True}])
 
-    monkeypatch.setattr(app_streamlit, "load_dataset_from_db", fake_load_dataset_from_db)
-    monkeypatch.setattr(app_streamlit, "prepare_dataframe", lambda df: df)
+    monkeypatch.setattr(app_streamlit, "load_prepared_dataset_from_db", fake_load_prepared_dataset_from_db)
 
     df, source = app_streamlit.load_app_dataset()
 
     assert source == "db"
     assert calls == [None]
     assert len(df) == 1
+
+
+def test_load_prepared_dataset_from_db_uses_cache_for_prepare_dataframe(monkeypatch) -> None:
+    app_streamlit.load_prepared_dataset_from_db.clear()
+    calls = {"load": 0, "prepare": 0}
+
+    def fake_load_dataset_from_db(cache_buster: str | None = None) -> pd.DataFrame:
+        calls["load"] += 1
+        return pd.DataFrame([{"report_date": "2026-06-18", "nm_id": 1}])
+
+    def fake_prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        calls["prepare"] += 1
+        result = df.copy()
+        result["prepared"] = True
+        return result
+
+    monkeypatch.setattr(app_streamlit, "load_dataset_from_db", fake_load_dataset_from_db)
+    monkeypatch.setattr(app_streamlit, "prepare_dataframe", fake_prepare_dataframe)
+
+    first = app_streamlit.load_prepared_dataset_from_db("buster-cache")
+    second = app_streamlit.load_prepared_dataset_from_db("buster-cache")
+
+    assert calls == {"load": 1, "prepare": 1}
+    assert first.equals(second)
+    assert bool(first.loc[0, "prepared"]) is True
+
+    app_streamlit.load_prepared_dataset_from_db.clear()
 
 
 def test_build_stock_warehouse_product_table_aggregates_chrt_rows_and_keeps_missing_tracked_products() -> None:
@@ -7176,3 +7201,42 @@ def test_sanitize_dataframe_for_streamlit_display_force_object_strings_is_pyarro
     table = pyarrow.Table.from_pandas(result, preserve_index=False)
 
     assert table.num_rows == len(result)
+
+
+def test_safe_st_dataframe_sanitizes_dataframe_before_render(monkeypatch) -> None:
+    rendered: list[object] = []
+    monkeypatch.setattr(app_streamlit.st, "dataframe", lambda df, **kwargs: rendered.append(df) or "rendered")
+
+    df = pd.DataFrame({"mixed": [b"bytes", {"a": 1}, None]}, dtype=object)
+    df.attrs["nested"] = pd.DataFrame([{"x": 1}])
+
+    result = app_streamlit.safe_st_dataframe(df, force_object_strings=True, hide_index=True)
+
+    assert result == "rendered"
+    assert len(rendered) == 1
+    rendered_df = rendered[0]
+    assert isinstance(rendered_df, pd.DataFrame)
+    assert rendered_df.attrs == {}
+    assert rendered_df.loc[0, "mixed"] == "bytes"
+    assert rendered_df.loc[1, "mixed"] == '{"a": 1}'
+    assert rendered_df.loc[2, "mixed"] == ""
+
+
+def test_safe_st_dataframe_sanitizes_styler_before_render(monkeypatch) -> None:
+    rendered: list[object] = []
+    monkeypatch.setattr(app_streamlit.st, "dataframe", lambda df, **kwargs: rendered.append(df) or "rendered")
+
+    df = pd.DataFrame({"mixed": [b"bytes", None]}, dtype=object)
+    df.attrs["nested"] = pd.DataFrame([{"x": 1}])
+    styler = df.style
+
+    result = app_streamlit.safe_st_dataframe(styler, force_object_strings=True, hide_index=True)
+
+    assert result == "rendered"
+    assert len(rendered) == 1
+    rendered_styler = rendered[0]
+    assert isinstance(rendered_styler, Styler)
+    assert rendered_styler.data.attrs == {}
+    assert str(rendered_styler.data["mixed"].dtype) == "object"
+    assert rendered_styler.data.loc[0, "mixed"] == "bytes"
+    assert rendered_styler.data.loc[1, "mixed"] == ""

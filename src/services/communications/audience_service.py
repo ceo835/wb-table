@@ -7,7 +7,12 @@ from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
 from src.db.communications_models import Campaign, ChatRegistry, CampaignRecipient, SendLog
-from src.services.communications.providers import WBChatProvider, OzonChatProvider
+from src.services.communications.providers import (
+    OzonChatProvider,
+    WBChatProvider,
+    ozon_registry_can_reply,
+    parse_ozon_registry_meta,
+)
 from src.utils.logger import get_logger
 
 logger = get_logger("audience_service")
@@ -153,12 +158,14 @@ class AudienceService:
                 is_ready = False
                 reasons.append("нет привязки к товару")
 
-            # 3. Фильтр replySign
-            if chat.reply_sign:
+            # 3. Ozon reply capability / replySign
+            chat_meta = parse_ozon_registry_meta(chat.reply_sign) if campaign.marketplace == "ozon" else {}
+            chat_has_reply = ozon_registry_can_reply(chat_meta) if campaign.marketplace == "ozon" else bool(chat.reply_sign)
+            if chat_has_reply:
                 stats["has_reply_sign"] += 1
             elif only_with_reply_sign:
                 is_ready = False
-                reasons.append("нет признака replySign")
+                reasons.append("\u043d\u0435\u0442 \u043f\u0440\u0438\u0437\u043d\u0430\u043a\u0430 \u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0441\u0442\u0438 \u043e\u0442\u0432\u0435\u0442\u0430")
 
             # 4. Фильтр активных чатов
             if chat.current_chat_exists:
@@ -175,11 +182,17 @@ class AudienceService:
 
             if search_query:
                 search_tokens = [chat_id.lower(), *(str(product_id).lower() for product_id in chat_product_ids)]
+                if campaign.marketplace == "ozon":
+                    search_tokens.extend(
+                        str(chat_meta.get(field_name) or "").strip().lower()
+                        for field_name in ("offer_id", "sku", "product_id", "product_name", "vendor_code")
+                    )
+                search_tokens = [token for token in search_tokens if token]
                 if not any(search_query in token for token in search_tokens):
                     is_ready = False
                     reasons.append("не совпадает с поисковым фильтром")
 
-            # Устанавливаем статус получателя
+            # ????????????? ?????? ??????????
             if is_ready:
                 status = "ready"
                 reason = "подходит под фильтры"
@@ -187,11 +200,10 @@ class AudienceService:
                 status = "excluded"
                 reason = "; ".join(reasons)
 
-            # Для чатов без продукта или без таймстемпов, если мы сомневаемся, можно использовать статус 'unknown'
             if not chat.last_activity_at and status != "excluded":
                 status = "unknown"
                 reason = "недостаточно данных об активности чата"
-                
+
             recipient = CampaignRecipient(
                 campaign_id=campaign_id,
                 marketplace=campaign.marketplace,
@@ -199,9 +211,9 @@ class AudienceService:
                 product_id=chat.product_ids[0] if chat.product_ids else None,
                 recipient_status=status,
                 reason=reason,
-                selected=True if status == "ready" else False
+                selected=True if status == "ready" else False,
             )
-            
+
             recipients_to_save.append(recipient)
             if status == "ready":
                 ready_recipients.append(recipient)

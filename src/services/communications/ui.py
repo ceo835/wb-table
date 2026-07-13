@@ -1,19 +1,101 @@
 from __future__ import annotations
 
+import json
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta
+from time import perf_counter
 from typing import Optional, List, Dict, Any
 
 from src.config.settings import settings
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from src.db.session import session_scope
 from src.db.communications_models import Campaign, ChatRegistry, CampaignRecipient, SendLog
-from src.db.models import DimProduct, SettingsProducts
+from src.db.models import DimProduct, FactOzonPriceSnapshot, SettingsProducts
 from src.services.communications.campaign_service import CampaignService
 from src.services.communications.audience_service import AudienceService
-from src.services.communications.providers import OzonChatProvider, WBChatProvider
+from src.ozon.config import load_tracked_articles_with_categories
+from src.services.communications.providers import (
+    OzonChatProvider,
+    WBChatProvider,
+    ozon_registry_can_reply,
+    ozon_registry_status_key,
+    parse_ozon_registry_meta,
+)
 from src.utils.logger import get_logger
+
+
+logger = get_logger("communications_ui")
+
+
+def _log_comm_timing(event_name: str, started_at: float, **details: Any) -> None:
+    elapsed = perf_counter() - started_at
+    detail_suffix = ""
+    if details:
+        rendered_details = ", ".join(
+            f"{key}={value}"
+            for key, value in details.items()
+            if value is not None
+        )
+        if rendered_details:
+            detail_suffix = f" [{rendered_details}]"
+    logger.info("%s finished in %.3fs%s", event_name, elapsed, detail_suffix)
+
+
+def _normalize_comm_dataframe_cell(value: Any, *, force_object_strings: bool = False) -> Any:
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return bytes(value).decode("utf-8")
+        except UnicodeDecodeError:
+            return bytes(value).decode("utf-8", errors="replace")
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, (pd.DataFrame, pd.Series)) or isinstance(value, complex):
+        return str(value)
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+    if force_object_strings:
+        return str(value)
+    return value
+
+
+def _sanitize_comm_dataframe_for_streamlit_display(
+    df: pd.DataFrame,
+    *,
+    force_object_strings: bool = False,
+) -> pd.DataFrame:
+    safe_df = df.copy(deep=True)
+    safe_df.attrs.clear()
+    safe_df.columns = pd.Index([str(column_name) for column_name in safe_df.columns], dtype=object)
+    safe_df.index = pd.RangeIndex(len(safe_df))
+
+    for column_name in safe_df.columns:
+        series = safe_df[column_name]
+        if series.dtype == object or pd.api.types.is_string_dtype(series.dtype) or str(series.dtype).startswith("string["):
+            safe_df[column_name] = pd.Series(
+                [
+                    _normalize_comm_dataframe_cell(value, force_object_strings=force_object_strings)
+                    for value in series.tolist()
+                ],
+                index=series.index,
+                dtype=object,
+            )
+    return safe_df
+
+
+def _safe_comm_dataframe(df: pd.DataFrame, *, force_object_strings: bool = False, **kwargs: Any):
+    safe_df = _sanitize_comm_dataframe_for_streamlit_display(df, force_object_strings=force_object_strings)
+    return st.dataframe(safe_df, **kwargs)
+
+
+def _safe_comm_data_editor(df: pd.DataFrame, *, force_object_strings: bool = False, **kwargs: Any) -> pd.DataFrame:
+    safe_df = _sanitize_comm_dataframe_for_streamlit_display(df, force_object_strings=force_object_strings)
+    return st.data_editor(safe_df, **kwargs)
 
 
 def _prepare_diagnostics_dataframe(rows: pd.DataFrame | list[dict[str, Any]]) -> pd.DataFrame:
@@ -127,55 +209,60 @@ def _render_ozon_registry_actions(session, *, key_prefix: str) -> None:
 
 
 def render_communications_tab() -> None:
+    started_at = perf_counter()
     st.header("Центр коммуникаций")
-    
-    # Информационный индикатор безопасности отправки
+
     is_real_send = settings.wb_comm_real_send_enabled
     if is_real_send:
         st.success("**Реальная отправка включена** (`WB_COMM_REAL_SEND_ENABLED=true`). Сообщения могут доставляться покупателям.")
     else:
         st.warning("**Реальная отправка WB отключена** (`WB_COMM_REAL_SEND_ENABLED=false`). Все рассылки будут выполняться в режиме симуляции (Dry-run).")
 
-    # Разделение по маркетплейсам
     st.info("Реальная отправка Ozon отключена (`OZON_COMM_REAL_SEND_ENABLED=false`). Все рассылки будут выполняться в режиме симуляции (Dry-run).")
-    tab_wb, tab_ozon = st.tabs(["Wildberries", "Ozon"])
-    
-    with tab_wb:
-        # Подменю навигации внутри Wildberries
-        wb_sub_tab = st.radio(
-            "Раздел WB:",
-            options=["Кампании WB", "Реестр WB-чатов", "История отправок WB"],
-            horizontal=True,
-            key="comm_wb_sub_tab"
-        )
-        st.write("---")
-        with session_scope() as session:
+    selected_marketplace = st.radio(
+        "Маркетплейс",
+        options=["Wildberries", "Ozon"],
+        horizontal=True,
+        key="comm_marketplace",
+        label_visibility="collapsed",
+    )
+    st.write("---")
+
+    with session_scope() as session:
+        if selected_marketplace == "Wildberries":
+            wb_sub_tab = st.radio(
+                "Раздел WB:",
+                options=["Кампании WB", "Реестр WB-чатов", "История отправок WB"],
+                horizontal=True,
+                key="comm_wb_sub_tab",
+            )
+            st.write("---")
             if wb_sub_tab == "Кампании WB":
                 render_campaigns_subtab(session)
             elif wb_sub_tab == "Реестр WB-чатов":
                 render_chats_registry_subtab(session)
-            elif wb_sub_tab == "История отправок WB":
+            else:
                 render_history_subtab(session, marketplace="wb")
-
-    with tab_ozon:
-        ozon_sub_tab = st.radio(
-            "Раздел Ozon:",
-            options=OZON_MAIN_SECTIONS,
-            horizontal=True,
-            key="comm_ozon_sub_tab"
-        )
-        st.write("---")
-        with session_scope() as session:
+        else:
+            ozon_sub_tab = st.radio(
+                "Раздел Ozon:",
+                options=OZON_MAIN_SECTIONS,
+                horizontal=True,
+                key="comm_ozon_sub_tab",
+            )
+            st.write("---")
             if ozon_sub_tab == "Кампания Ozon":
                 render_ozon_campaigns_subtab(session)
             elif ozon_sub_tab == "Реестр Ozon-чатов":
                 render_ozon_registry_subtab(session)
-            elif ozon_sub_tab == "История отправок Ozon":
+            else:
                 render_history_subtab(session, marketplace="ozon")
 
             st.write("---")
             with st.expander(OZON_TECHNICAL_EXPANDER_LABEL, expanded=False):
                 render_ozon_diagnostics_subtab(session)
+
+    _log_comm_timing("render_communications_tab", started_at, marketplace=selected_marketplace)
 
 def render_campaigns_subtab(session) -> None:
     # Инициализируем session_state для навигации по кампаниям
@@ -231,7 +318,7 @@ def render_campaigns_subtab(session) -> None:
 
     df = pd.DataFrame(camp_list)
     df.attrs.clear()
-    st.dataframe(df, width="stretch", hide_index=True)
+    _safe_comm_dataframe(df, width="stretch", hide_index=True)
 
     st.write("---")
     st.write("**Действия с кампаниями:**")
@@ -480,7 +567,7 @@ def render_audience_and_send_block(session, campaign: Campaign) -> None:
     df_rec.attrs.clear()
     
     # st.data_editor позволяет изменять чекбокс
-    edited_df = st.data_editor(
+    edited_df = _safe_comm_data_editor(
         df_rec,
         width="stretch",
         hide_index=True,
@@ -621,7 +708,7 @@ def render_ozon_campaigns_subtab(session) -> None:
 
     df = pd.DataFrame(camp_list)
     df.attrs.clear()
-    st.dataframe(df, width="stretch", hide_index=True)
+    _safe_comm_dataframe(df, width="stretch", hide_index=True)
 
     st.write("---")
     st.write("**Действия с кампаниями:**")
@@ -880,7 +967,7 @@ def render_ozon_audience_and_send_block(session, campaign: Campaign) -> None:
 
     df_rec = pd.DataFrame(rec_data)
     df_rec.attrs.clear()
-    edited_df = st.data_editor(
+    edited_df = _safe_comm_data_editor(
         df_rec,
         width="stretch",
         hide_index=True,
@@ -1270,7 +1357,388 @@ def _filter_wb_chat_registry_dataframe(
 
 
 
+
+
+OZON_CHAT_SOURCE_LABELS = {
+    "v3_chat_list": "Список чатов Ozon",
+    "v1_chat_history": "История сообщений Ozon",
+    "v3_chat_list+v1_chat_history": "Список чатов + история Ozon",
+}
+OZON_CHAT_REGISTRY_DISPLAY_COLUMNS = [
+    "ID чата",
+    "Статус чата",
+    "Тип чата",
+    "Можно ответить",
+    "Артикул Ozon / SKU / offer_id",
+    "Название товара",
+    "Артикул продавца",
+    "Первая активность",
+    "Последняя активность",
+    "Дней с последней активности",
+    "Непрочитано",
+    "Источник данных",
+]
+OZON_CHAT_REGISTRY_EXPORT_COLUMNS = [
+    *OZON_CHAT_REGISTRY_DISPLAY_COLUMNS,
+    "Product ID",
+    "SKU",
+    "Offer ID",
+    "Категория",
+    "Кто писал последним",
+    "Последнее сообщение / описание",
+]
+OZON_CHAT_REGISTRY_DETAILS_COLUMNS = [
+    "ID чата",
+    "Статус чата",
+    "Тип чата",
+    "Можно ответить",
+    "Product ID",
+    "SKU",
+    "Offer ID",
+    "Артикул продавца",
+    "Название товара",
+    "Категория",
+    "Статус товара Ozon",
+    "Непрочитано",
+    "Кто писал последним",
+    "Последнее сообщение / описание",
+    "Raw chat_id",
+    "Last message ID",
+    "First unread message ID",
+    "Источник данных",
+]
+
+
+def _normalize_optional_int(value: Any) -> Optional[int]:
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+
+def _normalize_optional_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+
+def _translate_ozon_chat_source(source: Optional[str]) -> str:
+    return OZON_CHAT_SOURCE_LABELS.get(str(source or "").strip().lower(), "Неизвестно")
+
+
+
+def _translate_ozon_last_sender(last_sender: Optional[str]) -> str:
+    value = str(last_sender or "").strip().lower()
+    if not value:
+        return "-"
+    mapping = {
+        "buyer": "Покупатель",
+        "customer": "Покупатель",
+        "client": "Покупатель",
+        "seller": "Продавец",
+        "manager": "Менеджер",
+        "operator": "Оператор",
+        "system": "Система",
+    }
+    return mapping.get(value, str(last_sender))
+
+
+
+def _translate_ozon_chat_type(chat_type: Any) -> str:
+    raw_value = _normalize_optional_text(chat_type)
+    if not raw_value:
+        return "-"
+    normalized = raw_value.upper()
+    mapping = {
+        "BUYER_TO_SELLER": "Покупатель → продавец",
+        "SELLER_TO_BUYER": "Продавец → покупатель",
+        "ORDER": "Заказ",
+        "PRODUCT": "Товар",
+    }
+    return mapping.get(normalized, raw_value)
+
+
+
+def _translate_ozon_chat_status(meta: dict[str, Any]) -> str:
+    status_key = ozon_registry_status_key(meta)
+    if status_key == "opened":
+        return "Открыт"
+    if status_key == "closed":
+        return "Закрыт"
+    raw_status = _normalize_optional_text(meta.get("chat_status"))
+    return f"Другой ({raw_status})" if raw_status else "Неизвестно"
+
+
+
+def _format_ozon_can_reply(meta: dict[str, Any]) -> str:
+    return "Технически да, отправка отключена" if ozon_registry_can_reply(meta) else "Нет"
+
+
+
+def _merge_ozon_product_info(*sources: dict[str, Any]) -> dict[str, Any]:
+    merged = {
+        "offer_id": "",
+        "sku": None,
+        "product_id": None,
+        "product_name": "",
+        "vendor_code": "",
+        "category": "",
+        "seller_status": "",
+    }
+    for source in sources:
+        if not source:
+            continue
+        for key, value in source.items():
+            if merged.get(key) in (None, "", []):
+                if value not in (None, "", []):
+                    merged[key] = value
+    return merged
+
+
+
+def _load_ozon_product_lookup(session, chats: list[ChatRegistry]) -> dict[str, dict[Any, dict[str, Any]]]:
+    lookup = {"by_offer_id": {}, "by_sku": {}, "by_product_id": {}}
+    offer_ids: set[str] = set()
+    skus: set[int] = set()
+    product_ids: set[int] = set()
+
+    for chat in chats:
+        meta = parse_ozon_registry_meta(chat.reply_sign)
+        offer_id = _normalize_optional_text(meta.get("offer_id"))
+        sku = _normalize_optional_int(meta.get("sku"))
+        product_id = _normalize_optional_int(meta.get("product_id"))
+        if offer_id:
+            offer_ids.add(offer_id)
+        if sku is not None:
+            skus.add(sku)
+        if product_id is not None:
+            product_ids.add(product_id)
+
+    for row in load_tracked_articles_with_categories():
+        offer_id = _normalize_optional_text(row.get("offer_id"))
+        sku = _normalize_optional_int(row.get("sku"))
+        payload = {"offer_id": offer_id, "sku": sku, "category": _normalize_optional_text(row.get("category"))}
+        if offer_id and offer_id not in lookup["by_offer_id"]:
+            lookup["by_offer_id"][offer_id] = payload
+        if sku is not None and sku not in lookup["by_sku"]:
+            lookup["by_sku"][sku] = payload
+
+    filters = []
+    if offer_ids:
+        filters.append(FactOzonPriceSnapshot.offer_id.in_(sorted(offer_ids)))
+    if skus:
+        filters.append(FactOzonPriceSnapshot.sku.in_(sorted(skus)))
+    if product_ids:
+        filters.append(FactOzonPriceSnapshot.product_id.in_(sorted(product_ids)))
+    if not filters:
+        return lookup
+
+    rows = session.execute(
+        select(
+            FactOzonPriceSnapshot.offer_id,
+            FactOzonPriceSnapshot.product_id,
+            FactOzonPriceSnapshot.sku,
+            FactOzonPriceSnapshot.name,
+            FactOzonPriceSnapshot.seller_status,
+            FactOzonPriceSnapshot.snapshot_at,
+        )
+        .where(or_(*filters))
+        .order_by(FactOzonPriceSnapshot.snapshot_at.desc())
+    ).all()
+    for row in rows:
+        payload = {
+            "offer_id": _normalize_optional_text(row.offer_id),
+            "sku": _normalize_optional_int(row.sku),
+            "product_id": _normalize_optional_int(row.product_id),
+            "product_name": _normalize_optional_text(row.name),
+            "seller_status": _normalize_optional_text(row.seller_status),
+        }
+        if payload["offer_id"]:
+            lookup["by_offer_id"][payload["offer_id"]] = _merge_ozon_product_info(
+                lookup["by_offer_id"].get(payload["offer_id"], {}),
+                payload,
+            )
+        if payload["sku"] is not None:
+            lookup["by_sku"][payload["sku"]] = _merge_ozon_product_info(
+                lookup["by_sku"].get(payload["sku"], {}),
+                payload,
+            )
+        if payload["product_id"] is not None:
+            lookup["by_product_id"][payload["product_id"]] = _merge_ozon_product_info(
+                lookup["by_product_id"].get(payload["product_id"], {}),
+                payload,
+            )
+    return lookup
+
+
+
+def _build_ozon_chat_registry_dataframe(session, chats: list[ChatRegistry], *, now: Optional[datetime] = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    product_lookup = _load_ozon_product_lookup(session, chats)
+    rows: list[dict[str, Any]] = []
+    primary_product_keys: set[str] = set()
+    opened_chats = 0
+    closed_chats = 0
+
+    for chat in chats:
+        meta = parse_ozon_registry_meta(chat.reply_sign)
+        offer_id = _normalize_optional_text(meta.get("offer_id"))
+        sku = _normalize_optional_int(meta.get("sku"))
+        product_id = _normalize_optional_int(meta.get("product_id"))
+        resolved = _merge_ozon_product_info(
+            {
+                "offer_id": offer_id,
+                "sku": sku,
+                "product_id": product_id,
+                "product_name": _normalize_optional_text(meta.get("product_name")),
+                "vendor_code": _normalize_optional_text(meta.get("vendor_code")),
+            },
+            product_lookup["by_offer_id"].get(offer_id, {}),
+            product_lookup["by_sku"].get(sku, {}) if sku is not None else {},
+            product_lookup["by_product_id"].get(product_id, {}) if product_id is not None else {},
+        )
+        offer_id_text = _normalize_optional_text(resolved.get("offer_id"))
+        sku_value = _normalize_optional_int(resolved.get("sku"))
+        product_id_value = _normalize_optional_int(resolved.get("product_id"))
+        vendor_code_text = _normalize_optional_text(resolved.get("vendor_code")) or offer_id_text
+        product_name_text = _normalize_optional_text(resolved.get("product_name")) or "Название не найдено"
+        category_text = _normalize_optional_text(resolved.get("category")) or "-"
+        seller_status_text = _normalize_optional_text(resolved.get("seller_status")) or "-"
+        chat_status_label = _translate_ozon_chat_status(meta)
+        chat_status_key = ozon_registry_status_key(meta)
+        if chat_status_key == "opened":
+            opened_chats += 1
+        elif chat_status_key == "closed":
+            closed_chats += 1
+
+        unread_count = max(_normalize_optional_int(meta.get("unread_count")) or 0, 0)
+        days_since_last_num, days_since_last_label = _format_days_since_last_activity(chat.last_activity_at, now=now)
+        can_reply = ozon_registry_can_reply(meta)
+        ozon_article_text = _join_unique_values(
+            [
+                offer_id_text,
+                str(sku_value) if sku_value is not None else "",
+                str(product_id_value) if product_id_value is not None else "",
+                *(str(value) for value in (chat.product_ids or [])),
+            ],
+            fallback="-",
+        )
+        primary_product_key = offer_id_text or (str(sku_value) if sku_value is not None else "") or (str(product_id_value) if product_id_value is not None else "")
+        if primary_product_key:
+            primary_product_keys.add(primary_product_key)
+
+        search_parts = [
+            str(chat.chat_id or ""),
+            ozon_article_text,
+            product_name_text,
+            vendor_code_text,
+            _normalize_optional_text(meta.get("last_message_preview")),
+        ]
+        rows.append(
+            {
+                "ID чата": chat.chat_id,
+                "Статус чата": chat_status_label,
+                "Тип чата": _translate_ozon_chat_type(meta.get("chat_type")),
+                "Можно ответить": _format_ozon_can_reply(meta),
+                "Артикул Ozon / SKU / offer_id": ozon_article_text,
+                "Название товара": product_name_text,
+                "Артикул продавца": vendor_code_text or "-",
+                "Первая активность": _format_chat_dt(chat.first_activity_at),
+                "Последняя активность": _format_chat_dt(chat.last_activity_at),
+                "Дней с последней активности": days_since_last_label,
+                "Непрочитано": unread_count,
+                "Источник данных": _translate_ozon_chat_source(chat.source),
+                "Product ID": str(product_id_value) if product_id_value is not None else "-",
+                "SKU": str(sku_value) if sku_value is not None else "-",
+                "Offer ID": offer_id_text or "-",
+                "Категория": category_text,
+                "Статус товара Ozon": seller_status_text,
+                "Кто писал последним": _translate_ozon_last_sender(chat.last_sender),
+                "Последнее сообщение / описание": _normalize_optional_text(meta.get("last_message_preview")) or "-",
+                "Raw chat_id": chat.chat_id,
+                "Last message ID": _normalize_optional_text(meta.get("last_message_id")) or "-",
+                "First unread message ID": _normalize_optional_text(meta.get("first_unread_message_id")) or "-",
+                "__status_key": chat_status_key,
+                "__can_reply": can_reply,
+                "__last_activity_date": chat.last_activity_at.date() if chat.last_activity_at else None,
+                "__has_unread": unread_count > 0,
+                "__search_text": " ".join(part.lower() for part in search_parts if part).strip(),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    df.attrs.clear()
+    if df.empty:
+        for column_name in [*OZON_CHAT_REGISTRY_DISPLAY_COLUMNS, *OZON_CHAT_REGISTRY_EXPORT_COLUMNS, *OZON_CHAT_REGISTRY_DETAILS_COLUMNS]:
+            if column_name not in df.columns:
+                df[column_name] = pd.Series(dtype=object)
+
+    first_activity_values = [chat.first_activity_at for chat in chats if chat.first_activity_at]
+    last_activity_values = [chat.last_activity_at for chat in chats if chat.last_activity_at]
+    summary = {
+        "total_chats": len(chats),
+        "opened_chats": opened_chats,
+        "closed_chats": closed_chats,
+        "unique_product_keys": len(primary_product_keys),
+        "earliest_activity_label": _format_chat_dt(min(first_activity_values)) if first_activity_values else "-",
+        "latest_activity_label": _format_chat_dt(max(last_activity_values)) if last_activity_values else "-",
+        "min_last_activity_date": min((value.date() for value in last_activity_values), default=None),
+        "max_last_activity_date": max((value.date() for value in last_activity_values), default=None),
+    }
+    return df, summary
+
+
+
+def _filter_ozon_chat_registry_dataframe(
+    df: pd.DataFrame,
+    *,
+    status_filter: str,
+    can_reply_filter: str,
+    activity_date_from: Optional[date],
+    activity_date_to: Optional[date],
+    search_query: str,
+    unread_filter: str,
+) -> pd.DataFrame:
+    filtered_df = df.copy()
+    if filtered_df.empty:
+        return filtered_df
+
+    if status_filter == "Открытые":
+        filtered_df = filtered_df.loc[filtered_df["__status_key"] == "opened"].copy()
+    elif status_filter == "Закрытые":
+        filtered_df = filtered_df.loc[filtered_df["__status_key"] == "closed"].copy()
+    elif status_filter == "Другие":
+        filtered_df = filtered_df.loc[filtered_df["__status_key"] == "other"].copy()
+
+    if can_reply_filter == "Да":
+        filtered_df = filtered_df.loc[filtered_df["__can_reply"]].copy()
+    elif can_reply_filter == "Нет":
+        filtered_df = filtered_df.loc[~filtered_df["__can_reply"]].copy()
+
+    if activity_date_from is not None:
+        filtered_df = filtered_df.loc[
+            filtered_df["__last_activity_date"].map(lambda value: value is not None and value >= activity_date_from)
+        ].copy()
+    if activity_date_to is not None:
+        filtered_df = filtered_df.loc[
+            filtered_df["__last_activity_date"].map(lambda value: value is not None and value <= activity_date_to)
+        ].copy()
+
+    if unread_filter == "Только с непрочитанными":
+        filtered_df = filtered_df.loc[filtered_df["__has_unread"]].copy()
+    elif unread_filter == "Без непрочитанных":
+        filtered_df = filtered_df.loc[~filtered_df["__has_unread"]].copy()
+
+    search_text = str(search_query or "").strip().lower()
+    if search_text:
+        filtered_df = filtered_df.loc[
+            filtered_df["__search_text"].map(lambda value: search_text in str(value or ""))
+        ].copy()
+
+    filtered_df.attrs.clear()
+    return filtered_df
+
 def render_chats_registry_subtab(session) -> None:
+    started_at = perf_counter()
     st.subheader("Реестр WB-чатов")
     st.write(
         "Реестр WB-чатов показывает чаты, найденные через WB API. Текущие чаты доступны для ответа, "
@@ -1316,6 +1784,7 @@ def render_chats_registry_subtab(session) -> None:
     chats = list(session.scalars(stmt).all())
     if not chats:
         st.info("WB-реестр пока пуст. Выполните синхронизацию из API.")
+        _log_comm_timing("render_wb_registry", started_at, rows=0)
         return
 
     table_df, summary = _build_wb_chat_registry_dataframe(session, chats)
@@ -1381,11 +1850,12 @@ def render_chats_registry_subtab(session) -> None:
     )
     if filtered_df.empty:
         st.info("По выбранным фильтрам чаты не найдены.")
+        _log_comm_timing("render_wb_registry", started_at, rows=0)
         return
 
     display_df = filtered_df.reindex(columns=WB_CHAT_REGISTRY_DISPLAY_COLUMNS).copy()
     display_df.attrs.clear()
-    st.dataframe(display_df, width="stretch", hide_index=True)
+    _safe_comm_dataframe(display_df, width="stretch", hide_index=True)
 
     export_df = filtered_df.reindex(columns=WB_CHAT_REGISTRY_EXPORT_COLUMNS).copy()
     export_df.attrs.clear()
@@ -1399,7 +1869,9 @@ def render_chats_registry_subtab(session) -> None:
     with st.expander("Дополнительные поля", expanded=False):
         details_df = filtered_df.reindex(columns=WB_CHAT_REGISTRY_DETAILS_COLUMNS).copy()
         details_df.attrs.clear()
-        st.dataframe(details_df, width="stretch", hide_index=True)
+        _safe_comm_dataframe(details_df, width="stretch", hide_index=True)
+
+    _log_comm_timing("render_wb_registry", started_at, rows=len(display_df))
 
 
 def render_ozon_diagnostics_subtab(session) -> None:
@@ -1410,7 +1882,7 @@ def render_ozon_diagnostics_subtab(session) -> None:
     diag = st.session_state.get("comm_ozon_api_diag")
     sync_diag = st.session_state.get("comm_ozon_sync_diag")
     if not diag and not sync_diag:
-        st.info("Диагностика появится после синхронизации реестра Ozon. Для вне-UI проверки можно использовать `python scripts/probe_ozon_chat_list_readonly.py`.")
+        st.info("Диагностика появится после синхронизации реестра Ozon. Для вне-UI проверки можно использовать `python scripts/probe_ozon_chat_list_readonly.py` ??? `python scripts/probe_ozon_chat_history_readonly.py`.")
         st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
         return
 
@@ -1441,7 +1913,7 @@ def render_ozon_diagnostics_subtab(session) -> None:
         {"metric": "settings api key matches env", "value": runtime_diag.get("settings_api_key_matches_env", False)},
     ]
     st.write("#### Статус credentials и API")
-    st.dataframe(_prepare_diagnostics_dataframe(status_rows), width="stretch", hide_index=True)
+    _safe_comm_dataframe(_prepare_diagnostics_dataframe(status_rows), width="stretch", hide_index=True)
 
     if chat_list_summary:
         probe_rows = []
@@ -1459,12 +1931,12 @@ def render_ozon_diagnostics_subtab(session) -> None:
             )
         if probe_rows:
             st.write("#### Диагностика chat/list")
-            st.dataframe(_prepare_diagnostics_dataframe(probe_rows), width="stretch", hide_index=True)
+            _safe_comm_dataframe(_prepare_diagnostics_dataframe(probe_rows), width="stretch", hide_index=True)
 
     if sync_diag:
         st.write("#### Диагностика последнего sync")
         sync_df = _prepare_diagnostics_dataframe([{"metric": key, "value": value} for key, value in sync_diag.items()])
-        st.dataframe(sync_df, width="stretch", hide_index=True)
+        _safe_comm_dataframe(sync_df, width="stretch", hide_index=True)
         if sync_diag.get("history_status") == 404:
             st.warning("History endpoint: not confirmed, `POST /v1/chat/history` returned 404. Enrichment из этого endpoint пропущен.")
 
@@ -1472,7 +1944,7 @@ def render_ozon_diagnostics_subtab(session) -> None:
         select(func.count()).select_from(ChatRegistry).where(ChatRegistry.marketplace == "ozon")
     )
     st.write("#### Текущий статус реестра")
-    st.dataframe(
+    _safe_comm_dataframe(
         _prepare_diagnostics_dataframe(
             [
                 {"metric": "Ozon registry records", "value": ozon_registry_count or 0},
@@ -1488,6 +1960,7 @@ def render_ozon_diagnostics_subtab(session) -> None:
 
 
 def render_ozon_registry_subtab(session) -> None:
+    started_at = perf_counter()
     st.subheader("Реестр Ozon-чатов")
     st.caption("Реестр строится из `POST /v3/chat/list`. `POST /v1/chat/history` может вернуть 404 и не считается фатальной ошибкой sync.")
     _render_ozon_registry_actions(session, key_prefix="ozon_registry")
@@ -1503,9 +1976,13 @@ def render_ozon_registry_subtab(session) -> None:
     if sync_diag:
         chat_list_status = sync_diag.get("chat_list_status_code")
         fetched_chats = sync_diag.get("fetched_chats_count") or 0
+        fetched_pages = sync_diag.get("fetched_pages") or 0
         history_value = "not confirmed, 404" if sync_diag.get("history_status") == 404 else "не подтверждён"
         if chat_list_status == 200:
-            st.info(f"Chat API доступен: /v3/chat/list OK. Найдено чатов: {fetched_chats}. History endpoint: {history_value}.")
+            st.info(
+                f"Chat API доступен: /v3/chat/list OK. Найдено чатов: {fetched_chats}. "
+                f"Страниц: {fetched_pages}. History endpoint: {history_value}."
+            )
         else:
             st.warning(f"Chat API: status {chat_list_status}. History endpoint: {history_value}.")
 
@@ -1514,25 +1991,103 @@ def render_ozon_registry_subtab(session) -> None:
     if not chats:
         st.info("Реестр Ozon-чатов пуст. Сначала выполните синхронизацию реестра в этом разделе.")
         st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
+        _log_comm_timing("render_ozon_registry", started_at, rows=0)
         return
 
-    chat_rows = [
-        {
-            "Chat ID": chat.chat_id,
-            "Product IDs": ", ".join(map(str, chat.product_ids or [])),
-            "Last sender": chat.last_sender or "-",
-            "First activity": _format_chat_dt(chat.first_activity_at),
-            "Last activity": _format_chat_dt(chat.last_activity_at),
-            "Current chat exists": "Да" if chat.current_chat_exists else "Нет",
-            "Source": chat.source or "-",
-        }
-        for chat in chats
-    ]
-    df_chats = pd.DataFrame(chat_rows)
-    df_chats.attrs.clear()
-    st.dataframe(df_chats, width="stretch", hide_index=True)
-    st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
+    table_df, summary = _build_ozon_chat_registry_dataframe(session, chats)
 
+    metrics = st.columns(6)
+    metrics[0].metric("Всего Ozon-чатов", summary["total_chats"])
+    metrics[1].metric("Открытых чатов", summary["opened_chats"])
+    metrics[2].metric("Закрытых чатов", summary["closed_chats"])
+    metrics[3].metric("Уникальных товаров / SKU", summary["unique_product_keys"])
+    metrics[4].metric("Самая ранняя активность", summary["earliest_activity_label"])
+    metrics[5].metric("Последняя активность", summary["latest_activity_label"])
+
+    filter_cols = st.columns([1, 1, 2, 2, 1])
+    status_filter = filter_cols[0].selectbox(
+        "Статус чата",
+        options=["Все", "Открытые", "Закрытые", "Другие"],
+        index=0,
+        key="ozon_chat_registry_status_filter",
+    )
+    can_reply_filter = filter_cols[1].selectbox(
+        "Можно ответить",
+        options=["Все", "Да", "Нет"],
+        index=0,
+        key="ozon_chat_registry_can_reply_filter",
+    )
+
+    min_last_activity_date = summary.get("min_last_activity_date")
+    max_last_activity_date = summary.get("max_last_activity_date")
+    if min_last_activity_date is not None and max_last_activity_date is not None:
+        activity_date_from = filter_cols[2].date_input(
+            "Последняя активность: от",
+            value=min_last_activity_date,
+            min_value=min_last_activity_date,
+            max_value=max_last_activity_date,
+            key="ozon_chat_registry_date_from",
+        )
+        activity_date_to = filter_cols[2].date_input(
+            "Последняя активность: до",
+            value=max_last_activity_date,
+            min_value=min_last_activity_date,
+            max_value=max_last_activity_date,
+            key="ozon_chat_registry_date_to",
+        )
+    else:
+        activity_date_from = None
+        activity_date_to = None
+        filter_cols[2].caption("Нет дат последней активности для фильтра")
+
+    search_query = filter_cols[3].text_input(
+        "Поиск",
+        value="",
+        placeholder="ID чата / SKU / offer_id / название / артикул продавца",
+        key="ozon_chat_registry_search_query",
+    )
+    unread_filter = filter_cols[4].selectbox(
+        "Непрочитанные",
+        options=["Все", "Только с непрочитанными", "Без непрочитанных"],
+        index=0,
+        key="ozon_chat_registry_unread_filter",
+    )
+
+    filtered_df = _filter_ozon_chat_registry_dataframe(
+        table_df,
+        status_filter=status_filter,
+        can_reply_filter=can_reply_filter,
+        activity_date_from=activity_date_from,
+        activity_date_to=activity_date_to,
+        search_query=search_query,
+        unread_filter=unread_filter,
+    )
+    if filtered_df.empty:
+        st.info("По выбранным фильтрам Ozon-чаты не найдены.")
+        st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
+        _log_comm_timing("render_ozon_registry", started_at, rows=0)
+        return
+
+    display_df = filtered_df.reindex(columns=OZON_CHAT_REGISTRY_DISPLAY_COLUMNS).copy()
+    display_df.attrs.clear()
+    _safe_comm_dataframe(display_df, width="stretch", hide_index=True)
+
+    export_df = filtered_df.reindex(columns=OZON_CHAT_REGISTRY_EXPORT_COLUMNS).copy()
+    export_df.attrs.clear()
+    st.download_button(
+        "Скачать CSV",
+        data=export_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="ozon_chat_registry.csv",
+        mime="text/csv",
+    )
+
+    with st.expander("Дополнительные поля", expanded=False):
+        details_df = filtered_df.reindex(columns=OZON_CHAT_REGISTRY_DETAILS_COLUMNS).copy()
+        details_df.attrs.clear()
+        _safe_comm_dataframe(details_df, width="stretch", hide_index=True)
+
+    st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
+    _log_comm_timing("render_ozon_registry", started_at, rows=len(display_df))
 
 def render_history_subtab(session, marketplace: str = "wb") -> None:
     title = "История отправок WB" if marketplace == "wb" else "История отправок Ozon"
@@ -1559,4 +2114,4 @@ def render_history_subtab(session, marketplace: str = "wb") -> None:
 
     df_logs = pd.DataFrame(log_rows)
     df_logs.attrs.clear()
-    st.dataframe(df_logs, width="stretch", hide_index=True)
+    _safe_comm_dataframe(df_logs, width="stretch", hide_index=True)

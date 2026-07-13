@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Mapping, Optional
@@ -10,12 +11,21 @@ from sqlalchemy.orm import Session
 
 from src.clients.ozon_chats_client import (
     CHAT_ID_CANDIDATES,
+    CHAT_STATUS_CANDIDATES,
+    CHAT_TYPE_CANDIDATES,
     FIRST_ACTIVITY_CANDIDATES,
+    FIRST_UNREAD_MESSAGE_ID_CANDIDATES,
     LAST_ACTIVITY_CANDIDATES,
+    LAST_MESSAGE_ID_CANDIDATES,
+    LAST_MESSAGE_TEXT_CANDIDATES,
     LAST_SENDER_CANDIDATES,
+    OFFER_ID_CANDIDATES,
     ORDER_ID_CANDIDATES,
-    PRODUCT_ID_CANDIDATES,
+    PRODUCT_NAME_CANDIDATES,
+    PRODUCT_NUMERIC_ID_CANDIDATES,
     REPLY_CAPABLE_CANDIDATES,
+    UNREAD_COUNT_CANDIDATES,
+    VENDOR_CODE_CANDIDATES,
     OzonChatsClient,
     coerce_int,
     discover_top_level_items,
@@ -58,6 +68,80 @@ def parse_timestamp(value: Any) -> Optional[datetime]:
         except ValueError:
             return None
     return None
+
+
+OZON_REGISTRY_META_PREFIX = "__ozon_meta__:"
+OZON_OPEN_STATUSES = {"OPENED", "OPEN", "ACTIVE"}
+OZON_CLOSED_STATUSES = {"CLOSED", "CLOSE", "ARCHIVED", "ARCHIVE", "DONE"}
+
+
+def _clean_text(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def serialize_ozon_registry_meta(meta: Mapping[str, Any]) -> Optional[str]:
+    cleaned: dict[str, Any] = {}
+    for key, value in dict(meta).items():
+        if value in (None, "", [], {}):
+            continue
+        cleaned[str(key)] = value
+    if not cleaned:
+        return None
+    return OZON_REGISTRY_META_PREFIX + json.dumps(cleaned, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def parse_ozon_registry_meta(raw_value: Any) -> dict[str, Any]:
+    text_value = str(raw_value or "").strip()
+    if not text_value:
+        return {}
+    if text_value.startswith(OZON_REGISTRY_META_PREFIX):
+        try:
+            parsed = json.loads(text_value[len(OZON_REGISTRY_META_PREFIX):])
+        except json.JSONDecodeError:
+            return {"raw_meta": text_value}
+        return parsed if isinstance(parsed, dict) else {"raw_meta": text_value}
+    return {"legacy_reply_sign": text_value, "can_reply": True}
+
+
+def ozon_registry_status_key(meta: Mapping[str, Any]) -> str:
+    status_value = str(meta.get("chat_status") or "").strip().upper()
+    if status_value in OZON_OPEN_STATUSES:
+        return "opened"
+    if status_value in OZON_CLOSED_STATUSES:
+        return "closed"
+    return "other"
+
+
+def ozon_registry_can_reply(meta: Mapping[str, Any]) -> bool:
+    explicit = meta.get("can_reply")
+    if isinstance(explicit, bool):
+        return explicit
+    if explicit not in (None, ""):
+        return str(explicit).strip().lower() not in {"false", "0", "no", "off"}
+    return ozon_registry_status_key(meta) == "opened"
+
+
+def _merge_ozon_registry_meta(existing: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(existing)
+    for key, value in dict(incoming).items():
+        if value in (None, "", [], {}):
+            continue
+        if key == "can_reply":
+            merged[key] = bool(merged.get(key)) or bool(value)
+            continue
+        if key == "unread_count":
+            current = coerce_int(merged.get(key)) or 0
+            candidate = coerce_int(value) or 0
+            merged[key] = max(current, candidate)
+            continue
+        merged[key] = value
+    if "chat_status" in merged:
+        merged["chat_status"] = str(merged["chat_status"]).strip().upper()
+    merged["can_reply"] = ozon_registry_can_reply(merged)
+    return merged
 
 
 class BaseChatProvider(ABC):
@@ -236,24 +320,18 @@ class OzonChatProvider(BaseChatProvider):
         self.last_sync_diagnostics: dict[str, Any] = {}
 
     def fetch_current_chats(self) -> List[Dict[str, Any]]:
-        summary = self.client.list_chats()
-        payload = summary.get("result", {}).get("payload")
-        return [item for item in discover_top_level_items(payload or {}) if isinstance(item, dict)]
+        summary = self.client.list_all_chats(max_pages=50)
+        return [item for item in summary.get("items", []) if isinstance(item, dict)]
 
     def fetch_events(self, max_pages: int = 10) -> List[Dict[str, Any]]:
         current_chats = self.fetch_current_chats()
-        chat_ids: List[str] = []
-        for chat in current_chats:
-            value = extract_first_value(chat, CHAT_ID_CANDIDATES)
-            if value in (None, ""):
-                continue
-            chat_ids.append(str(value))
-            if len(chat_ids) >= max_pages:
-                break
         all_events: List[Dict[str, Any]] = []
         seen_fingerprints: set[str] = set()
-        for chat_id in chat_ids:
-            summary = self.client.get_chat_history(chat_id)
+        for row in current_chats[:max_pages]:
+            chat_id = extract_first_value(row, CHAT_ID_CANDIDATES)
+            if chat_id in (None, ""):
+                continue
+            summary = self.client.get_chat_history(str(chat_id), context=row)
             payload = summary.get("result", {}).get("payload")
             for item in discover_top_level_items(payload or {}):
                 if not isinstance(item, dict):
@@ -264,13 +342,13 @@ class OzonChatProvider(BaseChatProvider):
                 seen_fingerprints.add(fingerprint)
                 if extract_first_value(item, CHAT_ID_CANDIDATES) in (None, ""):
                     item = dict(item)
-                    item["chat_id"] = chat_id
+                    item["chat_id"] = str(chat_id)
                 all_events.append(item)
         return all_events
 
     def _extract_product_ids(self, row: Mapping[str, Any]) -> List[int]:
         values: set[int] = set()
-        direct_value = extract_first_value(row, PRODUCT_ID_CANDIDATES)
+        direct_value = extract_first_value(row, PRODUCT_NUMERIC_ID_CANDIDATES)
         direct_int = coerce_int(direct_value)
         if direct_int is not None:
             values.add(direct_int)
@@ -280,7 +358,7 @@ class OzonChatProvider(BaseChatProvider):
                 for item in nested:
                     if not isinstance(item, Mapping):
                         continue
-                    nested_value = extract_first_value(item, PRODUCT_ID_CANDIDATES)
+                    nested_value = extract_first_value(item, PRODUCT_NUMERIC_ID_CANDIDATES)
                     nested_int = coerce_int(nested_value)
                     if nested_int is not None:
                         values.add(nested_int)
@@ -299,17 +377,38 @@ class OzonChatProvider(BaseChatProvider):
                     tokens.add(str(nested_value))
         return sorted(tokens)
 
-    def _derive_reply_sign(self, row: Mapping[str, Any]) -> Optional[str]:
-        value = extract_first_value(row, REPLY_CAPABLE_CANDIDATES)
-        return value.strip() if isinstance(value, str) and value.strip() else None
+    def _extract_meta_from_row(self, row: Mapping[str, Any], *, source: str) -> dict[str, Any]:
+        meta = {
+            "chat_status": _clean_text(extract_first_value(row, CHAT_STATUS_CANDIDATES)),
+            "chat_type": _clean_text(extract_first_value(row, CHAT_TYPE_CANDIDATES)),
+            "can_reply": self._is_reply_capable(row),
+            "unread_count": coerce_int(extract_first_value(row, UNREAD_COUNT_CANDIDATES)),
+            "last_message_id": _clean_text(extract_first_value(row, LAST_MESSAGE_ID_CANDIDATES)),
+            "first_unread_message_id": _clean_text(extract_first_value(row, FIRST_UNREAD_MESSAGE_ID_CANDIDATES)),
+            "offer_id": _clean_text(extract_first_value(row, OFFER_ID_CANDIDATES)),
+            "product_id": coerce_int(extract_first_value(row, ("product_id", "productId"))),
+            "sku": coerce_int(extract_first_value(row, ("sku", "sku_id", "skuId"))),
+            "product_name": _clean_text(extract_first_value(row, PRODUCT_NAME_CANDIDATES)),
+            "vendor_code": _clean_text(extract_first_value(row, VENDOR_CODE_CANDIDATES)),
+            "last_message_preview": _clean_text(extract_first_value(row, LAST_MESSAGE_TEXT_CANDIDATES)),
+            "source_endpoint": source,
+        }
+        if meta.get("chat_status"):
+            meta["chat_status"] = str(meta["chat_status"]).upper()
+        meta["can_reply"] = ozon_registry_can_reply(meta)
+        return meta
 
     def _is_reply_capable(self, row: Mapping[str, Any]) -> bool:
         value = extract_first_value(row, REPLY_CAPABLE_CANDIDATES)
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
-            return value.strip().lower() not in {"", "false", "0", "no", "off"}
-        return value not in (None, "", 0)
+            normalized = value.strip().lower()
+            if normalized in {"", "false", "0", "no", "off"}:
+                return False
+            return True
+        status_value = _clean_text(extract_first_value(row, CHAT_STATUS_CANDIDATES))
+        return str(status_value or "").upper() in OZON_OPEN_STATUSES
 
     def _row_to_registry_entry(self, row: Mapping[str, Any], *, source: str) -> Optional[dict[str, Any]]:
         chat_id = extract_first_value(row, CHAT_ID_CANDIDATES)
@@ -317,13 +416,14 @@ class OzonChatProvider(BaseChatProvider):
             return None
         first_activity = parse_timestamp(extract_first_value(row, FIRST_ACTIVITY_CANDIDATES))
         last_activity = parse_timestamp(extract_first_value(row, LAST_ACTIVITY_CANDIDATES)) or first_activity
+        meta = self._extract_meta_from_row(row, source=source)
         return {
             "marketplace": "ozon",
             "chat_id": str(chat_id),
             "first_activity_at": first_activity,
             "last_activity_at": last_activity,
             "last_sender": extract_first_value(row, LAST_SENDER_CANDIDATES),
-            "reply_sign": self._derive_reply_sign(row),
+            "reply_sign": serialize_ozon_registry_meta(meta),
             "current_chat_exists": True,
             "product_ids": set(self._extract_product_ids(row)),
             "source": source,
@@ -331,14 +431,10 @@ class OzonChatProvider(BaseChatProvider):
 
     def build_chat_registry(self, session: Session, max_event_pages: int = 10) -> int:
         logger.info("Starting Ozon read-only chat registry sync")
-        chat_list_summary = self.client.list_chats()
+        chat_list_summary = self.client.list_all_chats(max_pages=50)
         chat_list_result = chat_list_summary.get("result", {})
         chat_list_status = chat_list_result.get("status_code")
-        current_chats = [
-            item
-            for item in discover_top_level_items(chat_list_result.get("payload") or {})
-            if isinstance(item, dict)
-        ]
+        current_chats = [item for item in chat_list_summary.get("items", []) if isinstance(item, dict)]
 
         chats_data: dict[str, dict[str, Any]] = {}
         chats_with_order_linkage: set[str] = set()
@@ -352,18 +448,23 @@ class OzonChatProvider(BaseChatProvider):
             if not entry:
                 continue
             chats_data[entry["chat_id"]] = entry
+            meta = parse_ozon_registry_meta(entry.get("reply_sign"))
             if entry["product_ids"]:
                 chats_with_product_linkage += 1
             if self._extract_order_tokens(row):
                 chats_with_order_linkage.add(entry["chat_id"])
-            if self._is_reply_capable(row):
+            if ozon_registry_can_reply(meta):
                 replyable_chat_ids.add(entry["chat_id"])
 
+        chat_context_by_id = {entry["chat_id"]: row for entry, row in [
+            (self._row_to_registry_entry(row, source="v3_chat_list"), row) for row in current_chats
+        ] if entry}
         chat_ids_for_history = list(chats_data.keys())[:max_event_pages]
         for chat_id in chat_ids_for_history:
-            history_summary = self.client.get_chat_history(chat_id)
+            history_summary = self.client.get_chat_history(chat_id, context=chat_context_by_id.get(chat_id))
             history_result = history_summary.get("result", {})
-            history_status_codes.append(history_result.get("status_code"))
+            history_status = history_result.get("status_code")
+            history_status_codes.append(history_status)
             payload = history_result.get("payload")
             for event in discover_top_level_items(payload or {}):
                 if not isinstance(event, dict):
@@ -389,13 +490,18 @@ class OzonChatProvider(BaseChatProvider):
                         if entry["last_sender"]:
                             existing["last_sender"] = entry["last_sender"]
                     existing["product_ids"].update(entry["product_ids"])
-                    if entry["reply_sign"] and not existing["reply_sign"]:
-                        existing["reply_sign"] = entry["reply_sign"]
+                    merged_meta = _merge_ozon_registry_meta(
+                        parse_ozon_registry_meta(existing.get("reply_sign")),
+                        parse_ozon_registry_meta(entry.get("reply_sign")),
+                    )
+                    existing["reply_sign"] = serialize_ozon_registry_meta(merged_meta)
+                    if existing.get("source") != entry.get("source"):
+                        existing["source"] = "v3_chat_list+v1_chat_history"
                 if self._extract_order_tokens(event):
                     chats_with_order_linkage.add(entry["chat_id"])
-                if self._is_reply_capable(event):
+                if ozon_registry_can_reply(parse_ozon_registry_meta(entry.get("reply_sign"))):
                     replyable_chat_ids.add(entry["chat_id"])
-            if history_result.get("status_code") == 404 or history_result.get("is_role_error") or history_result.get("is_auth_error"):
+            if history_status == 404 or history_result.get("is_role_error") or history_result.get("is_auth_error"):
                 break
 
         rows_to_upsert: List[dict[str, Any]] = []
@@ -418,7 +524,12 @@ class OzonChatProvider(BaseChatProvider):
         first_history_status = history_status_codes[0] if history_status_codes else None
         history_attempted = bool(chat_ids_for_history)
         self.last_sync_diagnostics = {
-            "fetched_chats_count": len(current_chats),
+            "fetched_pages": chat_list_summary.get("fetched_pages", 0),
+            "fetched_chats_raw": chat_list_summary.get("fetched_chats_raw", len(current_chats)),
+            "unique_chats": chat_list_summary.get("unique_chats", len(current_chats)),
+            "chat_list_stop_reason": chat_list_summary.get("stop_reason"),
+            "repeated_cursor": chat_list_summary.get("repeated_cursor", False),
+            "fetched_chats_count": chat_list_summary.get("unique_chats", len(current_chats)),
             "prepared_records_count": len(rows_to_upsert),
             "committed": False,
             "chat_registry_marketplace": "ozon",
@@ -447,14 +558,16 @@ class OzonChatProvider(BaseChatProvider):
         }
         logger.info(
             "Ozon chat registry sync diagnostics: "
-            f"fetched_chats={self.last_sync_diagnostics['fetched_chats_count']}, "
+            f"fetched_pages={self.last_sync_diagnostics['fetched_pages']}, "
+            f"fetched_chats_raw={self.last_sync_diagnostics['fetched_chats_raw']}, "
+            f"unique_chats={self.last_sync_diagnostics['unique_chats']}, "
             f"prepared={self.last_sync_diagnostics['prepared_records_count']}, "
             f"registry_ozon={self.last_sync_diagnostics['chat_registry_count_ozon']}, "
             f"chat_list_status={self.last_sync_diagnostics['chat_list_status_code']}, "
             f"history_status={self.last_sync_diagnostics['history_status']}, "
             f"history_confirmed={self.last_sync_diagnostics['history_confirmed']}, "
             f"skipped_history={self.last_sync_diagnostics['skipped_history']}, "
-            f"current_chats={self.last_sync_diagnostics['current_chats_fetched']}"
+            f"stop_reason={self.last_sync_diagnostics['chat_list_stop_reason']}"
         )
         return len(rows_to_upsert)
 
