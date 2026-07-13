@@ -413,7 +413,6 @@ class OzonChatsClient(BaseAPIClient):
 
     def _chat_list_payloads(self) -> tuple[dict[str, Any], ...]:
         return (
-            {},
             {"limit": 100},
             {"limit": 100, "offset": 0},
         )

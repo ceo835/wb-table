@@ -317,3 +317,13 @@ def test_probe_readonly_access_exposes_runtime_diagnostics(monkeypatch) -> None:
     assert runtime["env_ozon_api_key_present"] is True
     assert runtime["settings_client_id_matches_env"] is True
     assert runtime["settings_api_key_matches_env"] is True
+
+
+
+def test_chat_list_payloads_use_confirmed_limit_request() -> None:
+    client = OzonChatsClient(client_id="cid", api_key="key")
+
+    assert client._chat_list_payloads() == (
+        {"limit": 100},
+        {"limit": 100, "offset": 0},
+    )
