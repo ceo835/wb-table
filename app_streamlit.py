@@ -16,6 +16,16 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import func, select, text
 
+try:
+    pd.options.mode.string_storage = "python"
+except Exception:
+    pass
+
+try:
+    pd.options.future.infer_string = False
+except Exception:
+    pass
+
 from src.ad_campaign_product_dataset import (
     AD_CAMPAIGN_PRODUCT_COLUMNS,
     AD_CAMPAIGN_PRODUCT_DATASET_PATH,
@@ -1170,7 +1180,11 @@ def attach_vvbromo_to_df(df: pd.DataFrame) -> pd.DataFrame:
                 df[col] = pd.NA
         return df
 
-    vv_df = pd.DataFrame()
+    vv_columns = pd.Index(
+        ["vv_report_date", "vv_nm_id", "vv_sales", "vv_profit", "vv_profit_per_unit"],
+        dtype=object,
+    )
+    vv_df = pd.DataFrame(columns=vv_columns, dtype=object)
     try:
         from src.db.session import session_scope
         from src.db.models import FactVvbromoProductDay
@@ -1183,13 +1197,18 @@ def attach_vvbromo_to_df(df: pd.DataFrame) -> pd.DataFrame:
                 )
             ).scalars().all()
             if db_rows:
-                vv_df = pd.DataFrame([{
-                    "vv_report_date": r.day,
-                    "vv_nm_id": int(r.nm_id),
-                    "vv_sales": r.organic_sales,
-                    "vv_profit": float(r.operating_profit) if r.operating_profit is not None else None,
-                    "vv_profit_per_unit": float(r.operating_profit_per_unit) if r.operating_profit_per_unit is not None else None
-                } for r in db_rows])
+                vv_records = [
+                    {
+                        "vv_report_date": r.day,
+                        "vv_nm_id": int(r.nm_id),
+                        "vv_sales": r.organic_sales,
+                        "vv_profit": float(r.operating_profit) if r.operating_profit is not None else None,
+                        "vv_profit_per_unit": float(r.operating_profit_per_unit) if r.operating_profit_per_unit is not None else None,
+                    }
+                    for r in db_rows
+                ]
+                vv_df = pd.DataFrame.from_records(vv_records, columns=vv_columns)
+                vv_df = vv_df.astype(object)
     except Exception as e:
         logger.warning(f"Database connection failed while loading VVBromo: {e}. Falling back to CSV data or NULL.")
         # Если БД недоступна, просто возвращаем df (если колонок нет, добавим пустые)
@@ -1208,6 +1227,7 @@ def attach_vvbromo_to_df(df: pd.DataFrame) -> pd.DataFrame:
     # Преобразуем типы в vv_df для точного merge
     vv_df["vv_report_date"] = pd.to_datetime(vv_df["vv_report_date"]).dt.date
     vv_df["vv_nm_id"] = pd.to_numeric(vv_df["vv_nm_id"], errors="coerce")
+    vv_df = vv_df.astype(object)
 
     # Сделаем merge
     # Чтобы не дублировать колонки, удалим их из df перед merge

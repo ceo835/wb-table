@@ -6963,6 +6963,84 @@ def test_ozon_spp_cats_donor_mapping(monkeypatch) -> None:
 
 
 
+def test_attach_vvbromo_to_df_constructs_object_dataframe_without_pyarrow_strings(monkeypatch) -> None:
+    source_df = pd.DataFrame(
+        [
+            {"nm_id": 101, "report_date": pd.Timestamp("2026-07-01").date(), "sku": " sku-101 ", "title": "Товар A"},
+            {"nm_id": 202, "report_date": pd.Timestamp("2026-07-01").date(), "sku": "sku-202", "title": "Товар B"},
+        ]
+    )
+
+    class _FakeColumn:
+        def in_(self, _values):
+            return self
+
+    class _FakeFactVvbromoProductDay:
+        nm_id = _FakeColumn()
+        day = _FakeColumn()
+
+    class _FakeSelect:
+        def where(self, *_args, **_kwargs):
+            return self
+
+    class _FakeExecuteResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _FakeSession:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def execute(self, _query):
+            return _FakeExecuteResult(self._rows)
+
+    class _FakeSessionScope:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def __enter__(self):
+            return _FakeSession(self._rows)
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Row:
+        def __init__(self, day, nm_id, organic_sales, operating_profit, operating_profit_per_unit):
+            self.day = day
+            self.nm_id = nm_id
+            self.organic_sales = organic_sales
+            self.operating_profit = operating_profit
+            self.operating_profit_per_unit = operating_profit_per_unit
+
+    rows = [
+        _Row(pd.Timestamp("2026-07-01").date(), 101, 7, 111.5, 15.9),
+        _Row(pd.Timestamp("2026-07-01").date(), 202, 3, 44.0, 14.6),
+    ]
+
+    import src.db.models as db_models
+    import src.db.session as db_session
+    import sqlalchemy
+
+    monkeypatch.setattr(db_models, "FactVvbromoProductDay", _FakeFactVvbromoProductDay, raising=False)
+    monkeypatch.setattr(db_session, "session_scope", lambda: _FakeSessionScope(rows), raising=False)
+    monkeypatch.setattr(sqlalchemy, "select", lambda *_args, **_kwargs: _FakeSelect(), raising=False)
+
+    result = app_streamlit.attach_vvbromo_to_df(source_df)
+
+    assert not result.empty
+    assert result["vvbromo_organic_sales"].tolist() == [7, 3]
+    assert result["vvbromo_operating_profit"].tolist() == [111.5, 44.0]
+    assert result["vvbromo_operating_profit_per_unit"].tolist() == [15.9, 14.6]
+    assert str(result["sku"].dtype) != "string[pyarrow]"
+    assert str(result["title"].dtype) != "string[pyarrow]"
+
+
 def test_build_stock_all_product_level_merges_wb_supply_by_nm_id_and_vendor_fallback() -> None:
     snapshot_df = pd.DataFrame(
         [
