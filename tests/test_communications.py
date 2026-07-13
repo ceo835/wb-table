@@ -10,9 +10,17 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from src.db.base import Base
 from src.db.communications_models import Campaign, ChatRegistry, CampaignRecipient, SendLog
+from src.db.models import DimProduct
 from src.services.communications.campaign_service import CampaignService
 from src.services.communications.audience_service import AudienceService
 from src.services.communications.providers import WBChatProvider
+from src.services.communications.ui import (
+    WB_CHAT_REGISTRY_DETAILS_COLUMNS,
+    WB_CHAT_REGISTRY_DISPLAY_COLUMNS,
+    WB_CHAT_REGISTRY_EXPORT_COLUMNS,
+    _build_wb_chat_registry_dataframe,
+    _filter_wb_chat_registry_dataframe,
+)
 
 
 # Mock response helpers
@@ -207,7 +215,8 @@ def test_audience_filtering_and_limits(db_session):
 
     # We patch WBChatProvider's build_chat_registry in AudienceService to avoid API call
     from unittest.mock import patch
-    with patch("src.services.communications.providers.WBChatProvider.build_chat_registry", return_value=0):
+    with patch("src.services.communications.audience_service.WBChatProvider") as provider_cls:
+        provider_cls.return_value.build_chat_registry.return_value = 0
         stats = AudienceService.collect_and_filter_audience(db_session, camp.id)
         db_session.commit()
 
@@ -281,3 +290,169 @@ def test_send_campaign_simulation(db_session, monkeypatch):
     assert len(logs) == 2
     assert logs[0].send_status == "sent"
     assert logs[0].message_text == "Final text"
+
+
+def test_build_wb_chat_registry_dataframe_localizes_columns_and_joins_product_data(db_session):
+    db_session.add(
+        DimProduct(
+            nm_id=100,
+            supplier_article="SUP-100",
+            title="Трусы женские",
+            brand="VVBromo",
+            subject="Белье",
+            category="Женская одежда",
+        )
+    )
+    db_session.commit()
+
+    chats = [
+        ChatRegistry(
+            marketplace="wb",
+            chat_id="chat-current",
+            source="chats",
+            reply_sign="reply-1",
+            product_ids=[100],
+            first_activity_at=datetime(2026, 7, 1, 10, 0, tzinfo=UTC),
+            last_activity_at=datetime(2026, 7, 12, 9, 0, tzinfo=UTC),
+            updated_at=datetime.now(UTC),
+        ),
+        ChatRegistry(
+            marketplace="wb",
+            chat_id="chat-current-no-reply",
+            source="chats",
+            reply_sign="",
+            product_ids=[101],
+            first_activity_at=datetime(2026, 7, 2, 10, 0, tzinfo=UTC),
+            last_activity_at=datetime(2026, 7, 11, 9, 0, tzinfo=UTC),
+            updated_at=datetime.now(UTC),
+        ),
+        ChatRegistry(
+            marketplace="wb",
+            chat_id="chat-history",
+            source="events",
+            reply_sign=None,
+            last_sender="client",
+            product_ids=[999],
+            first_activity_at=datetime(2026, 6, 30, 8, 0, tzinfo=UTC),
+            last_activity_at=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
+            updated_at=datetime.now(UTC),
+        ),
+    ]
+    db_session.add_all(chats)
+    db_session.commit()
+
+    table_df, summary = _build_wb_chat_registry_dataframe(
+        db_session,
+        chats,
+        now=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    rows = {row["ID чата"]: row for row in table_df.to_dict("records")}
+
+    assert WB_CHAT_REGISTRY_DISPLAY_COLUMNS == [
+        "ID чата",
+        "Статус чата",
+        "Артикул WB",
+        "Название товара",
+        "Первая активность",
+        "Последняя активность",
+        "Дней с последней активности",
+        "Источник",
+        "Можно ответить",
+    ]
+    assert "Технический ключ ответа" in WB_CHAT_REGISTRY_EXPORT_COLUMNS
+    assert "Бренд" in WB_CHAT_REGISTRY_DETAILS_COLUMNS
+    assert summary["total_chats"] == 3
+    assert summary["current_source_chats"] == 2
+    assert summary["history_source_chats"] == 1
+    assert summary["unique_wb_articles"] == 3
+
+    assert rows["chat-current"]["Источник"] == "Текущий чат"
+    assert rows["chat-current"]["Можно ответить"] == "Да"
+    assert rows["chat-current"]["Статус чата"] == "Текущий, доступен для ответа"
+    assert rows["chat-current"]["Название товара"] == "Трусы женские"
+    assert rows["chat-current"]["Артикул продавца"] == "SUP-100"
+    assert rows["chat-current"]["Бренд"] == "VVBromo"
+    assert rows["chat-current"]["Категория"] == "Женская одежда"
+    assert rows["chat-current"]["Предмет"] == "Белье"
+    assert rows["chat-current"]["Дней с последней активности"] == "1 день"
+
+    assert rows["chat-current-no-reply"]["Можно ответить"] == "Нет"
+    assert rows["chat-current-no-reply"]["Статус чата"] == "Исторический / только для анализа"
+
+    assert rows["chat-history"]["Источник"] == "История событий"
+    assert rows["chat-history"]["Можно ответить"] == "Нет"
+    assert rows["chat-history"]["Название товара"] == "Название не найдено"
+    assert rows["chat-history"]["Кто писал последним"] == "Покупатель"
+    assert rows["chat-history"]["Технический ключ ответа"] == "-"
+
+
+def test_filter_wb_chat_registry_dataframe_filters_source_reply_date_and_search(db_session):
+    db_session.add(
+        DimProduct(
+            nm_id=100,
+            supplier_article="SUP-100",
+            title="Трусы женские",
+            brand="VVBromo",
+            subject="Белье",
+            category="Женская одежда",
+        )
+    )
+    db_session.commit()
+
+    chats = [
+        ChatRegistry(
+            marketplace="wb",
+            chat_id="chat-current",
+            source="chats",
+            reply_sign="reply-1",
+            product_ids=[100],
+            first_activity_at=datetime(2026, 7, 1, 10, 0, tzinfo=UTC),
+            last_activity_at=datetime(2026, 7, 12, 9, 0, tzinfo=UTC),
+            updated_at=datetime.now(UTC),
+        ),
+        ChatRegistry(
+            marketplace="wb",
+            chat_id="chat-history",
+            source="events",
+            reply_sign=None,
+            product_ids=[999],
+            first_activity_at=datetime(2026, 6, 30, 8, 0, tzinfo=UTC),
+            last_activity_at=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
+            updated_at=datetime.now(UTC),
+        ),
+    ]
+    table_df, _ = _build_wb_chat_registry_dataframe(
+        db_session,
+        chats,
+        now=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+
+    history_df = _filter_wb_chat_registry_dataframe(
+        table_df,
+        source_filter="История событий",
+        can_reply_filter="Все",
+        activity_date_from=None,
+        activity_date_to=None,
+        search_query="",
+    )
+    assert history_df["ID чата"].tolist() == ["chat-history"]
+
+    replyable_df = _filter_wb_chat_registry_dataframe(
+        table_df,
+        source_filter="Все",
+        can_reply_filter="Да",
+        activity_date_from=None,
+        activity_date_to=None,
+        search_query="",
+    )
+    assert replyable_df["ID чата"].tolist() == ["chat-current"]
+
+    searched_df = _filter_wb_chat_registry_dataframe(
+        table_df,
+        source_filter="Все",
+        can_reply_filter="Все",
+        activity_date_from=date(2026, 7, 10),
+        activity_date_to=date(2026, 7, 12),
+        search_query="sup-100",
+    )
+    assert searched_df["ID чата"].tolist() == ["chat-current"]

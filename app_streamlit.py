@@ -5984,8 +5984,6 @@ def render_stock_all_tab(
         metric_items[4] = ("Остаток 1С", _fmt_stock_int(one_c_stock_total))
         if pd.notna(wb_supply_total):
             metric_items[5] = ("Поставки на WB", _fmt_stock_int(wb_supply_total))
-        if not one_c_product_df.empty:
-            metric_items.insert(5, ("Разница WB - 1С", _fmt_stock_int(wb_vs_one_c_diff_total)))
 
     cols = st.columns(len(metric_items))
     for col, (label, value) in zip(cols, metric_items):

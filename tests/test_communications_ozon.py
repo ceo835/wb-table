@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import pytest
+from datetime import datetime, UTC, timedelta
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from src.clients.ozon_chats_client import OzonChatsClient
 from src.config.settings import settings
 from src.db.base import Base
-from src.db.communications_models import CampaignRecipient, ChatRegistry
+from src.db.communications_models import CampaignRecipient, ChatRegistry, SendLog
+from src.services.communications.audience_service import AudienceService
 from src.services.communications.campaign_service import CampaignService
 from src.services.communications.providers import OzonChatProvider
-from src.services.communications.ui import _prepare_diagnostics_dataframe
+from src.services.communications.ui import (
+    OZON_MAIN_SECTIONS,
+    OZON_TECHNICAL_EXPANDER_LABEL,
+    _build_campaign_registry_empty_message,
+    _prepare_diagnostics_dataframe,
+)
 
 
 class FakeOzonChatsClient:
@@ -327,3 +334,134 @@ def test_chat_list_payloads_use_confirmed_limit_request() -> None:
         {"limit": 100},
         {"limit": 100, "offset": 0},
     )
+
+
+def test_ozon_main_sections_hide_diagnostics_from_primary_options() -> None:
+    assert OZON_MAIN_SECTIONS == [
+        "Кампания Ozon",
+        "Реестр Ozon-чатов",
+        "История отправок Ozon",
+    ]
+    assert all("Диагностика" not in section for section in OZON_MAIN_SECTIONS)
+    assert OZON_TECHNICAL_EXPANDER_LABEL == "Техническая диагностика Ozon"
+    assert "Реестр Ozon-чатов пуст" in _build_campaign_registry_empty_message("ozon")
+
+
+def test_ozon_campaign_audience_uses_only_ozon_registry_and_marketplace_scoped_send_logs(db_session, monkeypatch):
+    class StubOzonProvider:
+        def build_chat_registry(self, session, max_event_pages=10):
+            return 0
+
+    monkeypatch.setattr("src.services.communications.audience_service.OzonChatProvider", lambda: StubOzonProvider())
+
+    db_session.add_all([
+        ChatRegistry(
+            marketplace="ozon",
+            chat_id="oz-1",
+            current_chat_exists=True,
+            product_ids=[501],
+            last_activity_at=datetime.now(UTC),
+        ),
+        ChatRegistry(
+            marketplace="wb",
+            chat_id="wb-1",
+            reply_sign="sign-1",
+            current_chat_exists=True,
+            product_ids=[501],
+            last_activity_at=datetime.now(UTC),
+        ),
+        SendLog(
+            marketplace="wb",
+            chat_id="oz-1",
+            message_text="other marketplace",
+            send_status="sent",
+            sent_at=datetime.now(UTC) - timedelta(days=1),
+        ),
+    ])
+    db_session.commit()
+
+    campaign = CampaignService.create_campaign(
+        session=db_session,
+        marketplace="ozon",
+        campaign_type="custom",
+        name="Ozon audience",
+        message_text="hello",
+        filters={
+            "activity_days": 30,
+            "nm_ids": [501],
+            "only_with_product_linkage": True,
+            "exclude_global_lookback_days": 7,
+            "recipient_limit": 10,
+            "search_query": "oz-1",
+        },
+    )
+    db_session.commit()
+
+    stats = AudienceService.collect_and_filter_audience(db_session, campaign.id)
+    db_session.commit()
+
+    recipients = CampaignService.get_campaign_recipients(db_session, campaign.id)
+    assert [recipient.chat_id for recipient in recipients] == ["oz-1"]
+    assert recipients[0].marketplace == "ozon"
+    assert recipients[0].recipient_status == "ready"
+    assert stats["ready"] == 1
+
+
+def test_wb_campaign_audience_ignores_ozon_registry_and_ozon_send_logs(db_session, monkeypatch):
+    class StubWBProvider:
+        def build_chat_registry(self, session, max_event_pages=10):
+            return 0
+
+    monkeypatch.setattr("src.services.communications.audience_service.WBChatProvider", lambda: StubWBProvider())
+
+    db_session.add_all([
+        ChatRegistry(
+            marketplace="wb",
+            chat_id="wb-1",
+            reply_sign="sign-1",
+            current_chat_exists=True,
+            product_ids=[100],
+            last_activity_at=datetime.now(UTC),
+        ),
+        ChatRegistry(
+            marketplace="ozon",
+            chat_id="oz-1",
+            current_chat_exists=True,
+            product_ids=[100],
+            last_activity_at=datetime.now(UTC),
+        ),
+        SendLog(
+            marketplace="ozon",
+            chat_id="wb-1",
+            message_text="other marketplace",
+            send_status="sent",
+            sent_at=datetime.now(UTC) - timedelta(days=1),
+        ),
+    ])
+    db_session.commit()
+
+    campaign = CampaignService.create_campaign(
+        session=db_session,
+        marketplace="wb",
+        campaign_type="custom",
+        name="WB audience",
+        message_text="hello",
+        filters={
+            "activity_days": 30,
+            "nm_ids": [100],
+            "only_with_reply_sign": True,
+            "only_current_chats": True,
+            "exclude_global_lookback_days": 7,
+            "recipient_limit": 10,
+        },
+    )
+    db_session.commit()
+
+    stats = AudienceService.collect_and_filter_audience(db_session, campaign.id)
+    db_session.commit()
+
+    recipients = CampaignService.get_campaign_recipients(db_session, campaign.id)
+    assert [recipient.chat_id for recipient in recipients] == ["wb-1"]
+    assert recipients[0].marketplace == "wb"
+    assert recipients[0].recipient_status == "ready"
+    assert stats["ready"] == 1

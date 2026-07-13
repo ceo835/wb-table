@@ -84,13 +84,16 @@ class AudienceService:
             limit_date = now_utc - timedelta(days=int(exclude_lookback_days))
             stmt_global_sent = select(SendLog.chat_id).where(
                 SendLog.sent_at >= limit_date,
-                SendLog.send_status == "sent"
+                SendLog.send_status == "sent",
+                SendLog.marketplace == campaign.marketplace,
             )
             excluded_global_chat_ids = set(session.scalars(stmt_global_sent).all())
 
         # Фильтры наличия replySign и присутствия в активных чатах
         only_with_reply_sign = filters.get("only_with_reply_sign", False)
         only_current_chats = filters.get("only_current_chats", False)
+        only_with_product_linkage = filters.get("only_with_product_linkage", False)
+        search_query = str(filters.get("search_query") or "").strip().lower()
 
         stats = {
             "total_registry_chats": len(registry_chats),
@@ -135,8 +138,8 @@ class AudienceService:
                 stats["matched_period"] += 1
 
             # 2. Фильтр товаров (nmID)
+            chat_product_ids = chat.product_ids or []
             if nm_ids_set:
-                chat_product_ids = chat.product_ids or []
                 intersect = set(chat_product_ids) & nm_ids_set
                 if not intersect:
                     is_ready = False
@@ -145,6 +148,10 @@ class AudienceService:
                     stats["matched_products"] += 1
             else:
                 stats["matched_products"] += 1
+
+            if only_with_product_linkage and not chat_product_ids:
+                is_ready = False
+                reasons.append("нет привязки к товару")
 
             # 3. Фильтр replySign
             if chat.reply_sign:
@@ -165,6 +172,12 @@ class AudienceService:
                 is_ready = False
                 reasons.append(f"отправляли другую кампанию за последние {exclude_lookback_days} дн.")
                 stats["excluded_repeats"] += 1
+
+            if search_query:
+                search_tokens = [chat_id.lower(), *(str(product_id).lower() for product_id in chat_product_ids)]
+                if not any(search_query in token for token in search_tokens):
+                    is_ready = False
+                    reasons.append("не совпадает с поисковым фильтром")
 
             # Устанавливаем статус получателя
             if is_ready:
