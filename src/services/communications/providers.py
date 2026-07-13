@@ -20,6 +20,7 @@ from src.clients.ozon_chats_client import (
     coerce_int,
     discover_top_level_items,
     extract_first_value,
+    mask_secret,
 )
 from src.clients.wb_chats_client import WBChatsClient
 from src.config.settings import settings
@@ -330,9 +331,14 @@ class OzonChatProvider(BaseChatProvider):
 
     def build_chat_registry(self, session: Session, max_event_pages: int = 10) -> int:
         logger.info("Starting Ozon read-only chat registry sync")
-        known_good = self.client.validate_known_good_access()
         chat_list_summary = self.client.list_chats()
-        current_chats = [item for item in discover_top_level_items(chat_list_summary.get("result", {}).get("payload") or {}) if isinstance(item, dict)]
+        chat_list_result = chat_list_summary.get("result", {})
+        chat_list_status = chat_list_result.get("status_code")
+        current_chats = [
+            item
+            for item in discover_top_level_items(chat_list_result.get("payload") or {})
+            if isinstance(item, dict)
+        ]
 
         chats_data: dict[str, dict[str, Any]] = {}
         chats_with_order_linkage: set[str] = set()
@@ -372,9 +378,13 @@ class OzonChatProvider(BaseChatProvider):
                     if entry["product_ids"]:
                         chats_with_product_linkage += 1
                 else:
-                    if entry["first_activity_at"] and (not existing["first_activity_at"] or entry["first_activity_at"] < existing["first_activity_at"]):
+                    if entry["first_activity_at"] and (
+                        not existing["first_activity_at"] or entry["first_activity_at"] < existing["first_activity_at"]
+                    ):
                         existing["first_activity_at"] = entry["first_activity_at"]
-                    if entry["last_activity_at"] and (not existing["last_activity_at"] or entry["last_activity_at"] > existing["last_activity_at"]):
+                    if entry["last_activity_at"] and (
+                        not existing["last_activity_at"] or entry["last_activity_at"] > existing["last_activity_at"]
+                    ):
                         existing["last_activity_at"] = entry["last_activity_at"]
                         if entry["last_sender"]:
                             existing["last_sender"] = entry["last_sender"]
@@ -406,18 +416,25 @@ class OzonChatProvider(BaseChatProvider):
             select(func.count()).select_from(ChatRegistry).where(ChatRegistry.marketplace == "ozon")
         )
         first_history_status = history_status_codes[0] if history_status_codes else None
+        history_attempted = bool(chat_ids_for_history)
         self.last_sync_diagnostics = {
             "fetched_chats_count": len(current_chats),
             "prepared_records_count": len(rows_to_upsert),
             "committed": False,
             "chat_registry_marketplace": "ozon",
             "chat_registry_count_ozon": ozon_registry_count,
-            "known_good_status_code": known_good.get("status_code"),
-            "chat_list_status_code": chat_list_summary.get("result", {}).get("status_code"),
+            "known_good_status_code": None,
+            "chat_list_status_code": chat_list_status,
+            "chat_list_endpoint": "/v3/chat/list",
+            "chat_list_payload_sent": chat_list_result.get("payload_sent"),
+            "chat_list_response_preview": chat_list_result.get("response_text_preview", ""),
+            "credentials_present": self.client.has_credentials(),
+            "masked_client_id": mask_secret(self.client.client_id),
+            "base_url": self.client.base_url,
             "history_status_codes": history_status_codes,
             "history_status": first_history_status,
             "history_confirmed": first_history_status == 200,
-            "skipped_history": first_history_status is not None and first_history_status != 200,
+            "skipped_history": bool(chat_list_status != 200 or not history_attempted or (first_history_status is not None and first_history_status != 200)),
             "current_chats_fetched": len(current_chats),
             "events_fetched": history_event_rows,
             "chats_with_product_linkage": chats_with_product_linkage,
@@ -433,7 +450,6 @@ class OzonChatProvider(BaseChatProvider):
             f"fetched_chats={self.last_sync_diagnostics['fetched_chats_count']}, "
             f"prepared={self.last_sync_diagnostics['prepared_records_count']}, "
             f"registry_ozon={self.last_sync_diagnostics['chat_registry_count_ozon']}, "
-            f"known_good_status={self.last_sync_diagnostics['known_good_status_code']}, "
             f"chat_list_status={self.last_sync_diagnostics['chat_list_status_code']}, "
             f"history_status={self.last_sync_diagnostics['history_status']}, "
             f"history_confirmed={self.last_sync_diagnostics['history_confirmed']}, "

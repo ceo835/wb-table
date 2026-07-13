@@ -324,6 +324,7 @@ class OzonChatsClient(BaseAPIClient):
             "elapsed_ms": elapsed_ms,
             "payload_sent": payload_sent,
             "payload": payload,
+            "response_text_preview": (response.text[:300] if response is not None else ""),
             "response_top_level_type": type_name(payload),
             "response_top_level_keys": top_level_keys,
             "item_count": len(items) if isinstance(items, list) else 0,
@@ -473,6 +474,41 @@ class OzonChatsClient(BaseAPIClient):
         self.last_chat_list_result = summary
         return summary
 
+    def probe_chat_list_only(self, summary: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+        chat_list = dict(summary) if summary is not None else self.list_chats()
+        result = chat_list.get("result", {}) if isinstance(chat_list, Mapping) else {}
+        payload = result.get("payload")
+        rows = [item for item in discover_top_level_items(payload or {}) if isinstance(item, Mapping)]
+
+        sample_chat_ids: list[str] = []
+        for row in rows:
+            value = extract_first_value(row, CHAT_ID_CANDIDATES)
+            if value in (None, ""):
+                continue
+            sample_chat_ids.append(str(value))
+            if len(sample_chat_ids) >= 3:
+                break
+
+        return {
+            "credentials": {
+                "client_id_present": bool(self.client_id),
+                "api_key_present": bool(self.api_key),
+            },
+            "runtime": self._build_runtime_diagnostics(),
+            "chat_list": chat_list,
+            "chat_count": len(rows),
+            "sample_chat_ids": sample_chat_ids,
+            "probe_summary": {
+                "method": "POST",
+                "endpoint": CHAT_LIST_ENDPOINT,
+                "status_code": result.get("status_code"),
+                "response_text_preview": result.get("response_text_preview", ""),
+                "chat_count": len(rows),
+                "credentials_present": self.has_credentials(),
+                "masked_client_id": mask_secret(self.client_id),
+            },
+        }
+
     def get_chat_history(self, chat_id: str) -> dict[str, Any]:
         summary = self._run_payload_variants(
             endpoint=CHAT_HISTORY_ENDPOINT,
@@ -505,18 +541,10 @@ class OzonChatsClient(BaseAPIClient):
 
     def probe_readonly_access(self, *, history_chat_ids: Optional[Sequence[str]] = None) -> dict[str, Any]:
         known_good = self.validate_known_good_access()
-        chat_list = self.list_chats()
+        chat_probe = self.probe_chat_list_only()
+        chat_list = chat_probe["chat_list"]
         list_items = discover_top_level_items(chat_list["result"].get("payload") or {})
-        discovered_chat_ids: list[str] = []
-        for row in list_items:
-            if not isinstance(row, Mapping):
-                continue
-            value = extract_first_value(row, CHAT_ID_CANDIDATES)
-            if value in (None, ""):
-                continue
-            discovered_chat_ids.append(str(value))
-            if len(discovered_chat_ids) >= 3:
-                break
+        discovered_chat_ids = list(chat_probe.get("sample_chat_ids", []))
         requested_chat_ids = list(history_chat_ids or discovered_chat_ids)
         history_results: list[dict[str, Any]] = []
         for chat_id in requested_chat_ids[:3]:
@@ -534,12 +562,14 @@ class OzonChatsClient(BaseAPIClient):
             "known_good": known_good,
             "chat_list": chat_list,
             "chat_history": history_results,
-            "chat_count": len(list_items) if isinstance(list_items, list) else 0,
+            "chat_count": chat_probe.get("chat_count", len(list_items) if isinstance(list_items, list) else 0),
             "sample_chat_ids": requested_chat_ids[:3],
+            "probe_summary": chat_probe.get("probe_summary", {}),
         }
 
     def health_check(self) -> bool:
-        result = self.validate_known_good_access()
+        summary = self.list_chats()
+        result = summary.get("result", {})
         return bool(result.get("status_code") == 200)
 
     def fetch_current_chats(self) -> Optional[dict[str, Any]]:

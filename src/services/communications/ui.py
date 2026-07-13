@@ -36,7 +36,7 @@ OZON_TECHNICAL_EXPANDER_LABEL = "Техническая диагностика O
 
 def _build_campaign_registry_empty_message(marketplace: str) -> str:
     if marketplace == "ozon":
-        return "Реестр Ozon-чатов пуст. Сначала выполните проверку доступа и синхронизацию реестра."
+        return "Реестр Ozon-чатов пуст. Сначала выполните синхронизацию реестра."
     return "Реестр WB-чатов пуст. Сначала выполните синхронизацию реестра."
 
 
@@ -49,9 +49,13 @@ def _marketplace_registry_count(session, marketplace: str) -> int:
     )
 
 
-def _run_ozon_access_check() -> None:
-    provider = OzonChatProvider()
-    st.session_state["comm_ozon_api_diag"] = provider.client.probe_readonly_access()
+def _build_ozon_registry_sync_message(sync_diag: dict[str, Any]) -> tuple[str, str]:
+    status_code = sync_diag.get("chat_list_status_code")
+    fetched_chats = int(sync_diag.get("fetched_chats_count") or 0)
+    if status_code == 200:
+        return "success", f"Синхронизация выполнена. Получено чатов: {fetched_chats}."
+    return "error", f"Не удалось получить Ozon-чаты. API вернул status {status_code if status_code is not None else 'n/a'}."
+
 
 
 def _run_ozon_registry_sync(session) -> dict[str, Any]:
@@ -83,42 +87,42 @@ def _run_ozon_registry_sync(session) -> dict[str, Any]:
         }
     )
     st.session_state["comm_ozon_sync_diag"] = sync_diag
+    st.session_state["comm_ozon_api_diag"] = provider.client.probe_chat_list_only(provider.client.last_chat_list_result)
+    feedback_level, feedback_message = _build_ozon_registry_sync_message(sync_diag)
+    st.session_state["comm_ozon_sync_feedback"] = {
+        "level": feedback_level,
+        "message": feedback_message,
+    }
 
     get_logger("communications_ui").info(
         "Ozon sync diagnostics: "
         f"prepared={prepared_count}, committed=True, total={total_count}, ozon={ozon_count}, "
         f"marketplaces={marketplaces}, min_last_activity_at={min_act}, max_last_activity_at={max_act}, "
-        f"known_good_status={sync_diag.get('known_good_status_code')}, "
         f"chat_list_status={sync_diag.get('chat_list_status_code')}, "
         f"history_status={sync_diag.get('history_status')}, "
         f"history_confirmed={sync_diag.get('history_confirmed')}, "
         f"skipped_history={sync_diag.get('skipped_history')}"
     )
-    return {"prepared_count": prepared_count, "ozon_count": ozon_count or 0}
+    return {
+        "prepared_count": prepared_count,
+        "ozon_count": ozon_count or 0,
+        "feedback_level": feedback_level,
+        "feedback_message": feedback_message,
+    }
+
 
 
 def _render_ozon_registry_actions(session, *, key_prefix: str) -> None:
-    col_actions = st.columns(2)
-    if col_actions[0].button("Проверить доступ Ozon Chat API", type="primary", key=f"{key_prefix}_probe"):
-        with st.spinner("Проверка Ozon Chat API..."):
-            try:
-                _run_ozon_access_check()
-                st.success("Диагностика Ozon Chat API обновлена.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Ошибка при проверке Ozon Chat API: {exc}")
-
-    if col_actions[1].button("Синхронизировать реестр Ozon-чатов", key=f"{key_prefix}_sync"):
+    if st.button("Синхронизировать реестр Ozon-чатов", type="primary", key=f"{key_prefix}_sync"):
         with st.spinner("Синхронизация Ozon read-only реестра..."):
             try:
-                sync_result = _run_ozon_registry_sync(session)
-                st.success(
-                    "Синхронизация Ozon завершена. "
-                    f"Подготовлено/обновлено: {sync_result['prepared_count']}. "
-                    f"Чатов Ozon в реестре: {sync_result['ozon_count']}."
-                )
+                _run_ozon_registry_sync(session)
                 st.rerun()
             except Exception as exc:
+                st.session_state["comm_ozon_sync_feedback"] = {
+                    "level": "error",
+                    "message": f"Ошибка при sync Ozon-реестра: {exc}",
+                }
                 st.error(f"Ошибка при sync Ozon-реестра: {exc}")
 
 
@@ -580,8 +584,7 @@ def render_ozon_campaigns_subtab(session) -> None:
 
     if _marketplace_registry_count(session, "ozon") == 0:
         st.info(_build_campaign_registry_empty_message("ozon"))
-        _render_ozon_registry_actions(session, key_prefix="ozon_campaign_empty")
-        st.caption("Техническая диагностика Ozon скрыта в отдельном блоке ниже и не показывается как основной пользовательский раздел.")
+        st.caption("Сначала откройте раздел «Реестр Ozon-чатов» и выполните синхронизацию. Техническая диагностика Ozon скрыта в отдельном блоке ниже.")
         st.write("---")
 
     st.subheader("Список кампаний Ozon")
@@ -656,8 +659,7 @@ def render_ozon_campaign_form(session, campaign_id: Optional[int]) -> None:
 
     if _marketplace_registry_count(session, "ozon") == 0:
         st.info(_build_campaign_registry_empty_message("ozon"))
-        _render_ozon_registry_actions(session, key_prefix="ozon_campaign_form_empty")
-        st.caption("Большая техническая диагностика скрыта внизу вкладки Ozon. Здесь доступны только базовые действия для подготовки dry-run кампании.")
+        st.caption("Реестр Ozon-чатов пуст. Сначала выполните синхронизацию в разделе «Реестр Ozon-чатов». Техническая диагностика скрыта внизу вкладки Ozon.")
         st.write("---")
 
     title_text = f"Просмотр кампании ID {campaign_id}" if campaign else "Создание новой кампании Ozon"
@@ -1401,118 +1403,48 @@ def render_chats_registry_subtab(session) -> None:
 
 
 def render_ozon_diagnostics_subtab(session) -> None:
-    st.subheader("Диагностика Ozon")
+    st.subheader("Техническая диагностика Ozon")
     st.info("Раздел Ozon работает только в техническом read-only режиме.")
-    st.caption("Chat API доступен: `POST /v3/chat/list` OK. History endpoint: not confirmed, `POST /v1/chat/history` returned 404. Реальная отправка Ozon отключена.")
-
-    col_actions = st.columns(2)
-    if col_actions[0].button("Проверить доступ Ozon Chat API", type="primary"):
-        with st.spinner("Проверка Ozon Chat API..."):
-            try:
-                provider = OzonChatProvider()
-                st.session_state["comm_ozon_api_diag"] = provider.client.probe_readonly_access()
-                st.success("Диагностика Ozon Chat API обновлена.")
-            except Exception as exc:
-                st.error(f"Ошибка при проверке Ozon Chat API: {exc}")
-
-    if col_actions[1].button("Синхронизировать реестр Ozon-чатов"):
-        with st.spinner("Синхронизация Ozon read-only реестра..."):
-            try:
-                provider = OzonChatProvider()
-                prepared_count = provider.build_chat_registry(session, max_event_pages=3)
-                session.commit()
-
-                total_count = session.scalar(select(func.count()).select_from(ChatRegistry))
-                ozon_count = session.scalar(
-                    select(func.count()).select_from(ChatRegistry).where(ChatRegistry.marketplace == "ozon")
-                )
-                marketplaces = list(session.scalars(select(ChatRegistry.marketplace).distinct()).all())
-                min_act = session.scalar(
-                    select(func.min(ChatRegistry.last_activity_at)).where(ChatRegistry.marketplace == "ozon")
-                )
-                max_act = session.scalar(
-                    select(func.max(ChatRegistry.last_activity_at)).where(ChatRegistry.marketplace == "ozon")
-                )
-
-                sync_diag = dict(provider.last_sync_diagnostics)
-                sync_diag.update(
-                    {
-                        "committed": True,
-                        "ChatRegistry total count after commit": total_count,
-                        "ChatRegistry count for marketplace='ozon'": ozon_count,
-                        "distinct marketplace values": marketplaces,
-                        "min last_activity_at": str(min_act) if min_act else None,
-                        "max last_activity_at": str(max_act) if max_act else None,
-                    }
-                )
-                st.session_state["comm_ozon_sync_diag"] = sync_diag
-
-                get_logger("communications_ui").info(
-                    "Ozon sync diagnostics: "
-                    f"prepared={prepared_count}, committed=True, total={total_count}, ozon={ozon_count}, "
-                    f"marketplaces={marketplaces}, min_last_activity_at={min_act}, max_last_activity_at={max_act}, "
-                    f"known_good_status={sync_diag.get('known_good_status_code')}, "
-                    f"chat_list_status={sync_diag.get('chat_list_status_code')}, "
-                    f"history_status={sync_diag.get('history_status')}, "
-                    f"history_confirmed={sync_diag.get('history_confirmed')}, "
-                    f"skipped_history={sync_diag.get('skipped_history')}"
-                )
-                st.success(
-                    f"Read-only sync завершён. Подготовлено/обновлено: {prepared_count}. Чатов Ozon в реестре: {ozon_count}."
-                )
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Ошибка при sync Ozon-реестра: {exc}")
+    st.caption("Диагностика обновляется после синхронизации реестра Ozon или через внешний read-only probe script. Реальная отправка Ozon отключена.")
 
     diag = st.session_state.get("comm_ozon_api_diag")
-    if diag:
-        known_good = diag.get("known_good", {})
-        chat_list_summary = diag.get("chat_list", {})
-        chat_list_result = chat_list_summary.get("result", {})
-        history_results = diag.get("chat_history", [])
-        first_history_result = history_results[0].get("result", {}) if history_results else {}
+    sync_diag = st.session_state.get("comm_ozon_sync_diag")
+    if not diag and not sync_diag:
+        st.info("Диагностика появится после синхронизации реестра Ozon. Для вне-UI проверки можно использовать `python scripts/probe_ozon_chat_list_readonly.py`.")
+        st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
+        return
 
-        runtime_diag = diag.get("runtime", {})
-        status_rows = [
-            {"metric": "Client ID найден", "value": "Да" if diag.get("credentials", {}).get("client_id_present") else "Нет"},
-            {"metric": "API Key найден", "value": "Да" if diag.get("credentials", {}).get("api_key_present") else "Нет"},
-            {"metric": "Masked Client ID", "value": runtime_diag.get("masked_client_id", "-")},
-            {"metric": "Credentials present", "value": runtime_diag.get("credentials_present", False)},
-            {"metric": "Known-good endpoint", "value": f"status {known_good.get('status_code')}"},
-            {
-                "metric": "Chat API доступен",
-                "value": "POST /v3/chat/list OK" if chat_list_result.get("status_code") == 200 else f"status {chat_list_result.get('status_code')}",
-            },
-            {"metric": "Найдено чатов", "value": diag.get("chat_count", 0)},
-            {
-                "metric": "History endpoint",
-                "value": "not confirmed, POST /v1/chat/history returned 404" if first_history_result.get("status_code") == 404 else (f"status {first_history_result.get('status_code')}" if history_results else "не вызывался"),
-            },
-            {"metric": "Base URL", "value": runtime_diag.get("base_url", "-")},
-            {"metric": "Chat list endpoint path", "value": runtime_diag.get("chat_list_endpoint", "-")},
-            {"metric": "Known-good endpoint path", "value": runtime_diag.get("known_good_endpoint", "-")},
-            {"metric": "Settings loading", "value": runtime_diag.get("settings_loader", "-")},
-            {"metric": "env OZON_CLIENT_ID present", "value": runtime_diag.get("env_ozon_client_id_present", False)},
-            {"metric": "env OZON_API_KEY present", "value": runtime_diag.get("env_ozon_api_key_present", False)},
-            {"metric": "env OZON_API_TOKEN present", "value": runtime_diag.get("env_ozon_api_token_present", False)},
-            {"metric": "settings client_id matches env", "value": runtime_diag.get("settings_client_id_matches_env", False)},
-            {"metric": "settings api key matches env", "value": runtime_diag.get("settings_api_key_matches_env", False)},
-        ]
-        st.write("#### Статус credentials и API")
-        st.dataframe(_prepare_diagnostics_dataframe(status_rows), width="stretch", hide_index=True)
-        if first_history_result.get("status_code") == 404:
-            st.warning("History endpoint: not confirmed, `POST /v1/chat/history` returned 404. Sync из `POST /v3/chat/list` это не ломает.")
+    runtime_diag = diag.get("runtime", {}) if diag else {}
+    probe_summary = diag.get("probe_summary", {}) if diag else {}
+    chat_list_summary = diag.get("chat_list", {}) if diag else {}
 
-        probe_rows = [
-            {
-                "Operation": known_good.get("operation"),
-                "Endpoint": known_good.get("endpoint"),
-                "Status": known_good.get("status_code") or "ERR",
-                "Items": known_good.get("item_count") if known_good.get("item_count") is not None else "-",
-                "Payload": str(known_good.get("payload_sent")),
-                "Error": known_good.get("error") or "-",
-            }
-        ]
+    chat_status = probe_summary.get("status_code", sync_diag.get("chat_list_status_code") if sync_diag else None)
+    chat_count = probe_summary.get("chat_count", sync_diag.get("fetched_chats_count") if sync_diag else 0)
+    history_status = sync_diag.get("history_status") if sync_diag else None
+    history_value = "not confirmed, 404" if history_status == 404 else (f"status {history_status}" if history_status is not None else "не вызывался")
+
+    status_rows = [
+        {"metric": "Client ID найден", "value": "Да" if (diag or {}).get("credentials", {}).get("client_id_present") else "Нет"},
+        {"metric": "API Key найден", "value": "Да" if (diag or {}).get("credentials", {}).get("api_key_present") else "Нет"},
+        {"metric": "Masked Client ID", "value": probe_summary.get("masked_client_id") or runtime_diag.get("masked_client_id", "-")},
+        {"metric": "Credentials present", "value": probe_summary.get("credentials_present", runtime_diag.get("credentials_present", False))},
+        {"metric": "Chat API доступен", "value": "POST /v3/chat/list OK" if chat_status == 200 else f"status {chat_status}"},
+        {"metric": "Найдено чатов", "value": chat_count or 0},
+        {"metric": "History endpoint", "value": history_value},
+        {"metric": "Base URL", "value": runtime_diag.get("base_url", (sync_diag or {}).get("base_url", "-"))},
+        {"metric": "Chat list endpoint path", "value": runtime_diag.get("chat_list_endpoint", (sync_diag or {}).get("chat_list_endpoint", "-"))},
+        {"metric": "Settings loading", "value": runtime_diag.get("settings_loader", "-")},
+        {"metric": "env OZON_CLIENT_ID present", "value": runtime_diag.get("env_ozon_client_id_present", False)},
+        {"metric": "env OZON_API_KEY present", "value": runtime_diag.get("env_ozon_api_key_present", False)},
+        {"metric": "env OZON_API_TOKEN present", "value": runtime_diag.get("env_ozon_api_token_present", False)},
+        {"metric": "settings client_id matches env", "value": runtime_diag.get("settings_client_id_matches_env", False)},
+        {"metric": "settings api key matches env", "value": runtime_diag.get("settings_api_key_matches_env", False)},
+    ]
+    st.write("#### Статус credentials и API")
+    st.dataframe(_prepare_diagnostics_dataframe(status_rows), width="stretch", hide_index=True)
+
+    if chat_list_summary:
+        probe_rows = []
         for attempt in chat_list_summary.get("attempts", []):
             probe_rows.append(
                 {
@@ -1521,25 +1453,14 @@ def render_ozon_diagnostics_subtab(session) -> None:
                     "Status": attempt.get("status_code") or "ERR",
                     "Items": attempt.get("item_count") if attempt.get("item_count") is not None else "-",
                     "Payload": str(attempt.get("payload_sent")),
+                    "Preview": attempt.get("response_text_preview") or "-",
                     "Error": attempt.get("error") or "-",
                 }
             )
-        for history_summary in history_results:
-            for attempt in history_summary.get("attempts", []):
-                probe_rows.append(
-                    {
-                        "Operation": attempt.get("operation"),
-                        "Endpoint": attempt.get("endpoint"),
-                        "Status": attempt.get("status_code") or "ERR",
-                        "Items": attempt.get("item_count") if attempt.get("item_count") is not None else "-",
-                        "Payload": str(attempt.get("payload_sent")),
-                        "Error": attempt.get("error") or "-",
-                    }
-                )
-        st.write("#### Диагностика confirmed methods")
-        st.dataframe(_prepare_diagnostics_dataframe(probe_rows), width="stretch", hide_index=True)
+        if probe_rows:
+            st.write("#### Диагностика chat/list")
+            st.dataframe(_prepare_diagnostics_dataframe(probe_rows), width="stretch", hide_index=True)
 
-    sync_diag = st.session_state.get("comm_ozon_sync_diag")
     if sync_diag:
         st.write("#### Диагностика последнего sync")
         sync_df = _prepare_diagnostics_dataframe([{"metric": key, "value": value} for key, value in sync_diag.items()])
@@ -1565,14 +1486,33 @@ def render_ozon_diagnostics_subtab(session) -> None:
     st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
 
 
+
 def render_ozon_registry_subtab(session) -> None:
     st.subheader("Реестр Ozon-чатов")
-    st.caption("Реестр строится из `POST /v3/chat/list`. History endpoint: not confirmed, `POST /v1/chat/history` returned 404, но sync не считается проваленным.")
+    st.caption("Реестр строится из `POST /v3/chat/list`. `POST /v1/chat/history` может вернуть 404 и не считается фатальной ошибкой sync.")
+    _render_ozon_registry_actions(session, key_prefix="ozon_registry")
+
+    feedback = st.session_state.get("comm_ozon_sync_feedback")
+    if feedback:
+        if feedback.get("level") == "success":
+            st.success(feedback.get("message"))
+        else:
+            st.error(feedback.get("message"))
+
+    sync_diag = st.session_state.get("comm_ozon_sync_diag")
+    if sync_diag:
+        chat_list_status = sync_diag.get("chat_list_status_code")
+        fetched_chats = sync_diag.get("fetched_chats_count") or 0
+        history_value = "not confirmed, 404" if sync_diag.get("history_status") == 404 else "не подтверждён"
+        if chat_list_status == 200:
+            st.info(f"Chat API доступен: /v3/chat/list OK. Найдено чатов: {fetched_chats}. History endpoint: {history_value}.")
+        else:
+            st.warning(f"Chat API: status {chat_list_status}. History endpoint: {history_value}.")
 
     stmt = select(ChatRegistry).where(ChatRegistry.marketplace == "ozon").order_by(ChatRegistry.last_activity_at.desc())
     chats = list(session.scalars(stmt).all())
     if not chats:
-        st.info("Ozon-реестр пока пуст. Сначала выполните проверку доступа Ozon Chat API, затем sync реестра.")
+        st.info("Реестр Ozon-чатов пуст. Сначала выполните синхронизацию реестра в этом разделе.")
         st.warning("Реальная отправка Ozon отключена. Методы start/send/read/file не вызываются.")
         return
 

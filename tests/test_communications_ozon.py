@@ -16,6 +16,7 @@ from src.services.communications.ui import (
     OZON_MAIN_SECTIONS,
     OZON_TECHNICAL_EXPANDER_LABEL,
     _build_campaign_registry_empty_message,
+    _build_ozon_registry_sync_message,
     _prepare_diagnostics_dataframe,
 )
 
@@ -25,8 +26,15 @@ class FakeOzonChatsClient:
         self.last_known_good_result = {"status_code": 200}
         self.last_chat_list_result = None
         self.last_history_results = []
+        self.known_good_calls = 0
+        self.client_id = "cid"
+        self.base_url = "https://api-seller.ozon.ru"
+
+    def has_credentials(self) -> bool:
+        return True
 
     def validate_known_good_access(self):
+        self.known_good_calls += 1
         return {
             "operation": "known_good_readonly_check",
             "endpoint": "/v3/product/list",
@@ -84,6 +92,7 @@ class FakeOzonChatsClient:
                             },
                         ]
                     },
+                    "response_text_preview": "{\"chats\":[{\"chat\":{\"chat_id\":\"oz-1\"}}]}",
                     "response_top_level_type": "object",
                     "response_top_level_keys": ["chats"],
                     "item_count": 2,
@@ -173,7 +182,8 @@ def test_build_ozon_chat_registry_from_provider(db_session, monkeypatch):
     assert rows[0].current_chat_exists is True
     assert rows[0].source == "v3_chat_list"
     assert rows[1].product_ids == [777]
-    assert provider.last_sync_diagnostics["known_good_status_code"] == 200
+    assert provider.last_sync_diagnostics["known_good_status_code"] is None
+    assert fake_client.known_good_calls == 0
     assert provider.last_sync_diagnostics["chat_list_status_code"] == 200
     assert provider.last_sync_diagnostics["fetched_chats_count"] == 2
     assert provider.last_sync_diagnostics["prepared_records_count"] == 2
@@ -294,14 +304,13 @@ def test_prepare_diagnostics_dataframe_casts_value_column_to_string() -> None:
     assert diagnostics_df.attrs == {}
 
 
-def test_probe_readonly_access_exposes_runtime_diagnostics(monkeypatch) -> None:
+def test_probe_chat_list_only_exposes_compact_probe_summary(monkeypatch) -> None:
     monkeypatch.setattr(settings, "ozon_client_id", "client-123456", raising=False)
     monkeypatch.setattr(settings, "ozon_api_key", "api-key-abcdef", raising=False)
     monkeypatch.setenv("OZON_CLIENT_ID", "client-123456")
     monkeypatch.setenv("OZON_API_KEY", "api-key-abcdef")
 
     client = OzonChatsClient(client_id="client-123456", api_key="api-key-abcdef")
-    monkeypatch.setattr(client, "validate_known_good_access", lambda: {"status_code": 404, "payload_sent": {"limit": 1}})
     monkeypatch.setattr(
         client,
         "list_chats",
@@ -313,7 +322,7 @@ def test_probe_readonly_access_exposes_runtime_diagnostics(monkeypatch) -> None:
         },
     )
 
-    result = client.probe_readonly_access()
+    result = client.probe_chat_list_only()
 
     runtime = result["runtime"]
     assert runtime["credentials_present"] is True
@@ -324,7 +333,19 @@ def test_probe_readonly_access_exposes_runtime_diagnostics(monkeypatch) -> None:
     assert runtime["env_ozon_api_key_present"] is True
     assert runtime["settings_client_id_matches_env"] is True
     assert runtime["settings_api_key_matches_env"] is True
+    assert result["probe_summary"]["method"] == "POST"
+    assert result["probe_summary"]["endpoint"] == "/v3/chat/list"
+    assert result["probe_summary"]["status_code"] == 404
 
+
+def test_build_ozon_registry_sync_message_uses_short_user_facing_text() -> None:
+    level, message = _build_ozon_registry_sync_message({"chat_list_status_code": 200, "fetched_chats_count": 100})
+    assert level == "success"
+    assert message == "Синхронизация выполнена. Получено чатов: 100."
+
+    level, message = _build_ozon_registry_sync_message({"chat_list_status_code": 404})
+    assert level == "error"
+    assert message == "Не удалось получить Ozon-чаты. API вернул status 404."
 
 
 def test_chat_list_payloads_use_confirmed_limit_request() -> None:
