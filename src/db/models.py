@@ -1131,6 +1131,28 @@ class FactWbSellerPriceSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class GoogleDriveSourceFile(Base):
+    __tablename__ = "google_drive_source_files"
+    __table_args__ = (
+        UniqueConstraint("source_type", "google_file_id", name="uq_google_drive_source_files_source_file"),
+        Index("idx_google_drive_source_files_source_status", "source_type", "processing_status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    google_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    google_file_name: Mapped[str] = mapped_column(Text, nullable=False)
+    google_modified_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    processing_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rows_loaded: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class WbSupplySourceFile(Base):
     __tablename__ = "wb_supply_source_files"
     __table_args__ = (

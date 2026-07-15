@@ -39,6 +39,7 @@ from src.db.session import upsert_rows
 from src.utils.logger import get_logger
 
 logger = get_logger("communications_providers")
+WB_FULL_HISTORY_MAX_PAGES = 200
 
 
 def parse_timestamp(value: Any) -> Optional[datetime]:
@@ -146,7 +147,7 @@ def _merge_ozon_registry_meta(existing: Mapping[str, Any], incoming: Mapping[str
 
 class BaseChatProvider(ABC):
     @abstractmethod
-    def fetch_events(self, max_pages: int = 10) -> List[Dict[str, Any]]:
+    def fetch_events(self, max_pages: int = WB_FULL_HISTORY_MAX_PAGES) -> List[Dict[str, Any]]:
         pass
 
     @abstractmethod
@@ -154,7 +155,7 @@ class BaseChatProvider(ABC):
         pass
 
     @abstractmethod
-    def build_chat_registry(self, session: Session, max_event_pages: int = 10) -> int:
+    def build_chat_registry(self, session: Session, max_event_pages: int = WB_FULL_HISTORY_MAX_PAGES) -> int:
         pass
 
     @abstractmethod
@@ -166,7 +167,7 @@ class WBChatProvider(BaseChatProvider):
     def __init__(self, token: Optional[str] = None):
         self.client = WBChatsClient(token=token)
 
-    def fetch_events(self, max_pages: int = 10) -> List[Dict[str, Any]]:
+    def fetch_events(self, max_pages: int = WB_FULL_HISTORY_MAX_PAGES) -> List[Dict[str, Any]]:
         all_events: List[Dict[str, Any]] = []
         next_cursor = None
         for page in range(1, max_pages + 1):
@@ -218,7 +219,7 @@ class WBChatProvider(BaseChatProvider):
         nm_id = event.get("goodCard", {}).get("nmID")
         return int(nm_id) if nm_id else None
 
-    def build_chat_registry(self, session: Session, max_event_pages: int = 10) -> int:
+    def build_chat_registry(self, session: Session, max_event_pages: int = WB_FULL_HISTORY_MAX_PAGES) -> int:
         logger.info("Starting WB chat registry sync")
         current_chats = self.fetch_current_chats()
         events = self.fetch_events(max_pages=max_event_pages)
@@ -242,7 +243,7 @@ class WBChatProvider(BaseChatProvider):
                     "reply_sign": None,
                     "current_chat_exists": False,
                     "product_ids": set(),
-                    "source": "events",
+                    "source": "SELLER_EVENTS_ONLY",
                 }
             else:
                 entry = chats_data[chat_id_str]
@@ -274,12 +275,13 @@ class WBChatProvider(BaseChatProvider):
                     "reply_sign": reply_sign,
                     "current_chat_exists": True,
                     "product_ids": set(),
-                    "source": "chats",
+                    "source": "SELLER_CHATS_ONLY",
                 }
             else:
                 entry = chats_data[chat_id_str]
                 entry["current_chat_exists"] = True
                 entry["reply_sign"] = reply_sign
+                entry["source"] = "BOTH"
                 if last_msg_time and (not entry["last_activity_at"] or last_msg_time > entry["last_activity_at"]):
                     entry["last_activity_at"] = last_msg_time
             if nm_id:

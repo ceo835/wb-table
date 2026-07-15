@@ -18,8 +18,8 @@ logger = get_logger("ivan_stock_sheet_loader")
 
 STOCK_SHEET_NAME = "Остатки"
 DATE_REGEX = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
-SIZE_LABEL_REGEX = re.compile(r"Размер:\s*(.*?)(?=\s*Цвет:|,\s*$|$)")
-COLOR_LABEL_REGEX = re.compile(r"Цвет:\s*(.*?)(?=\s*Размер:|,\s*$|$)")
+SIZE_LABEL_REGEX = re.compile(r"\u0420\u0430\u0437\u043c\u0435\u0440:\s*(.*?)(?=\s*\u0426\u0432\u0435\u0442:|,\s*$|$)")
+COLOR_LABEL_REGEX = re.compile(r"\u0426\u0432\u0435\u0442:\s*(.*?)(?=\s*\u0420\u0430\u0437\u043c\u0435\u0440:|,\s*$|$)")
 BARCODE_TAIL_REGEX = re.compile(r",\s*(\d+)\s*$")
 
 
@@ -29,7 +29,7 @@ def _parse_tail_size_without_label(text: str) -> str:
 
     tail_patterns = (
         r"([0-9]+XL\s*\([0-9]+(?:-[0-9]+)?\))$",
-        r"([A-Za-zА-Яа-я]{1,4}\s*\([0-9]+(?:-[0-9]+)?\))$",
+        r"([A-Za-z\u0410-\u042f\u0430-\u044f]{1,4}\s*\([0-9]+(?:-[0-9]+)?\))$",
         r"([0-9]+(?:/[0-9]+)?-[0-9]+)$",
         r"([0-9]+/[0-9]+)$",
     )
@@ -123,13 +123,13 @@ def _parse_sheet_date(value: Any) -> Optional[date]:
     match = DATE_REGEX.search(str(value).strip())
     if not match:
         return None
-    day, month, year = map(int, match.group(0).split("."))
-    return date(year, month, day)
+    day_num, month_num, year_num = map(int, match.group(0).split("."))
+    return date(year_num, month_num, day_num)
 
 
 def _is_stock_header_row(row: Sequence[Any]) -> bool:
     row_lower = [str(cell).strip().lower() for cell in row if cell]
-    return any("номенклатур" in cell or "количеств" in cell for cell in row_lower)
+    return any("\u043d\u043e\u043c\u0435\u043d\u043a\u043b\u0430\u0442\u0443\u0440" in cell or "\u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432" in cell for cell in row_lower)
 
 
 def _resolve_latest_stock_sheet_block(all_values: Sequence[Sequence[Any]]) -> tuple[date, int, int]:
@@ -152,8 +152,104 @@ def _resolve_latest_stock_sheet_block(all_values: Sequence[Sequence[Any]]) -> tu
     if header_idx == -1:
         raise RuntimeError(f"Header row not found for stock date block {stock_date.isoformat()}.")
 
-    parse_end = len(all_values)
-    return stock_date, header_idx, parse_end
+    return stock_date, header_idx, len(all_values)
+
+
+def parse_ivan_stock_values(
+    all_values: Sequence[Sequence[Any]],
+    *,
+    source_sheet: str = STOCK_SHEET_NAME,
+) -> dict[str, Any]:
+    total_rows = len(all_values)
+    stock_date, header_idx, parse_end = _resolve_latest_stock_sheet_block(all_values)
+
+    rows_to_save: list[dict[str, Any]] = []
+    skipped_no_nm_id = 0
+    data_rows = 0
+    quantity_sum_total = Decimal("0")
+
+    for idx in range(header_idx + 1, parse_end):
+        row = all_values[idx]
+        if not row:
+            continue
+
+        col1 = str(row[0]).strip() if len(row) > 0 else ""
+        col2 = str(row[1]).strip() if len(row) > 1 else ""
+        col3 = str(row[2]).strip() if len(row) > 2 else ""
+        if not col1 and not col2 and not col3:
+            continue
+
+        data_rows += 1
+        nm_id_raw = col2.replace(" ", "").replace("\xa0", "").strip()
+        if not nm_id_raw:
+            skipped_no_nm_id += 1
+            continue
+
+        try:
+            nm_id = int(nm_id_raw)
+        except ValueError:
+            skipped_no_nm_id += 1
+            continue
+
+        qty = normalize_ivan_stock_quantity(col3)
+        quantity_sum_total += qty
+        size_name, color_name, barcode = parse_row_nomenclature(col1)
+        rows_to_save.append(
+            {
+                "stock_date": stock_date,
+                "nm_id": nm_id,
+                "size_name": size_name,
+                "barcode": barcode,
+                "color_name": color_name,
+                "quantity": qty,
+                "nomenclature_raw": col1,
+                "source_sheet": source_sheet,
+                "raw_row": row,
+            }
+        )
+
+    distinct_nm_ids = {row["nm_id"] for row in rows_to_save}
+    distinct_nm_id_sizes = {(row["nm_id"], row["size_name"]) for row in rows_to_save}
+    rows_with_barcode = sum(1 for row in rows_to_save if row["barcode"])
+
+    return {
+        "success": True,
+        "stock_date": stock_date,
+        "total_rows": total_rows,
+        "data_rows": data_rows,
+        "rows_with_nm_id": len(rows_to_save),
+        "skipped_no_nm_id": skipped_no_nm_id,
+        "rows_with_barcode": rows_with_barcode,
+        "distinct_nm_id": len(distinct_nm_ids),
+        "distinct_nm_id_size": len(distinct_nm_id_sizes),
+        "size_level_rows": len(rows_to_save),
+        "product_level_rows": len(distinct_nm_ids),
+        "quantity_sum_total": int(quantity_sum_total) if quantity_sum_total % 1 == 0 else float(quantity_sum_total),
+        "rows_to_save": rows_to_save,
+    }
+
+
+def save_ivan_stock_rows(
+    *,
+    stock_date: date,
+    rows_to_save: Sequence[dict[str, Any]],
+    write_db: bool,
+) -> dict[str, int]:
+    if not write_db or not rows_to_save:
+        return {"rows_inserted": 0, "legacy_rows_deleted": 0}
+
+    with session_scope() as session:
+        rows_inserted = upsert_rows(
+            session=session,
+            model=FactIvanStockSheetDay,
+            rows=list(rows_to_save),
+            conflict_columns=("stock_date", "nm_id", "size_name", "barcode"),
+        )
+        legacy_rows_deleted = prune_legacy_blank_size_rows(session, stock_date)
+    return {
+        "rows_inserted": rows_inserted,
+        "legacy_rows_deleted": legacy_rows_deleted,
+    }
 
 
 def load_ivan_stock_sheet(
@@ -183,88 +279,20 @@ def load_ivan_stock_sheet(
     if not all_values:
         raise RuntimeError(f"No data retrieved from sheet '{STOCK_SHEET_NAME}'.")
 
-    total_rows = len(all_values)
-    stock_date, header_idx, parse_end = _resolve_latest_stock_sheet_block(all_values)
-
-    rows_to_save: list[dict[str, Any]] = []
-    skipped_no_nm_id = 0
-    data_rows = 0
-    quantity_sum_total = Decimal("0")
-
-    for idx in range(header_idx + 1, parse_end):
-        row = all_values[idx]
-        if not row:
-            continue
-
-        col1 = str(row[0]).strip() if len(row) > 0 else ""
-        col2 = str(row[1]).strip() if len(row) > 1 else ""
-        col3 = str(row[2]).strip() if len(row) > 2 else ""
-
-        if not col1 and not col2 and not col3:
-            continue
-
-        data_rows += 1
-
-        nm_id_raw = col2.replace(" ", "").replace("\xa0", "").strip()
-        if not nm_id_raw:
-            skipped_no_nm_id += 1
-            continue
-
-        try:
-            nm_id = int(nm_id_raw)
-        except ValueError:
-            skipped_no_nm_id += 1
-            continue
-
-        qty = normalize_ivan_stock_quantity(col3)
-        quantity_sum_total += qty
-        size_name, color_name, barcode = parse_row_nomenclature(col1)
-
-        rows_to_save.append(
-            {
-                "stock_date": stock_date,
-                "nm_id": nm_id,
-                "size_name": size_name,
-                "barcode": barcode,
-                "color_name": color_name,
-                "quantity": qty,
-                "nomenclature_raw": col1,
-                "source_sheet": STOCK_SHEET_NAME,
-                "raw_row": row,
-            }
-        )
-
-    rows_inserted = 0
-    legacy_rows_deleted = 0
-    if write_db and rows_to_save:
-        with session_scope() as session:
-            rows_inserted = upsert_rows(
-                session=session,
-                model=FactIvanStockSheetDay,
-                rows=rows_to_save,
-                conflict_columns=("stock_date", "nm_id", "size_name", "barcode"),
-            )
-            legacy_rows_deleted = prune_legacy_blank_size_rows(session, stock_date)
-
-    distinct_nm_ids = {row["nm_id"] for row in rows_to_save}
-    distinct_nm_id_sizes = {(row["nm_id"], row["size_name"]) for row in rows_to_save}
-    rows_with_barcode = sum(1 for row in rows_to_save if row["barcode"])
+    parse_result = parse_ivan_stock_values(all_values, source_sheet=target_sheet)
+    write_result = save_ivan_stock_rows(
+        stock_date=parse_result["stock_date"],
+        rows_to_save=parse_result["rows_to_save"],
+        write_db=write_db,
+    )
 
     return {
-        "success": True,
-        "stock_date": stock_date,
-        "total_rows": total_rows,
-        "data_rows": data_rows,
-        "rows_with_nm_id": len(rows_to_save),
-        "skipped_no_nm_id": skipped_no_nm_id,
-        "rows_with_barcode": rows_with_barcode,
-        "distinct_nm_id": len(distinct_nm_ids),
-        "distinct_nm_id_size": len(distinct_nm_id_sizes),
-        "size_level_rows": len(rows_to_save),
-        "product_level_rows": len(distinct_nm_ids),
-        "quantity_sum_total": int(quantity_sum_total) if quantity_sum_total % 1 == 0 else float(quantity_sum_total),
-        "rows_inserted": rows_inserted,
-        "legacy_rows_deleted": legacy_rows_deleted,
+        key: value
+        for key, value in {
+            **parse_result,
+            **write_result,
+        }.items()
+        if key != "rows_to_save"
     }
 
 

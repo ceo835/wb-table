@@ -10,6 +10,7 @@ from src.db.communications_models import Campaign, ChatRegistry, CampaignRecipie
 from src.services.communications.providers import (
     OzonChatProvider,
     WBChatProvider,
+    WB_FULL_HISTORY_MAX_PAGES,
     ozon_registry_can_reply,
     parse_ozon_registry_meta,
 )
@@ -26,7 +27,7 @@ class AudienceService:
         cls,
         session: Session,
         campaign_id: int,
-        max_event_pages: int = 10,
+        max_event_pages: int = WB_FULL_HISTORY_MAX_PAGES,
     ) -> Dict[str, Any]:
         """Собрать и отфильтровать аудиторию для кампании."""
         campaign = session.get(Campaign, campaign_id)

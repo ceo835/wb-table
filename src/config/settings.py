@@ -71,6 +71,8 @@ GOOGLE_SHEET_ID = (
 # VVBromo Google Sheet
 GOOGLE_SERVICE_ACCOUNT_JSON = get_env_variable("GOOGLE_SERVICE_ACCOUNT_JSON", required=False)
 WB_SUPPLIES_GOOGLE_DRIVE_FOLDER_ID = get_env_variable("WB_SUPPLIES_GOOGLE_DRIVE_FOLDER_ID", required=False)
+VVBROMO_GOOGLE_DRIVE_FOLDER_ID = get_env_variable("VVBROMO_GOOGLE_DRIVE_FOLDER_ID", required=False)
+IVAN_STOCK_GOOGLE_DRIVE_FOLDER_ID = get_env_variable("IVAN_STOCK_GOOGLE_DRIVE_FOLDER_ID", required=False)
 VVBROMO_GOOGLE_SHEET_ID = get_env_variable("VVBROMO_GOOGLE_SHEET_ID", required=False)
 VVBROMO_GOOGLE_SHEET_GID = get_env_variable("VVBROMO_GOOGLE_SHEET_GID", required=False)
 VVBROMO_GOOGLE_SHEET_NAME = get_env_variable("VVBROMO_GOOGLE_SHEET_NAME", required=False)
@@ -109,6 +111,8 @@ class Settings:
         # VVBromo Settings
         self.google_service_account_json = GOOGLE_SERVICE_ACCOUNT_JSON
         self.wb_supplies_google_drive_folder_id = WB_SUPPLIES_GOOGLE_DRIVE_FOLDER_ID
+        self.vvbromo_google_drive_folder_id = VVBROMO_GOOGLE_DRIVE_FOLDER_ID
+        self.ivan_stock_google_drive_folder_id = IVAN_STOCK_GOOGLE_DRIVE_FOLDER_ID
         self.vvbromo_google_sheet_id = VVBROMO_GOOGLE_SHEET_ID
         self.vvbromo_google_sheet_gid = VVBROMO_GOOGLE_SHEET_GID
         self.vvbromo_google_sheet_name = VVBROMO_GOOGLE_SHEET_NAME

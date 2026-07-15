@@ -19,8 +19,9 @@ DAILY_REFRESH_HOUR_UTC = 8
 WORKER_TIMEZONE_NAME = "Europe/Moscow"
 VVBROMO_JOB_NAME = "vvbromo_sync"
 IVAN_STOCK_JOB_NAME = "ivan_stock_sync"
+OZON_PRICE_SNAPSHOT_JOB_NAME = "ozon_price_snapshot_sync"
 VVBROMO_MORNING_GUARD_JOB_NAME = "vvbromo_sync__0900_msk"
-VVBROMO_EVENING_GUARD_JOB_NAME = "vvbromo_sync__2100_msk"
+OZON_PRICE_SNAPSHOT_GUARD_JOB_NAME = "ozon_price_snapshot_sync__1000_msk"
 IVAN_STOCK_GUARD_JOB_NAME = "ivan_stock_sync__2200_msk"
 WORKER_SUMMARY_DIR = Path(__file__).resolve().parents[2] / "data" / "processed" / "scheduler_runs"
 _SCHEDULER_THREAD: threading.Thread | None = None
@@ -109,6 +110,13 @@ def _default_runner(run_date: date) -> dict[str, Any]:
 
 
 def _run_vvbromo_sync(run_date: date) -> dict[str, Any]:
+    from src.config.settings import settings
+
+    if settings.vvbromo_google_drive_folder_id:
+        from src.services.google_drive_daily_sync import sync_vvbromo_from_google_drive
+
+        return sync_vvbromo_from_google_drive(run_date=run_date, write_db=True)
+
     from scripts.parse_vvbromo_sheet import run_loader
 
     summary = run_loader(year=run_date.year, apply=True, dry_run=False)
@@ -117,12 +125,28 @@ def _run_vvbromo_sync(run_date: date) -> dict[str, Any]:
     return summary
 
 
-def _run_ivan_stock_sync(_run_date: date) -> dict[str, Any]:
+def _run_ivan_stock_sync(run_date: date) -> dict[str, Any]:
+    from src.config.settings import settings
+
+    if settings.ivan_stock_google_drive_folder_id:
+        from src.services.google_drive_daily_sync import sync_ivan_stock_from_google_drive
+
+        return sync_ivan_stock_from_google_drive(run_date=run_date, write_db=True)
+
     from src.db.ivan_stock_sheet_loader import load_ivan_stock_sheet
 
     summary = load_ivan_stock_sheet(write_db=True)
     summary = dict(summary)
     summary["success"] = bool(summary.get("success", True))
+    return summary
+
+
+def _run_ozon_price_snapshot_sync(_run_date: date) -> dict[str, Any]:
+    from src.db.ozon_price_snapshot_loader import collect_and_load_ozon_snapshots
+
+    summary = collect_and_load_ozon_snapshots(headless=True, connect_cdp_url="", dry_run=False)
+    summary = dict(summary)
+    summary["success"] = summary.get("status") == "success"
     return summary
 
 
@@ -158,17 +182,9 @@ def build_worker_job_slots(
     dashboard_runner: Callable[[date], dict[str, Any]] | None = None,
     vvbromo_runner: Callable[[date], dict[str, Any]] | None = None,
     ivan_stock_runner: Callable[[date], dict[str, Any]] | None = None,
+    ozon_runner: Callable[[date], dict[str, Any]] | None = None,
 ) -> list[WorkerJobSlot]:
     return [
-        WorkerJobSlot(
-            guard_job_name=DAILY_REFRESH_JOB_NAME,
-            job_name=DAILY_REFRESH_JOB_NAME,
-            slot_label="1100_msk",
-            hour_msk=11,
-            minute_msk=0,
-            run_date_mode="yesterday_msk",
-            runner=dashboard_runner or _default_runner,
-        ),
         WorkerJobSlot(
             guard_job_name=VVBROMO_MORNING_GUARD_JOB_NAME,
             job_name=VVBROMO_JOB_NAME,
@@ -179,13 +195,22 @@ def build_worker_job_slots(
             runner=vvbromo_runner or _run_vvbromo_sync,
         ),
         WorkerJobSlot(
-            guard_job_name=VVBROMO_EVENING_GUARD_JOB_NAME,
-            job_name=VVBROMO_JOB_NAME,
-            slot_label="2100_msk",
-            hour_msk=21,
+            guard_job_name=OZON_PRICE_SNAPSHOT_GUARD_JOB_NAME,
+            job_name=OZON_PRICE_SNAPSHOT_JOB_NAME,
+            slot_label="1000_msk",
+            hour_msk=10,
             minute_msk=0,
             run_date_mode="today_msk",
-            runner=vvbromo_runner or _run_vvbromo_sync,
+            runner=ozon_runner or _run_ozon_price_snapshot_sync,
+        ),
+        WorkerJobSlot(
+            guard_job_name=DAILY_REFRESH_JOB_NAME,
+            job_name=DAILY_REFRESH_JOB_NAME,
+            slot_label="1100_msk",
+            hour_msk=11,
+            minute_msk=0,
+            run_date_mode="yesterday_msk",
+            runner=dashboard_runner or _default_runner,
         ),
         WorkerJobSlot(
             guard_job_name=IVAN_STOCK_GUARD_JOB_NAME,

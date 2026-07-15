@@ -1057,6 +1057,9 @@ def _format_chat_dt(value: Optional[datetime]) -> str:
 WB_CHAT_SOURCE_LABELS = {
     "chats": "Текущий чат",
     "events": "История событий",
+    "seller_chats_only": "Текущий чат",
+    "seller_events_only": "История событий",
+    "both": "Текущий чат + история",
 }
 WB_CHAT_REGISTRY_DISPLAY_COLUMNS = [
     "ID чата",
@@ -1126,7 +1129,8 @@ def _translate_wb_chat_source(source: Optional[str]) -> str:
 
 
 def _wb_chat_can_reply(source: Optional[str], reply_sign: Optional[str]) -> bool:
-    return str(source or "").strip().lower() == "chats" and bool(str(reply_sign or "").strip())
+    source_key = str(source or "").strip().lower()
+    return source_key in {"seller_chats_only", "both"} and bool(str(reply_sign or "").strip())
 
 
 
@@ -1279,6 +1283,7 @@ def _build_wb_chat_registry_dataframe(session, chats: list[ChatRegistry], *, now
                 "Кто писал последним": _translate_wb_last_sender(chat.last_sender),
                 "Технический ключ ответа": chat.reply_sign or "-",
                 "__source_key": str(chat.source or "").strip().lower(),
+                "__is_current_chat": bool(chat.current_chat_exists),
                 "__can_reply": can_reply,
                 "__last_activity_date": chat.last_activity_at.date() if chat.last_activity_at else None,
                 "__days_since_last_activity": days_since_last_num,
@@ -1297,13 +1302,12 @@ def _build_wb_chat_registry_dataframe(session, chats: list[ChatRegistry], *, now
             if column_name not in df.columns:
                 df[column_name] = pd.Series(dtype=object)
 
-    source_counts = df["__source_key"].value_counts().to_dict() if "__source_key" in df.columns else {}
     first_activity_values = [chat.first_activity_at for chat in chats if chat.first_activity_at]
     last_activity_values = [chat.last_activity_at for chat in chats if chat.last_activity_at]
     summary = {
         "total_chats": len(chats),
-        "current_source_chats": int(source_counts.get("chats", 0)),
-        "history_source_chats": int(source_counts.get("events", 0)),
+        "current_source_chats": sum(1 for chat in chats if bool(chat.current_chat_exists)),
+        "history_source_chats": sum(1 for chat in chats if not bool(chat.current_chat_exists)),
         "unique_wb_articles": len(all_nm_ids),
         "earliest_activity_label": _format_chat_dt(min(first_activity_values)) if first_activity_values else "-",
         "latest_activity_label": _format_chat_dt(max(last_activity_values)) if last_activity_values else "-",
@@ -1324,13 +1328,10 @@ def _filter_wb_chat_registry_dataframe(
     search_query: str,
 ) -> pd.DataFrame:
     filtered_df = df.copy()
-    if filtered_df.empty:
-        return filtered_df
-
     if source_filter == "Текущие чаты":
-        filtered_df = filtered_df.loc[filtered_df["__source_key"] == "chats"].copy()
+        filtered_df = filtered_df.loc[filtered_df["__is_current_chat"]].copy()
     elif source_filter == "История событий":
-        filtered_df = filtered_df.loc[filtered_df["__source_key"] == "events"].copy()
+        filtered_df = filtered_df.loc[~filtered_df["__is_current_chat"]].copy()
 
     if can_reply_filter == "Да":
         filtered_df = filtered_df.loc[filtered_df["__can_reply"]].copy()
@@ -1753,7 +1754,7 @@ def render_chats_registry_subtab(session) -> None:
         with st.spinner("Загрузка данных из Wildberries..."):
             try:
                 provider = WBChatProvider()
-                prepared_count = provider.build_chat_registry(session, max_event_pages=10)
+                prepared_count = provider.build_chat_registry(session)
                 session.commit()
 
                 total_count = session.scalar(select(func.count()).select_from(ChatRegistry))

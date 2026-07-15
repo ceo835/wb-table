@@ -786,12 +786,13 @@ def test_build_worker_job_slots_contains_dashboard_vvbromo_and_ivan_jobs() -> No
         dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
         vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
         ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        ozon_runner=lambda run_date: {"run_date": run_date.isoformat()},
     )
 
     assert [(slot.job_name, slot.slot_label) for slot in slots] == [
-        (DAILY_REFRESH_JOB_NAME, "1100_msk"),
         (VVBROMO_JOB_NAME, "0900_msk"),
-        (VVBROMO_JOB_NAME, "2100_msk"),
+        ("ozon_price_snapshot_sync", "1000_msk"),
+        (DAILY_REFRESH_JOB_NAME, "1100_msk"),
         (IVAN_STOCK_JOB_NAME, "2200_msk"),
     ]
 
@@ -801,6 +802,7 @@ def test_collect_due_worker_job_slots_respects_schedule_and_success_state() -> N
         dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
         vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
         ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        ozon_runner=lambda run_date: {"run_date": run_date.isoformat()},
     )
     now = datetime(2026, 7, 6, 20, 30, tzinfo=UTC)
 
@@ -811,18 +813,23 @@ def test_collect_due_worker_job_slots_respects_schedule_and_success_state() -> N
     )
 
     assert [(slot.guard_job_name, run_date.isoformat()) for slot, run_date in due] == [
+        ("ozon_price_snapshot_sync__1000_msk", "2026-07-06"),
         (DAILY_REFRESH_JOB_NAME, "2026-07-05"),
-        ("vvbromo_sync__2100_msk", "2026-07-06"),
         ("ivan_stock_sync__2200_msk", "2026-07-06"),
     ]
 
 
 def test_run_due_worker_job_slots_continues_when_one_job_fails() -> None:
-    slots = build_worker_job_slots(
-        dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
-        vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
-        ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
-    )[1:3]
+    slots = [
+        slot
+        for slot in build_worker_job_slots(
+            dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
+            vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
+            ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
+            ozon_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        )
+        if slot.guard_job_name in {"vvbromo_sync__0900_msk", "ozon_price_snapshot_sync__1000_msk"}
+    ]
     now = datetime(2026, 7, 6, 18, 30, tzinfo=UTC)
 
     def fake_executor(slot, run_date):
@@ -847,6 +854,7 @@ def test_run_scheduler_worker_once_runs_dashboard_catchup_and_same_day_sheet_job
         dashboard_runner=lambda run_date: {"run_date": run_date.isoformat()},
         vvbromo_runner=lambda run_date: {"run_date": run_date.isoformat()},
         ivan_stock_runner=lambda run_date: {"run_date": run_date.isoformat()},
+        ozon_runner=lambda run_date: {"run_date": run_date.isoformat()},
     )
     now = datetime(2026, 7, 6, 19, 30, tzinfo=UTC)
     executed: list[tuple[str, date]] = []
@@ -875,8 +883,8 @@ def test_run_scheduler_worker_once_runs_dashboard_catchup_and_same_day_sheet_job
     ]
     assert executed[-4:] == [
         ("vvbromo_sync__0900_msk", date(2026, 7, 6)),
+        ("ozon_price_snapshot_sync__1000_msk", date(2026, 7, 6)),
         (DAILY_REFRESH_JOB_NAME, date(2026, 7, 5)),
-        ("vvbromo_sync__2100_msk", date(2026, 7, 6)),
         ("ivan_stock_sync__2200_msk", date(2026, 7, 6)),
     ]
 
@@ -916,3 +924,33 @@ def test_parse_args_uses_core_refresh_by_default_and_supports_explicit_skip(monk
 
     assert args.include_core_refresh is True
     assert args.skip_core_refresh is True
+
+
+def test_run_vvbromo_sync_uses_drive_loader_when_folder_is_configured(monkeypatch) -> None:
+    from src.config.settings import settings as app_settings
+    import src.scheduler.daily_refresh_scheduler as scheduler_module
+
+    monkeypatch.setattr(app_settings, "vvbromo_google_drive_folder_id", "folder-vvbromo")
+    monkeypatch.setattr(
+        "src.services.google_drive_daily_sync.sync_vvbromo_from_google_drive",
+        lambda *, run_date, write_db: {"source": "WBRO", "run_date": run_date.isoformat(), "write_db": write_db},
+    )
+
+    result = scheduler_module._run_vvbromo_sync(date(2026, 7, 15))
+
+    assert result == {"source": "WBRO", "run_date": "2026-07-15", "write_db": True}
+
+
+def test_run_ivan_stock_sync_uses_drive_loader_when_folder_is_configured(monkeypatch) -> None:
+    from src.config.settings import settings as app_settings
+    import src.scheduler.daily_refresh_scheduler as scheduler_module
+
+    monkeypatch.setattr(app_settings, "ivan_stock_google_drive_folder_id", "folder-ivan")
+    monkeypatch.setattr(
+        "src.services.google_drive_daily_sync.sync_ivan_stock_from_google_drive",
+        lambda *, run_date, write_db: {"source": "IVAN_STOCK", "run_date": run_date.isoformat(), "write_db": write_db},
+    )
+
+    result = scheduler_module._run_ivan_stock_sync(date(2026, 7, 15))
+
+    assert result == {"source": "IVAN_STOCK", "run_date": "2026-07-15", "write_db": True}
