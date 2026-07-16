@@ -7,6 +7,19 @@ from src.mcp_server.schemas import WbDailyOperationalSummaryResponse
 
 
 CURRENCY_COLUMNS = {"value", "previous_value", "delta_abs"}
+SECTION_ORDER = {
+    "overview": 1,
+    "traffic": 2,
+    "funnel": 3,
+    "ads": 4,
+    "sales": 5,
+    "profit": 6,
+    "stock": 7,
+    "assortment": 8,
+    "search": 9,
+    "priority": 10,
+    "scenario": 11,
+}
 
 
 
@@ -103,6 +116,13 @@ def _render_markdown_table(columns: list[str], rows: list[list[str]]) -> str:
     divider = "| " + " | ".join(["---"] * len(columns)) + " |"
     body = ["| " + " | ".join(row) + " |" for row in rows]
     return "\n".join([header, divider, *body])
+
+
+def _format_data_completeness(response: WbDailyOperationalSummaryResponse) -> str:
+    stale_or_missing = [item.source for item in response.source_freshness if item.status != "OK"]
+    if not stale_or_missing:
+        return "core-????????? ????????? ?? ???????? ????"
+    return "??????? ????????: " + ", ".join(stale_or_missing)
 
 
 

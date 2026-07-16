@@ -290,7 +290,6 @@ class FakeRepository:
         )
 
     def get_wb_daily_operational_summary(self, payload: WbDailyOperationalSummaryRequest) -> WbDailyOperationalSummaryResponse:
-        assert payload.mode == "full"
         assert payload.top_n == 5
         return WbDailyOperationalSummaryResponse(
             formula_version="v1",
@@ -1026,6 +1025,7 @@ def test_mcp_tools_call_wb_daily_operational_summary_returns_structured_content(
     structured = payload["result"]["structuredContent"]
     assert structured["formula_version"] == "v1"
     assert structured["report_window"]["report_date"] == "2026-06-18"
+    assert structured["requested_options"]["mode"] == "full"
     assert structured["diagnostics"]["query_count"] == 9
     assert structured["diagnostics"]["excluded_sections"][0]["key"] == "profit"
     section_keys = [section["key"] for section in structured["sections"]]
@@ -1059,3 +1059,36 @@ def test_resolve_report_date_rejects_current_day() -> None:
         assert "earlier than current Moscow date" in str(exc)
     else:
         raise AssertionError("Expected ValueError for current-day report request")
+
+
+def test_mcp_tools_call_wb_daily_operational_summary_defaults_to_full_when_mode_omitted() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "tools/call",
+            "params": {
+                "name": "get_wb_daily_operational_summary",
+                "arguments": {
+                    "top_n": 5,
+                    "diagnostic": False,
+                },
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["structuredContent"]["requested_options"]["mode"] == "full"
+
+
+def test_wb_daily_operational_summary_brief_and_full_share_same_structured_metrics() -> None:
+    repository = FakeRepository()
+    full = repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest(mode="full", top_n=5))
+    brief = repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest(mode="brief", top_n=5))
+    assert full.sections[0].metrics[0].value == brief.sections[0].metrics[0].value
+    assert full.sections[0].metrics[0].previous_value == brief.sections[0].metrics[0].previous_value
+    assert full.sections[0].metrics[0].delta_pct == brief.sections[0].metrics[0].delta_pct
+    assert full.sections[0].metrics[0].trend_7d_pct == brief.sections[0].metrics[0].trend_7d_pct
