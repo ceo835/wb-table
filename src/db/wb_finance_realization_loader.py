@@ -441,6 +441,7 @@ def upsert_fact_finance_realization_lines(session: Session, rows: Sequence[Mappi
         model=FactFinanceRealizationLine,
         rows=list(rows),
         conflict_columns=FACT_FINANCE_REALIZATION_LINE_CONFLICT_COLUMNS,
+        batch_size=500,
     )
     return len(rows)
 
