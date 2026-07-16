@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import altair as alt
 import pandas as pd
 import streamlit as st
+import src.ad_campaign_efficiency as ad_campaign_efficiency
 from pandas.io.formats.style import Styler
 from sqlalchemy import func, select, text
 
@@ -1133,7 +1134,7 @@ def build_main_tab_labels() -> list[str]:
     return [
         "ИТОГО",
         ENTRY_POINT_ANALYTICS_TAB_LABEL,
-        AD_CAMPAIGN_PRODUCT_LABEL,
+        ad_campaign_efficiency.AD_CAMPAIGN_SECTION_LABEL,
         "Карточка товара",
         "Графики",
         WB_SITE_PRICE_TAB_LABEL,
@@ -6008,7 +6009,8 @@ def render_stock_all_tab(
     wb_from_client = product_df["wb_in_way_from_client"].sum(min_count=1)
     wb_contour = product_df["wb_total_in_contour"].sum(min_count=1)
     one_c_stock_total = pd.to_numeric(product_df["one_c_stock_qty"], errors="coerce").sum(min_count=1)
-    wb_supply_total = pd.to_numeric(product_df["wb_supply_qty"], errors="coerce").sum(min_count=1)
+    wb_supply_series = pd.to_numeric(product_df["wb_supply_qty"], errors="coerce") if "wb_supply_qty" in product_df.columns else pd.Series(dtype="float64")
+    wb_supply_total = wb_supply_series.sum(min_count=1)
     wb_vs_one_c_diff_total = pd.to_numeric(product_df["wb_vs_one_c_diff"], errors="coerce").sum(min_count=1)
     products_count = product_df["nm_id"].nunique()
     band_count = int(product_df["band_name"].nunique())
@@ -10907,6 +10909,148 @@ def render_ad_campaign_product_tab(
     )
 
 
+def render_ad_campaign_efficiency_tab() -> None:
+    st.subheader(ad_campaign_efficiency.AD_CAMPAIGN_EFFICIENCY_LABEL)
+
+    if not (os.getenv("DATABASE_URL") or settings.database_url):
+        st.info("Экран эффективности рекламных кампаний доступен только при работе с БД.")
+        return
+
+    available_dates = ad_campaign_efficiency.load_ad_campaign_efficiency_available_dates()
+    if not available_dates:
+        st.info("Для экрана эффективности рекламных кампаний пока нет данных.")
+        return
+
+    latest_report_date = max(available_dates)
+    filter_cols = st.columns(6)
+    report_date_value = filter_cols[0].selectbox(
+        "Дата среза",
+        options=available_dates,
+        index=available_dates.index(latest_report_date),
+        format_func=lambda value: value.strftime("%d.%m.%Y"),
+        key="ad_campaign_efficiency_report_date",
+    )
+    period_mode = filter_cols[1].selectbox(
+        "Период сравнения",
+        options=[
+            ad_campaign_efficiency.AD_CAMPAIGN_PERIOD_DAILY,
+            ad_campaign_efficiency.AD_CAMPAIGN_PERIOD_WEEKLY,
+        ],
+        key="ad_campaign_efficiency_period_mode",
+    )
+    level_filter = filter_cols[2].selectbox(
+        "Уровень",
+        options=[
+            ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_ALL,
+            ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_CAMPAIGNS,
+            ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_ARTICLES,
+        ],
+        key="ad_campaign_efficiency_level_filter",
+    )
+    metric_filter = filter_cols[3].selectbox(
+        "Метрика",
+        options=[
+            ad_campaign_efficiency.AD_CAMPAIGN_METRIC_ALL,
+            ad_campaign_efficiency.AD_CAMPAIGN_METRIC_IMPRESSIONS,
+            ad_campaign_efficiency.AD_CAMPAIGN_METRIC_CARTS,
+        ],
+        key="ad_campaign_efficiency_metric_filter",
+    )
+    direction_filter = filter_cols[4].selectbox(
+        "Направление",
+        options=[
+            ad_campaign_efficiency.AD_CAMPAIGN_DIRECTION_ALL,
+            ad_campaign_efficiency.AD_CAMPAIGN_DIRECTION_GROWTH,
+            ad_campaign_efficiency.AD_CAMPAIGN_DIRECTION_DECLINE,
+        ],
+        key="ad_campaign_efficiency_direction_filter",
+    )
+    threshold_pct = float(
+        filter_cols[5].number_input(
+            "Порог, %",
+            min_value=0.0,
+            value=float(ad_campaign_efficiency.AD_CAMPAIGN_EFFICIENCY_THRESHOLD_PCT),
+            step=1.0,
+            key="ad_campaign_efficiency_threshold_pct",
+        )
+    )
+    only_notable = st.checkbox(
+        "Только заметные отклонения",
+        value=False,
+        key="ad_campaign_efficiency_only_notable",
+    )
+    search_text = st.text_input("Поиск", key="ad_campaign_efficiency_search_text")
+
+    window = ad_campaign_efficiency.resolve_ad_campaign_efficiency_window(report_date_value, period_mode)
+    campaign_stats_df, article_stats_df, campaign_meta_df, product_df = ad_campaign_efficiency.load_ad_campaign_efficiency_scope_from_db(
+        window["previous_start"],
+        window["current_end"],
+    )
+    campaign_rows, article_rows, resolved_window = ad_campaign_efficiency.build_ad_campaign_efficiency_tables(
+        campaign_stats_df,
+        article_stats_df,
+        campaign_meta_df,
+        product_df,
+        report_date_value=report_date_value,
+        period_mode=period_mode,
+        threshold_pct=threshold_pct,
+    )
+    summary = ad_campaign_efficiency.build_ad_campaign_efficiency_summary(campaign_rows, article_rows)
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Активных кампаний", f"{summary['active_campaigns']:,}".replace(",", " "))
+    metric_cols[1].metric("Алерты по показам", f"{summary['campaign_impression_alerts']:,}".replace(",", " "))
+    metric_cols[2].metric("Алерты по корзинам", f"{summary['campaign_cart_alerts']:,}".replace(",", " "))
+    metric_cols[3].metric("Алерты по артикулам", f"{summary['article_alerts']:,}".replace(",", " "))
+    metric_cols[4].metric("Падение в ноль / новая активность", f"{summary['drop_to_zero'] + summary['new_activity']:,}".replace(",", " "))
+    st.caption(str(resolved_window["comparison_label"]))
+
+    show_campaigns = level_filter in {
+        ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_ALL,
+        ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_CAMPAIGNS,
+    }
+    show_articles = level_filter in {
+        ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_ALL,
+        ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_ARTICLES,
+    }
+
+    if show_campaigns:
+        st.markdown("#### Кампании")
+        filtered_campaign_rows = ad_campaign_efficiency.filter_ad_campaign_efficiency_rows(
+            campaign_rows,
+            metric_filter=metric_filter,
+            direction_filter=direction_filter,
+            only_notable=only_notable,
+            search_text=search_text,
+        )
+        if filtered_campaign_rows.empty:
+            st.info("По текущим фильтрам кампании не найдены.")
+        else:
+            safe_st_dataframe(
+                filtered_campaign_rows.drop(columns=["search_blob", "sort_priority", "sort_secondary"], errors="ignore"),
+                width="stretch",
+                hide_index=True,
+            )
+
+    if show_articles:
+        st.markdown("#### Артикулы")
+        filtered_article_rows = ad_campaign_efficiency.filter_ad_campaign_efficiency_rows(
+            article_rows,
+            metric_filter=metric_filter,
+            direction_filter=direction_filter,
+            only_notable=only_notable,
+            search_text=search_text,
+        )
+        if filtered_article_rows.empty:
+            st.info("По текущим фильтрам артикулами отклонения не найдены.")
+        else:
+            safe_st_dataframe(
+                filtered_article_rows.drop(columns=["search_blob", "sort_priority", "sort_secondary"], errors="ignore"),
+                width="stretch",
+                hide_index=True,
+            )
+
+
 def main() -> None:
     st.set_page_config(page_title="MP Control Center", layout="wide")
     st.title("MP Control Center")
@@ -10975,14 +11119,23 @@ def main() -> None:
     elif selected_main_section == tab_labels[1]:
         render_entry_point_analytics_tab(filtered)
     elif selected_main_section == tab_labels[2]:
-        render_ad_campaign_product_tab(
-            ad_campaign_product_df,
-            data_source,
-            ad_campaign_product_error,
-            selected_product_label=selected_product_label,
-            option_map=option_map,
-            allowed_report_dates=sorted(d for d in filtered["report_date"].dropna().unique().tolist()),
+        ad_tab_product, ad_tab_efficiency = st.tabs(
+            [
+                AD_CAMPAIGN_PRODUCT_LABEL,
+                ad_campaign_efficiency.AD_CAMPAIGN_EFFICIENCY_LABEL,
+            ]
         )
+        with ad_tab_product:
+            render_ad_campaign_product_tab(
+                ad_campaign_product_df,
+                data_source,
+                ad_campaign_product_error,
+                selected_product_label=selected_product_label,
+                option_map=option_map,
+                allowed_report_dates=sorted(d for d in filtered["report_date"].dropna().unique().tolist()),
+            )
+        with ad_tab_efficiency:
+            render_ad_campaign_efficiency_tab()
     elif selected_main_section == tab_labels[3]:
         render_product_tab(product_rows, default_detail_date)
     elif selected_main_section == tab_labels[4]:
