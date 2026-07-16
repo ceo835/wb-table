@@ -150,6 +150,7 @@ WB_SITE_PRICE_PROXY_URL=http://user:pass@host:port
 - `POST /tools/get_dashboard_summary`
 - `POST /tools/get_product_metrics`
 - `POST /tools/get_price_monitor`
+- `POST /tools/get_wb_daily_operational_summary`
 
 Это не полноценный MCP transport, а совместимый промежуточный HTTP слой для Railway URL-подключения.
 

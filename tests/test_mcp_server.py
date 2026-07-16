@@ -28,6 +28,20 @@ from src.mcp_server.schemas import (
 )
 from src.mcp_server.service import build_price_monitor_response
 from src.mcp_server.settings import McpServiceSettings
+from src.mcp_server.wb_daily_operational_summary import resolve_report_date
+from src.mcp_server.schemas import (
+    WbDailyOperationalDiagnosticsResponse,
+    WbDailyOperationalExcludedSectionResponse,
+    WbDailyOperationalHighlightsResponse,
+    WbDailyOperationalMetricRowResponse,
+    WbDailyOperationalReportWindowResponse,
+    WbDailyOperationalSectionResponse,
+    WbDailyOperationalSignalResponse,
+    WbDailyOperationalSourceFreshnessResponse,
+    WbDailyOperationalSummaryRequest,
+    WbDailyOperationalSummaryResponse,
+    WbDailyOperationalTableResponse,
+)
 
 
 class FakeRepository:
@@ -275,6 +289,164 @@ class FakeRepository:
             ],
         )
 
+    def get_wb_daily_operational_summary(self, payload: WbDailyOperationalSummaryRequest) -> WbDailyOperationalSummaryResponse:
+        assert payload.mode == "full"
+        assert payload.top_n == 5
+        return WbDailyOperationalSummaryResponse(
+            formula_version="v1",
+            report_window=WbDailyOperationalReportWindowResponse(
+                report_date=date(2026, 6, 18),
+                compare_date=date(2026, 6, 17),
+                trend_current_from=date(2026, 6, 12),
+                trend_current_to=date(2026, 6, 18),
+                trend_previous_from=date(2026, 6, 5),
+                trend_previous_to=date(2026, 6, 11),
+                report_date_source="auto",
+            ),
+            requested_options={
+                "mode": payload.mode,
+                "include_profit": payload.include_profit,
+                "include_partial_sections": payload.include_partial_sections,
+                "top_n": payload.top_n,
+                "diagnostic": payload.diagnostic,
+            },
+            source_freshness=[
+                WbDailyOperationalSourceFreshnessResponse(
+                    source="mart_total_report",
+                    max_date=date(2026, 6, 18),
+                    status="OK",
+                    lag_days=0,
+                )
+            ],
+            sections=[
+                WbDailyOperationalSectionResponse(
+                    key="overview",
+                    title="Краткий итог дня",
+                    status="OK",
+                    summary=["Заказов стало больше, чем днём ранее."],
+                    metrics=[
+                        WbDailyOperationalMetricRowResponse(
+                            metric="Заказы",
+                            value=120,
+                            previous_value=100,
+                            delta_abs=20,
+                            delta_pct=Decimal("20.0"),
+                            trend_7d_pct=Decimal("12.5"),
+                        )
+                    ],
+                    tables=[],
+                    signals=[],
+                ),
+                WbDailyOperationalSectionResponse(
+                    key="ads",
+                    title="Рекламная эффективность",
+                    status="OK",
+                    summary=["Есть кампании с высоким ДРР."],
+                    metrics=[],
+                    tables=[
+                        WbDailyOperationalTableResponse(
+                            title="Проблемные кампании",
+                            columns=["advert_id", "drr"],
+                            rows=[{"advert_id": 101, "drr": "31.5"}],
+                        )
+                    ],
+                    signals=[],
+                ),
+                WbDailyOperationalSectionResponse(
+                    key="assortment",
+                    title="Ассортимент: ТОП роста и падения",
+                    status="OK",
+                    summary=["Есть товары с разнонаправленной динамикой."],
+                    metrics=[],
+                    tables=[
+                        WbDailyOperationalTableResponse(
+                            title="ТОП роста",
+                            columns=["nm_id", "orders_delta_pct"],
+                            rows=[{"nm_id": 1, "orders_delta_pct": "45.0"}],
+                        ),
+                        WbDailyOperationalTableResponse(
+                            title="ТОП падения",
+                            columns=["nm_id", "orders_delta_pct"],
+                            rows=[{"nm_id": 2, "orders_delta_pct": "-18.0"}],
+                        ),
+                    ],
+                    signals=[],
+                ),
+                WbDailyOperationalSectionResponse(
+                    key="stock",
+                    title="Остатки и складские риски",
+                    status="OK",
+                    summary=["Есть позиции с низким запасом."],
+                    metrics=[],
+                    tables=[],
+                    signals=[
+                        WbDailyOperationalSignalResponse(
+                            fact="SKU 1 скоро закончится",
+                            interpretation="Запаса меньше трёх дней.",
+                            recommended_check="Проверить ближайшую поставку.",
+                            confidence="high",
+                        )
+                    ],
+                ),
+                WbDailyOperationalSectionResponse(
+                    key="search",
+                    title="Поиск",
+                    status="OK",
+                    summary=["Есть запросы с улучшением позиции."],
+                    metrics=[
+                        WbDailyOperationalMetricRowResponse(
+                            metric="Средняя позиция",
+                            value=12,
+                            previous_value=15,
+                            delta_abs=-3,
+                            trend_7d_pp=Decimal("-1.5"),
+                            note="Меньше - лучше.",
+                        )
+                    ],
+                    tables=[],
+                    signals=[],
+                ),
+                WbDailyOperationalSectionResponse(
+                    key="priority_checks",
+                    title="Приоритетные проверки",
+                    status="OK",
+                    summary=["Сначала проверить рекламные кампании и остатки."],
+                    metrics=[],
+                    tables=[],
+                    signals=[],
+                ),
+                WbDailyOperationalSectionResponse(
+                    key="scenario",
+                    title="Сценарный итог",
+                    status="OK",
+                    summary=["Без внешней прибыли оцениваем только подтверждённые факты."],
+                    metrics=[],
+                    tables=[],
+                    signals=[],
+                ),
+            ],
+            highlights=WbDailyOperationalHighlightsResponse(
+                worse=["ДРР выше порога по кампании 101."],
+                better=["Заказы выросли к предыдущему дню."],
+                priority_checks=["Проверить кампанию 101 и остатки SKU 1."],
+            ),
+            diagnostics=WbDailyOperationalDiagnosticsResponse(
+                included_sections=["overview", "ads", "assortment", "stock", "search", "priority_checks", "scenario"],
+                partial_sections=[],
+                excluded_sections=[
+                    WbDailyOperationalExcludedSectionResponse(
+                        key="profit",
+                        title="Прибыль",
+                        reason="include_profit=false",
+                        source="fact_vvbromo_product_day",
+                    )
+                ],
+                query_count=9,
+                execution_ms=42,
+                formula_version="v1",
+            ),
+        )
+
 
 class EmptyPriceMonitorRepository(FakeRepository):
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse:
@@ -472,6 +644,7 @@ def test_mcp_tools_list_exposes_registered_tools() -> None:
         "get_product_metrics",
         "get_price_monitor",
         "get_active_products",
+        "get_wb_daily_operational_summary",
     ]
     assert "PostgreSQL" in payload["result"]["tools"][0]["description"]
     assert "реальную схему таблицы mart_total_report" in payload["result"]["tools"][1]["description"]
@@ -826,3 +999,63 @@ def test_build_price_monitor_response_returns_empty_payload_without_error() -> N
     assert response.rows == 0
     assert response.alerts == 0
     assert response.items == []
+
+
+def test_mcp_tools_call_wb_daily_operational_summary_returns_structured_content() -> None:
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "get_wb_daily_operational_summary",
+                "arguments": {
+                    "mode": "full",
+                    "top_n": 5,
+                    "diagnostic": True,
+                },
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["result"]["isError"] is False
+    structured = payload["result"]["structuredContent"]
+    assert structured["formula_version"] == "v1"
+    assert structured["report_window"]["report_date"] == "2026-06-18"
+    assert structured["diagnostics"]["query_count"] == 9
+    assert structured["diagnostics"]["excluded_sections"][0]["key"] == "profit"
+    section_keys = [section["key"] for section in structured["sections"]]
+    assert "overview" in section_keys
+    assert "ads" in section_keys
+    body_text = payload["result"]["content"][0]["text"]
+    assert "Оперативная сводка WB за 2026-06-18" in body_text
+    assert "Проблемные кампании" in body_text
+    assert "ТОП роста" in body_text
+    assert "Сравнение суток: 2026-06-18 против 2026-06-17" in body_text
+
+
+def test_resolve_report_date_chooses_last_full_day() -> None:
+    freshness = [
+        {"source": "mart_total_report", "max_date": date(2026, 7, 15)},
+        {"source": "fact_funnel_day", "max_date": date(2026, 7, 14)},
+        {"source": "fact_ad_cost_day", "max_date": date(2026, 7, 15)},
+    ]
+    report_date, source = resolve_report_date(None, freshness, now_date=date(2026, 7, 16))
+    assert report_date == date(2026, 7, 14)
+    assert source == "auto_core_min"
+
+
+def test_resolve_report_date_rejects_current_day() -> None:
+    freshness = [
+        {"source": "mart_total_report", "max_date": date(2026, 7, 16)},
+    ]
+    try:
+        resolve_report_date(date(2026, 7, 16), freshness, now_date=date(2026, 7, 16))
+    except ValueError as exc:
+        assert "earlier than current Moscow date" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for current-day report request")

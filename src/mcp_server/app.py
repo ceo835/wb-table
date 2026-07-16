@@ -25,8 +25,11 @@ from src.mcp_server.schemas import (
     PriceMonitorResponse,
     ProductMetricsRequest,
     ProductMetricsResponse,
+    WbDailyOperationalSummaryRequest,
+    WbDailyOperationalSummaryResponse,
 )
 from src.mcp_server.service import McpRepository, PostgresMcpRepository
+from src.mcp_server.wb_daily_operational_summary_format import render_wb_daily_operational_summary_markdown
 from src.mcp_server.settings import McpServiceSettings, load_mcp_service_settings
 
 
@@ -103,6 +106,14 @@ def build_mcp_tools_catalog() -> list[dict]:
                 "Использовать для проверки, какой список товаров применяется в аналитике по умолчанию."
             ),
             "inputSchema": _tool_schema(ActiveProductsRequest),
+        },
+        {
+            "name": "get_wb_daily_operational_summary",
+            "description": (
+                "Возвращает ежедневную оперативную сводку WB за последний полный день или указанную дату. "
+                "Использовать для короткого daily summary: трафик, воронка, реклама, продажи, остатки, поиск и приоритетные проверки без write-операций."
+            ),
+            "inputSchema": _tool_schema(WbDailyOperationalSummaryRequest),
         },
     ]
 
@@ -429,6 +440,8 @@ def _format_tool_content(tool_result) -> str:
         return _format_price_monitor_content(tool_result)
     if isinstance(tool_result, ActiveProductsResponse):
         return _format_active_products_content(tool_result)
+    if isinstance(tool_result, WbDailyOperationalSummaryResponse):
+        return render_wb_daily_operational_summary_markdown(tool_result)
     return json.dumps(tool_result.model_dump(mode="json"), ensure_ascii=False)
 
 
@@ -464,6 +477,8 @@ def _execute_mcp_tool(name: str, arguments: dict, repository: McpRepository) -> 
         result = repository.get_price_monitor(PriceMonitorRequest.model_validate(arguments))
     elif name == "get_active_products":
         result = repository.get_active_products(ActiveProductsRequest.model_validate(arguments))
+    elif name == "get_wb_daily_operational_summary":
+        result = repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest.model_validate(arguments))
     else:
         raise KeyError(name)
     return _build_tool_result_payload(result)

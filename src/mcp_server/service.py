@@ -33,6 +33,7 @@ from src.mcp_server.schemas import (
     ProductSummaryResponse,
 )
 from src.mcp_server.settings import McpServiceSettings
+from src.mcp_server.wb_daily_operational_summary import build_operational_summary
 from src.tracked_products import load_tracked_products
 
 
@@ -125,6 +126,7 @@ class McpRepository(Protocol):
     def get_product_metrics(self, payload: ProductMetricsRequest) -> ProductMetricsResponse: ...
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse: ...
     def get_active_products(self, payload: ActiveProductsRequest) -> ActiveProductsResponse: ...
+    def get_wb_daily_operational_summary(self, payload: WbDailyOperationalSummaryRequest) -> WbDailyOperationalSummaryResponse: ...
 
 
 def _safe_divide(numerator: Decimal | None, denominator: Decimal | None, multiplier: Decimal | None = None) -> Decimal | None:
@@ -1052,6 +1054,10 @@ class PostgresMcpRepository:
             )
 
         return ActiveProductsResponse(scope=scope_name or CORE_SCOPE, rows=len(items), items=items)
+
+    def get_wb_daily_operational_summary(self, payload: WbDailyOperationalSummaryRequest) -> WbDailyOperationalSummaryResponse:
+        with self.readonly_session() as session:
+            return build_operational_summary(session, payload)
 
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse:
         with self.readonly_session() as session:

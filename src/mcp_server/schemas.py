@@ -199,6 +199,105 @@ class ActiveProductsResponse(ApiModel):
     items: list[ActiveProductsItemResponse]
 
 
+SummaryMode = Literal["full", "brief"]
+
+
+class WbDailyOperationalSummaryRequest(ToolBaseRequest):
+    report_date: date | None = None
+    mode: SummaryMode = "full"
+    include_profit: bool = False
+    include_partial_sections: bool = False
+    top_n: int = Field(default=5, ge=1, le=7)
+    diagnostic: bool = False
+
+
+class WbDailyOperationalReportWindowResponse(ApiModel):
+    report_date: date
+    compare_date: date
+    trend_current_from: date
+    trend_current_to: date
+    trend_previous_from: date
+    trend_previous_to: date
+    report_date_source: str
+
+
+class WbDailyOperationalSourceFreshnessResponse(ApiModel):
+    source: str
+    max_date: date | None
+    status: str
+    lag_days: int | None = None
+
+
+class WbDailyOperationalMetricRowResponse(ApiModel):
+    metric: str
+    value: Any = None
+    previous_value: Any = None
+    delta_abs: Any = None
+    delta_pct: Decimal | None = None
+    delta_pp: Decimal | None = None
+    trend_7d_pct: Decimal | None = None
+    trend_7d_pp: Decimal | None = None
+    note: str | None = None
+
+
+class WbDailyOperationalTableResponse(ApiModel):
+    title: str
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    note: str | None = None
+
+
+class WbDailyOperationalSignalResponse(ApiModel):
+    fact: str
+    interpretation: str | None = None
+    recommended_check: str | None = None
+    confidence: Literal["high", "medium", "low"] = "medium"
+
+
+class WbDailyOperationalSectionResponse(ApiModel):
+    key: str
+    title: str
+    status: Literal["OK", "PARTIAL", "STALE", "EXCLUDED"]
+    summary: list[str] = Field(default_factory=list)
+    metrics: list[WbDailyOperationalMetricRowResponse] = Field(default_factory=list)
+    tables: list[WbDailyOperationalTableResponse] = Field(default_factory=list)
+    signals: list[WbDailyOperationalSignalResponse] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    excluded_reason: str | None = None
+
+
+class WbDailyOperationalExcludedSectionResponse(ApiModel):
+    key: str
+    title: str
+    reason: str
+    source: str | None = None
+
+
+class WbDailyOperationalHighlightsResponse(ApiModel):
+    worse: list[str] = Field(default_factory=list)
+    better: list[str] = Field(default_factory=list)
+    priority_checks: list[str] = Field(default_factory=list)
+
+
+class WbDailyOperationalDiagnosticsResponse(ApiModel):
+    included_sections: list[str] = Field(default_factory=list)
+    partial_sections: list[str] = Field(default_factory=list)
+    excluded_sections: list[WbDailyOperationalExcludedSectionResponse] = Field(default_factory=list)
+    query_count: int = 0
+    execution_ms: int | None = None
+    formula_version: str = "v1"
+
+
+class WbDailyOperationalSummaryResponse(ApiModel):
+    formula_version: str
+    report_window: WbDailyOperationalReportWindowResponse
+    requested_options: dict[str, Any]
+    source_freshness: list[WbDailyOperationalSourceFreshnessResponse]
+    sections: list[WbDailyOperationalSectionResponse]
+    highlights: WbDailyOperationalHighlightsResponse
+    diagnostics: WbDailyOperationalDiagnosticsResponse
+
+
 class ErrorResponse(ApiModel):
     detail: str
     code: str | None = None
