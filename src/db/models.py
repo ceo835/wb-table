@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -800,6 +800,54 @@ class FactEntryPointDay(Base, StatusMixin):
     source_file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class FactFinanceRealizationLine(Base, StatusMixin):
+    __tablename__ = "fact_finance_realization_line"
+    __table_args__ = (
+        UniqueConstraint("rrd_id", name="uq_fact_finance_realization_line_rrd_id"),
+        Index("idx_fact_finance_realization_line_date_nm", "operation_date", "nm_id"),
+        Index("idx_fact_finance_realization_line_nm_date", "nm_id", "operation_date"),
+        Index("idx_fact_finance_realization_line_office_date", "office_name", "operation_date"),
+        Index("idx_fact_finance_realization_line_srid", "srid"),
+    )
+
+    fact_finance_realization_line_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    rrd_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    realizationreport_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    operation_date: Mapped[date] = mapped_column(Date, nullable=False)
+    operation_date_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    report_period_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    report_period_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    create_dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    order_dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sale_dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rr_dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    nm_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sa_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    barcode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    srid: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    doc_type_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    supplier_oper_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    delivery_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    return_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    delivery_rub: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    storage_fee: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    acceptance: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rebill_logistic_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    deduction: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    penalty: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    additional_payment: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    ppvz_for_pay: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    office_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ppvz_office_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ppvz_office_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    fix_tariff_date_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fix_tariff_date_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivery_method: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_endpoint: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_row_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class FactVbroManual(Base, StatusMixin):
     __tablename__ = "fact_vbro_manual"
     __table_args__ = (
@@ -1218,7 +1266,7 @@ class FactIvanStockSheetDay(Base, TimestampMixin):
     color_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     quantity: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     nomenclature_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source_sheet: Mapped[str] = mapped_column(Text, nullable=False, default="Остатки", server_default="Остатки")
+    source_sheet: Mapped[str] = mapped_column(Text, nullable=False, default="РћСЃС‚Р°С‚РєРё", server_default="РћСЃС‚Р°С‚РєРё")
     raw_row: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
 
 
@@ -1253,5 +1301,6 @@ class FactOzonPriceSnapshot(Base, TimestampMixin):
     raw_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
 
 
-# Регистрация моделей модуля коммуникаций
+# Р РµРіРёСЃС‚СЂР°С†РёСЏ РјРѕРґРµР»РµР№ РјРѕРґСѓР»СЏ РєРѕРјРјСѓРЅРёРєР°С†РёР№
 from src.db.communications_models import Campaign, ChatRegistry, CampaignRecipient, SendLog  # noqa: F401
+

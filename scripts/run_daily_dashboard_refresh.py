@@ -19,6 +19,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.export_streamlit_v1_dataset import export_streamlit_v1_dataset
+from scripts.load_wb_finance_realization_to_db import load_wb_finance_realization_to_db
 from scripts.load_wb_site_price_snapshot import load_wb_site_price_snapshot
 from scripts.load_wb_seller_price_snapshot import load_wb_seller_price_snapshot
 from scripts.load_missing_core_dates import run_missing_core_dates_load
@@ -34,6 +35,7 @@ from src.db.stock_warehouse_loader import TRACKED_PRODUCTS_PATH, get_tracked_nm_
 DEFAULT_DASHBOARD_START_DATE = date(2026, 6, 7)
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "data" / "processed" / "daily_runs"
 DEFAULT_DAILY_TARGET_TIMEZONE = "Europe/Moscow"
+WB_FINANCE_REFRESH_LOOKBACK_DAYS = 2
 
 
 def utc_now_iso() -> str:
@@ -75,6 +77,12 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
         f"- WB site price success count: {summary.get('wb_site_price_success_count', '')}",
         f"- WB site price failed count: {summary.get('wb_site_price_failed_count', '')}",
         f"- WB site price alerts count: {summary.get('wb_site_price_alerts_count', '')}",
+        f"- WB finance date range: {summary.get('wb_finance_date_from', '')} .. {summary.get('wb_finance_date_to', '')}",
+        f"- WB finance rows fetched: {summary.get('wb_finance_rows_fetched', '')}",
+        f"- WB finance rows inserted: {summary.get('wb_finance_rows_inserted', '')}",
+        f"- WB finance rows updated: {summary.get('wb_finance_rows_updated', '')}",
+        f"- WB finance rows unchanged: {summary.get('wb_finance_rows_unchanged', '')}",
+        f"- WB finance row errors: {summary.get('wb_finance_row_errors_count', '')}",
         f"- WB search query rows loaded: {summary.get('search_queries_rows_loaded', '')}",
         f"- Missing tracked nm_id: {', '.join(str(item) for item in summary.get('missing_tracked_nm_id', [])) or 'none'}",
         f"- Mart rows: {summary.get('mart_total_report_rows', '')}",
@@ -148,6 +156,13 @@ def run_daily_dashboard_refresh(
         "wb_site_price_success_count": None,
         "wb_site_price_failed_count": None,
         "wb_site_price_alerts_count": None,
+        "wb_finance_date_from": "",
+        "wb_finance_date_to": "",
+        "wb_finance_rows_fetched": None,
+        "wb_finance_rows_inserted": None,
+        "wb_finance_rows_updated": None,
+        "wb_finance_rows_unchanged": None,
+        "wb_finance_row_errors_count": None,
         "search_queries_rows_loaded": None,
         "missing_tracked_nm_id": [],
         "mart_total_report_rows": None,
@@ -206,6 +221,32 @@ def run_daily_dashboard_refresh(
         except Exception as exc:
             summary["api_statuses"]["wb_seller_price"] = "failed_optional"
             summary["wb_seller_price_error"] = str(exc)
+        summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
+
+        current_step = "wb_finance_realization"
+        finance_date_from = max(
+            date_from,
+            resolved_run_date - timedelta(days=WB_FINANCE_REFRESH_LOOKBACK_DAYS - 1),
+        )
+        finance_summary = load_wb_finance_realization_to_db(
+            finance_date_from,
+            resolved_run_date,
+            write_db=True,
+        )
+        summary["wb_finance_realization_summary"] = finance_summary
+        summary["wb_finance_date_from"] = finance_summary.get("date_from", finance_date_from.isoformat())
+        summary["wb_finance_date_to"] = finance_summary.get("date_to", resolved_run_date.isoformat())
+        summary["wb_finance_rows_fetched"] = finance_summary.get("rows_raw")
+        summary["wb_finance_rows_inserted"] = finance_summary.get("rows_inserted")
+        summary["wb_finance_rows_updated"] = finance_summary.get("rows_updated")
+        summary["wb_finance_rows_unchanged"] = finance_summary.get("rows_unchanged")
+        summary["wb_finance_row_errors_count"] = finance_summary.get("row_errors_count")
+        summary["api_statuses"]["wb_finance_realization"] = finance_summary.get("status") or "FAILED"
+        if finance_summary.get("status") != "200":
+            raise RuntimeError(
+                finance_summary.get("error")
+                or f"wb finance realization API status {finance_summary.get('status')}"
+            )
         summary["artifacts"] = persist_run_summary(output_dir, resolved_run_date, summary)
 
         current_step = "warehouse_snapshot"

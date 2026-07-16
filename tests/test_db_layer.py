@@ -24,6 +24,7 @@ from src.db.models import (
     FactAdCostEvent,
     FactCardComparisonMetric,
     FactEntryPointDay,
+    FactFinanceRealizationLine,
     FactFunnelDay,
     FactIvanAdsWideDay,
     FactLocalizationRegionDay,
@@ -78,6 +79,7 @@ def test_db_metadata_contains_expected_tables():
         "fact_stock_snapshot",
         "fact_localization_region_day",
         "fact_entry_point_day",
+        "fact_finance_realization_line",
         "fact_vbro_manual",
         "fact_ivan_ads_wide_day",
         "fact_card_comparison_metric",
@@ -102,6 +104,7 @@ def test_natural_unique_constraints_exist():
     assert ("snapshot_date", "nm_id") in _unique_constraint_columns(FactStockSnapshot)
     assert ("period_start", "period_end", "nm_id", "region") in _unique_constraint_columns(FactLocalizationRegionDay)
     assert ("date", "nm_id", "campaign_ref") in _unique_constraint_columns(FactIvanAdsWideDay)
+    assert ("rrd_id",) in _unique_constraint_columns(FactFinanceRealizationLine)
     assert ("report_date", "nm_id") in _unique_constraint_columns(MartTotalReport)
     assert ("nm_id", "chrt_id", "barcode") in _unique_constraint_columns(DimProductSize)
 
@@ -121,6 +124,7 @@ def test_metadata_includes_requested_dimension_and_fact_models():
         FactAdCampaignDay,
         FactAdCampaignNmDay,
         FactEntryPointDay,
+        FactFinanceRealizationLine,
         FactCardComparisonMetric,
         FactIvanAdsWideDay,
         FactWbSearchQueryTextDay,

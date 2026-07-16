@@ -63,6 +63,19 @@ def mock_search_query_loader(monkeypatch):
             "rows_inserted": 59,
         },
     )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_wb_finance_realization_to_db",
+        lambda date_from, date_to, **kwargs: {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "status": "200",
+            "rows_raw": 12,
+            "rows_inserted": 12,
+            "rows_updated": 0,
+            "rows_unchanged": 0,
+            "row_errors_count": 0,
+        },
+    )
 
 
 def test_run_daily_dashboard_refresh_search_queries_success_and_failure(monkeypatch, tmp_path: Path) -> None:
@@ -122,6 +135,7 @@ def test_run_daily_dashboard_refresh_search_queries_success_and_failure(monkeypa
     assert summary["failed_steps"] == []
     assert summary["search_queries_rows_loaded"] == 15
     assert summary["api_statuses"]["search_queries"] == "200"
+    assert summary["api_statuses"]["wb_finance_realization"] == "200"
     assert captured_args == {
         "target_day": run_date,
         "products": [{"nm_id": 100, "query_group": "test"}],
@@ -237,9 +251,10 @@ def test_run_daily_dashboard_refresh_writes_summary_files(monkeypatch, tmp_path:
     assert saved_summary["success"] is True
     assert saved_summary["api_statuses"] == {
         "wb_site_price_monitor": "success",
+        "wb_seller_price": "success",
+        "wb_finance_realization": "200",
         "warehouse_snapshot": "200",
         "search_queries": "200",
-        "wb_seller_price": "success",
     }
     assert "warehouse_snapshot" in md_path.read_text(encoding="utf-8")
 
@@ -569,6 +584,7 @@ def test_run_daily_dashboard_refresh_default_uses_yesterday_for_core_mart_and_ex
     monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", False, raising=False)
 
     captured: dict[str, object] = {}
+    finance_calls: list[tuple[date, date, bool]] = []
 
     monkeypatch.setattr(
         "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
@@ -590,6 +606,19 @@ def test_run_daily_dashboard_refresh_default_uses_yesterday_for_core_mart_and_ex
     monkeypatch.setattr(
         "scripts.run_daily_dashboard_refresh.run_missing_core_dates_load",
         fake_run_missing_core_dates_load,
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_wb_finance_realization_to_db",
+        lambda date_from, date_to, **kwargs: finance_calls.append((date_from, date_to, kwargs["write_db"])) or {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "status": "200",
+            "rows_raw": 5,
+            "rows_inserted": 5,
+            "rows_updated": 0,
+            "rows_unchanged": 0,
+            "row_errors_count": 0,
+        },
     )
     monkeypatch.setattr(
         "scripts.run_daily_dashboard_refresh.build_mart_total_report",
@@ -619,6 +648,7 @@ def test_run_daily_dashboard_refresh_default_uses_yesterday_for_core_mart_and_ex
     )
 
     assert summary["snapshot_date"] == "2026-06-20"
+    assert finance_calls == [(target_date, target_date, True)]
     assert captured["core_refresh"] == {
         "date_from": target_date,
         "date_to": target_date,
@@ -634,6 +664,7 @@ def test_run_daily_dashboard_refresh_default_uses_yesterday_for_core_mart_and_ex
 def test_run_daily_dashboard_refresh_limits_core_refresh_to_target_date(monkeypatch, tmp_path: Path) -> None:
     run_date = date(2026, 6, 21)
     captured: dict[str, object] = {}
+    finance_calls: list[tuple[date, date, bool]] = []
     monkeypatch.setattr(daily_refresh_script.settings, "wb_site_price_monitor_enabled", False, raising=False)
     monkeypatch.setattr(
         "scripts.run_daily_dashboard_refresh.load_stock_warehouse_snapshot",
@@ -655,6 +686,19 @@ def test_run_daily_dashboard_refresh_limits_core_refresh_to_target_date(monkeypa
     monkeypatch.setattr(
         "scripts.run_daily_dashboard_refresh.run_missing_core_dates_load",
         fake_run_missing_core_dates_load,
+    )
+    monkeypatch.setattr(
+        "scripts.run_daily_dashboard_refresh.load_wb_finance_realization_to_db",
+        lambda date_from, date_to, **kwargs: finance_calls.append((date_from, date_to, kwargs["write_db"])) or {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "status": "200",
+            "rows_raw": 7,
+            "rows_inserted": 7,
+            "rows_updated": 0,
+            "rows_unchanged": 0,
+            "row_errors_count": 0,
+        },
     )
     monkeypatch.setattr(
         "scripts.run_daily_dashboard_refresh.build_mart_total_report",
@@ -691,6 +735,7 @@ def test_run_daily_dashboard_refresh_limits_core_refresh_to_target_date(monkeypa
         "fullstats_sleep_seconds": 20,
         "use_tracked_products": True,
     }
+    assert finance_calls == [(run_date - date.resolution, run_date, True)]
 
 
 def test_execute_daily_refresh_once_uses_yesterday_as_default_run_date(monkeypatch) -> None:
