@@ -212,32 +212,66 @@ def load_ad_campaign_efficiency_scope_from_db(
         )
 
         dim_campaign_rows = (
-            session.execute(select(DimCampaign).where(DimCampaign.advert_id.in_(advert_ids))).scalars().all()
+            [
+                dict(row)
+                for row in session.execute(
+                    select(
+                        DimCampaign.advert_id,
+                        DimCampaign.campaign_name,
+                        DimCampaign.campaign_type,
+                        DimCampaign.status,
+                    ).where(DimCampaign.advert_id.in_(advert_ids))
+                )
+                .mappings()
+                .all()
+            ]
             if advert_ids
             else []
         )
         advert_metadata_rows = (
-            session.execute(select(FactAdvertMetadata).where(FactAdvertMetadata.advert_id.in_(advert_ids))).scalars().all()
+            [
+                dict(row)
+                for row in session.execute(
+                    select(
+                        FactAdvertMetadata.advert_id,
+                        FactAdvertMetadata.campaign_name,
+                        FactAdvertMetadata.status,
+                    ).where(FactAdvertMetadata.advert_id.in_(advert_ids))
+                )
+                .mappings()
+                .all()
+            ]
             if advert_ids
             else []
         )
         product_rows = (
-            session.execute(select(DimProduct).where(DimProduct.nm_id.in_(nm_ids))).scalars().all()
+            [
+                dict(row)
+                for row in session.execute(
+                    select(
+                        DimProduct.nm_id,
+                        DimProduct.supplier_article,
+                        DimProduct.title,
+                    ).where(DimProduct.nm_id.in_(nm_ids))
+                )
+                .mappings()
+                .all()
+            ]
             if nm_ids
             else []
         )
 
     meta_by_advert: dict[int, dict[str, object]] = {}
     for row in dim_campaign_rows:
-        advert_id = int(row.advert_id)
+        advert_id = int(row["advert_id"])
         meta_by_advert[advert_id] = {
             "advert_id": advert_id,
-            "campaign_name": row.campaign_name,
-            "campaign_type": row.campaign_type,
-            "campaign_status": row.status,
+            "campaign_name": row.get("campaign_name"),
+            "campaign_type": row.get("campaign_type"),
+            "campaign_status": row.get("status"),
         }
     for row in advert_metadata_rows:
-        advert_id = int(row.advert_id)
+        advert_id = int(row["advert_id"])
         current = meta_by_advert.setdefault(
             advert_id,
             {
@@ -247,22 +281,22 @@ def load_ad_campaign_efficiency_scope_from_db(
                 "campaign_status": None,
             },
         )
-        current["campaign_name"] = _coalesce_text(current.get("campaign_name"), row.campaign_name)
-        current["campaign_status"] = _coalesce_text(current.get("campaign_status"), row.status)
+        current["campaign_name"] = _coalesce_text(current.get("campaign_name"), row.get("campaign_name"))
+        current["campaign_status"] = _coalesce_text(current.get("campaign_status"), row.get("status"))
 
     product_lookup_rows = [
         {
-            "nm_id": int(row.nm_id),
-            "supplier_article": row.supplier_article,
-            "title": row.title,
+            "nm_id": int(row["nm_id"]),
+            "supplier_article": row.get("supplier_article"),
+            "title": row.get("title"),
         }
         for row in product_rows
-        if row.nm_id not in (None, "")
+        if row.get("nm_id") not in (None, "")
     ]
 
     campaign_df = pd.DataFrame.from_records(campaign_rows, columns=campaign_columns)
     article_df = pd.DataFrame.from_records(article_rows, columns=article_columns)
-    campaign_meta_df = pd.DataFrame.from_records(meta_by_advert.values(), columns=campaign_meta_columns)
+    campaign_meta_df = pd.DataFrame.from_records(list(meta_by_advert.values()), columns=campaign_meta_columns)
     product_df = pd.DataFrame.from_records(product_lookup_rows, columns=product_columns)
     return campaign_df, article_df, campaign_meta_df, product_df
 
