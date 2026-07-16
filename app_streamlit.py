@@ -11003,7 +11003,7 @@ def render_ad_campaign_efficiency_tab() -> None:
     metric_cols[2].metric("Алерты по корзинам", f"{summary['campaign_cart_alerts']:,}".replace(",", " "))
     metric_cols[3].metric("Алерты по артикулам", f"{summary['article_alerts']:,}".replace(",", " "))
     metric_cols[4].metric("Падение в ноль / новая активность", f"{summary['drop_to_zero'] + summary['new_activity']:,}".replace(",", " "))
-    st.caption(str(resolved_window["comparison_label"]))
+    st.caption(ad_campaign_efficiency.build_ad_campaign_efficiency_comparison_caption(report_date_value, period_mode))
 
     show_campaigns = level_filter in {
         ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_ALL,
@@ -11026,10 +11026,43 @@ def render_ad_campaign_efficiency_tab() -> None:
         if filtered_campaign_rows.empty:
             st.info("По текущим фильтрам кампании не найдены.")
         else:
+            campaign_display_df = ad_campaign_efficiency.build_ad_campaign_efficiency_display_dataframe(
+                filtered_campaign_rows,
+                level=ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_CAMPAIGNS,
+            )
+            campaign_download_cols = st.columns(2)
+            campaign_download_cols[0].download_button(
+                "Скачать CSV",
+                data=campaign_display_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name=ad_campaign_efficiency.build_ad_campaign_efficiency_export_filename(
+                    "campaigns",
+                    report_date_value,
+                    period_mode,
+                    "csv",
+                ),
+                mime="text/csv",
+                key="ad_campaign_efficiency_campaigns_csv_download",
+            )
+            campaign_download_cols[1].download_button(
+                "Скачать XLSX",
+                data=build_excel_export_bytes(campaign_display_df),
+                file_name=ad_campaign_efficiency.build_ad_campaign_efficiency_export_filename(
+                    "campaigns",
+                    report_date_value,
+                    period_mode,
+                    "xlsx",
+                ),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="ad_campaign_efficiency_campaigns_xlsx_download",
+            )
             safe_st_dataframe(
-                filtered_campaign_rows.drop(columns=["search_blob", "sort_priority", "sort_secondary"], errors="ignore"),
+                ad_campaign_efficiency.style_ad_campaign_efficiency_display_table(
+                    campaign_display_df,
+                    filtered_campaign_rows,
+                ),
                 width="stretch",
                 hide_index=True,
+                force_object_strings=True,
             )
 
     if show_articles:
@@ -11044,10 +11077,43 @@ def render_ad_campaign_efficiency_tab() -> None:
         if filtered_article_rows.empty:
             st.info("По текущим фильтрам артикулами отклонения не найдены.")
         else:
+            article_display_df = ad_campaign_efficiency.build_ad_campaign_efficiency_display_dataframe(
+                filtered_article_rows,
+                level=ad_campaign_efficiency.AD_CAMPAIGN_LEVEL_ARTICLES,
+            )
+            article_download_cols = st.columns(2)
+            article_download_cols[0].download_button(
+                "Скачать CSV",
+                data=article_display_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name=ad_campaign_efficiency.build_ad_campaign_efficiency_export_filename(
+                    "articles",
+                    report_date_value,
+                    period_mode,
+                    "csv",
+                ),
+                mime="text/csv",
+                key="ad_campaign_efficiency_articles_csv_download",
+            )
+            article_download_cols[1].download_button(
+                "Скачать XLSX",
+                data=build_excel_export_bytes(article_display_df),
+                file_name=ad_campaign_efficiency.build_ad_campaign_efficiency_export_filename(
+                    "articles",
+                    report_date_value,
+                    period_mode,
+                    "xlsx",
+                ),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="ad_campaign_efficiency_articles_xlsx_download",
+            )
             safe_st_dataframe(
-                filtered_article_rows.drop(columns=["search_blob", "sort_priority", "sort_secondary"], errors="ignore"),
+                ad_campaign_efficiency.style_ad_campaign_efficiency_display_table(
+                    article_display_df,
+                    filtered_article_rows,
+                ),
                 width="stretch",
                 hide_index=True,
+                force_object_strings=True,
             )
 
 

@@ -5,18 +5,23 @@ import pandas as pd
 import src.ad_campaign_efficiency as ad_campaign_efficiency_module
 
 from src.ad_campaign_efficiency import (
+    AD_CAMPAIGN_LEVEL_ARTICLES,
+    AD_CAMPAIGN_LEVEL_CAMPAIGNS,
     AD_CAMPAIGN_PERIOD_DAILY,
     AD_CAMPAIGN_PERIOD_WEEKLY,
+    AD_CAMPAIGN_SIGNAL_DROP_TO_ZERO,
     AD_CAMPAIGN_SIGNAL_GROWTH,
     AD_CAMPAIGN_SIGNAL_INSUFFICIENT,
     AD_CAMPAIGN_SIGNAL_NEW_ACTIVITY,
     AD_CAMPAIGN_SIGNAL_NO_CHANGE,
     AD_CAMPAIGN_SIGNAL_STOPPED_NEUTRAL,
+    build_ad_campaign_efficiency_display_dataframe,
     build_ad_campaign_efficiency_tables,
     calculate_ad_campaign_efficiency_signal,
     filter_ad_campaign_efficiency_rows,
     load_ad_campaign_efficiency_scope_from_db,
     resolve_ad_campaign_efficiency_window,
+    style_ad_campaign_efficiency_display_table,
 )
 
 
@@ -295,3 +300,184 @@ def test_load_ad_campaign_efficiency_scope_from_db_materializes_rows_inside_sess
             "title": "Product A",
         }
     ]
+
+
+
+def test_build_ad_campaign_efficiency_display_dataframe_campaigns_hides_technical_columns_and_formats_values() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "campaign_status": "active",
+                "advert_id": 501,
+                "campaign_name": "Campaign A",
+                "campaign_type": "—",
+                "metric_name": "Показы",
+                "current_value": 1250.0,
+                "previous_value": 1000.0,
+                "change_absolute": 250.0,
+                "change_percent": 25.0,
+                "signal_label": "Рост",
+                "signal_code": AD_CAMPAIGN_SIGNAL_GROWTH,
+                "direction_code": "growth",
+                "comparison_period": "15.07.2026 против 14.07.2026",
+                "is_notable": True,
+                "is_stopped": False,
+                "search_blob": "campaign a",
+                "sort_priority": 1,
+                "sort_secondary": -25.0,
+            },
+            {
+                "campaign_status": "9",
+                "advert_id": 502,
+                "campaign_name": "Campaign B",
+                "campaign_type": "—",
+                "metric_name": "Корзины",
+                "current_value": 0.0,
+                "previous_value": None,
+                "change_absolute": None,
+                "change_percent": None,
+                "signal_label": "Недостаточно данных",
+                "signal_code": AD_CAMPAIGN_SIGNAL_INSUFFICIENT,
+                "direction_code": "neutral",
+                "comparison_period": "15.07.2026 против 14.07.2026",
+                "is_notable": False,
+                "is_stopped": False,
+                "search_blob": "campaign b",
+                "sort_priority": 2,
+                "sort_secondary": 0.0,
+            },
+        ]
+    )
+
+    display_df = build_ad_campaign_efficiency_display_dataframe(
+        source_df,
+        level=AD_CAMPAIGN_LEVEL_CAMPAIGNS,
+    )
+
+    assert list(display_df.columns) == [
+        "ID рекламной кампании",
+        "Название рекламной кампании",
+        "Статус РК",
+        "Показатель",
+        "Текущее значение",
+        "Предыдущее значение",
+        "Изменение",
+        "Изменение, %",
+    ]
+    assert display_df.iloc[0].to_dict() == {
+        "ID рекламной кампании": "501",
+        "Название рекламной кампании": "Campaign A",
+        "Статус РК": "Активна",
+        "Показатель": "Показы",
+        "Текущее значение": "1 250",
+        "Предыдущее значение": "1 000",
+        "Изменение": "+250",
+        "Изменение, %": "+25,0%",
+    }
+    assert display_df.iloc[1]["Статус РК"] == "—"
+    assert display_df.iloc[1]["Текущее значение"] == "0"
+    assert display_df.iloc[1]["Предыдущее значение"] == "—"
+    assert display_df.iloc[1]["Изменение"] == "—"
+    assert display_df.iloc[1]["Изменение, %"] == "—"
+    assert "Тип рекламной кампании" not in display_df.columns
+    assert not any(column in display_df.columns for column in {"signal_code", "direction_code", "signal_label", "comparison_period"})
+    assert "15.07.2026 против 14.07.2026" not in " ".join(display_df.astype(str).iloc[0].tolist())
+
+
+
+def test_build_ad_campaign_efficiency_display_dataframe_articles_hides_empty_supplier_article() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "supplier_article": "—",
+                "nm_id": 101,
+                "title": "Product A",
+                "campaign_ids": "501, 502",
+                "campaign_names": "Campaign A, Campaign B",
+                "metric_name": "Показы",
+                "current_value": 0.0,
+                "previous_value": 340.0,
+                "change_absolute": -340.0,
+                "change_percent": -100.0,
+                "signal_label": "Падение до нуля",
+                "signal_code": AD_CAMPAIGN_SIGNAL_DROP_TO_ZERO,
+                "direction_code": "decline",
+                "comparison_period": "09.07.2026–15.07.2026 против 02.07.2026–08.07.2026",
+                "is_notable": True,
+                "search_blob": "product a",
+                "sort_priority": 0,
+                "sort_secondary": -1000.0,
+            }
+        ]
+    )
+
+    display_df = build_ad_campaign_efficiency_display_dataframe(
+        source_df,
+        level=AD_CAMPAIGN_LEVEL_ARTICLES,
+    )
+
+    assert list(display_df.columns) == [
+        "Артикул WB",
+        "Название товара",
+        "ID рекламных кампаний",
+        "Рекламные кампании",
+        "Показатель",
+        "Текущее значение",
+        "Предыдущее значение",
+        "Изменение",
+        "Изменение, %",
+    ]
+    assert display_df.iloc[0].to_dict() == {
+        "Артикул WB": "101",
+        "Название товара": "Product A",
+        "ID рекламных кампаний": "501, 502",
+        "Рекламные кампании": "Campaign A, Campaign B",
+        "Показатель": "Показы",
+        "Текущее значение": "0",
+        "Предыдущее значение": "340",
+        "Изменение": "−340",
+        "Изменение, %": "−100,0%",
+    }
+    assert "Артикул продавца" not in display_df.columns
+    assert "09.07.2026–15.07.2026" not in " ".join(display_df.astype(str).iloc[0].tolist())
+
+
+
+def test_style_ad_campaign_efficiency_display_table_keeps_sign_based_highlight_without_extra_columns() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "campaign_status": "active",
+                "advert_id": 501,
+                "campaign_name": "Campaign A",
+                "campaign_type": "auction",
+                "metric_name": "Показы",
+                "current_value": 0.0,
+                "previous_value": 340.0,
+                "change_absolute": -340.0,
+                "change_percent": -100.0,
+                "signal_label": "Падение до нуля",
+                "signal_code": AD_CAMPAIGN_SIGNAL_DROP_TO_ZERO,
+                "direction_code": "decline",
+                "comparison_period": "15.07.2026 против 14.07.2026",
+                "is_notable": True,
+                "is_stopped": False,
+                "search_blob": "campaign a",
+                "sort_priority": 0,
+                "sort_secondary": -1000.0,
+            }
+        ]
+    )
+
+    display_df = build_ad_campaign_efficiency_display_dataframe(
+        source_df,
+        level=AD_CAMPAIGN_LEVEL_CAMPAIGNS,
+    )
+    styler = style_ad_campaign_efficiency_display_table(display_df, source_df)
+    html = styler.to_html()
+
+    assert "direction_code" not in display_df.columns
+    assert "signal_label" not in display_df.columns
+    assert "background-color: #dc2626" in html
+    assert "Изменение" in html
+    assert "Изменение, %" in html

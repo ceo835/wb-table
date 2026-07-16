@@ -39,6 +39,41 @@ AD_CAMPAIGN_NOTABLE_SIGNALS = {
 }
 AD_CAMPAIGN_CAMPAIGN_ROW_TYPES = {"Итог кампании", "CAMPAIGN_TOTAL", "TOTAL", "TOTAL_CAMPAIGN"}
 AD_CAMPAIGN_PRODUCT_ROW_TYPES = {"PRODUCT", "Товар"}
+AD_CAMPAIGN_EFFICIENCY_CAMPAIGN_DISPLAY_COLUMNS = [
+    ("advert_id", "ID рекламной кампании"),
+    ("campaign_name", "Название рекламной кампании"),
+    ("campaign_status", "Статус РК"),
+    ("campaign_type", "Тип рекламной кампании"),
+    ("metric_name", "Показатель"),
+    ("current_value", "Текущее значение"),
+    ("previous_value", "Предыдущее значение"),
+    ("change_absolute", "Изменение"),
+    ("change_percent", "Изменение, %"),
+]
+AD_CAMPAIGN_EFFICIENCY_ARTICLE_DISPLAY_COLUMNS = [
+    ("nm_id", "Артикул WB"),
+    ("supplier_article", "Артикул продавца"),
+    ("title", "Название товара"),
+    ("campaign_ids", "ID рекламных кампаний"),
+    ("campaign_names", "Рекламные кампании"),
+    ("metric_name", "Показатель"),
+    ("current_value", "Текущее значение"),
+    ("previous_value", "Предыдущее значение"),
+    ("change_absolute", "Изменение"),
+    ("change_percent", "Изменение, %"),
+]
+AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE = "—"
+AD_CAMPAIGN_EFFICIENCY_TECHNICAL_COLUMNS = {
+    "signal_label",
+    "signal_code",
+    "direction_code",
+    "is_notable",
+    "is_stopped",
+    "comparison_period",
+    "search_blob",
+    "sort_priority",
+    "sort_secondary",
+}
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
@@ -790,5 +825,185 @@ def build_ad_campaign_efficiency_summary(campaign_rows: pd.DataFrame, article_ro
         "drop_to_zero": drop_to_zero,
         "new_activity": new_activity,
     }
+
+
+
+def _looks_numeric_status_token(value: str) -> bool:
+    candidate = value.strip().replace(",", ".")
+    if not candidate:
+        return False
+    if candidate[0] in "+-":
+        candidate = candidate[1:]
+    if candidate.count(".") > 1:
+        return False
+    return candidate.replace(".", "", 1).isdigit()
+
+
+
+def _normalize_campaign_status_display(value: object) -> str | None:
+    normalized = _normalize_text_value(value)
+    if normalized is None:
+        return None
+    lowered = normalized.casefold()
+    if any(token in lowered for token in ("active", "актив")):
+        return "Активна"
+    if any(token in lowered for token in ("pause", "paused", "suspend", "приостанов", "пауза")):
+        return "Приостановлена"
+    if any(token in lowered for token in ("stop", "stopped", "complete", "completed", "finish", "finished", "archive", "архив", "заверш", "останов")):
+        return "Завершена"
+    if _looks_numeric_status_token(normalized):
+        return None
+    return "Неизвестный статус"
+
+
+
+def _has_meaningful_display_values(series: pd.Series) -> bool:
+    normalized = series.fillna("").astype(str).str.strip()
+    return bool((normalized != "").any() and (normalized != AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE).any())
+
+
+
+def _format_efficiency_integer(value: object) -> str:
+    numeric = _as_float_or_none(value)
+    if numeric is None:
+        return AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE
+    rounded = int(round(numeric))
+    if rounded == 0:
+        return "0"
+    return f"{rounded:,}".replace(",", " ")
+
+
+
+def _format_efficiency_signed_integer(value: object) -> str:
+    numeric = _as_float_or_none(value)
+    if numeric is None:
+        return AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE
+    rounded = int(round(numeric))
+    if rounded == 0:
+        return "0"
+    sign = "+" if rounded > 0 else "−"
+    return f"{sign}{abs(rounded):,}".replace(",", " ")
+
+
+
+def _format_efficiency_percent(value: object) -> str:
+    numeric = _as_float_or_none(value)
+    if numeric is None:
+        return AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE
+    if abs(numeric) < 1e-9:
+        return "0,0%"
+    sign = "+" if numeric > 0 else "−"
+    return f"{sign}{abs(numeric):.1f}%".replace(".", ",")
+
+
+
+def build_ad_campaign_efficiency_comparison_caption(report_date_value: date, period_mode: str) -> str:
+    if period_mode == AD_CAMPAIGN_PERIOD_WEEKLY:
+        return "Сравнение: последние 7 полных дней с предыдущими 7 днями"
+    return f"Сравнение: {report_date_value.strftime('%d.%m.%Y')} с предыдущим полным днём"
+
+
+
+def build_ad_campaign_efficiency_export_filename(section_slug: str, report_date_value: date, period_mode: str, extension: str) -> str:
+    period_slug = "weekly" if period_mode == AD_CAMPAIGN_PERIOD_WEEKLY else "daily"
+    return f"ad_campaign_efficiency_{section_slug}_{period_slug}_{report_date_value.isoformat()}.{extension}"
+
+
+
+def build_ad_campaign_efficiency_display_dataframe(
+    df: pd.DataFrame,
+    *,
+    level: str,
+) -> pd.DataFrame:
+    if level == AD_CAMPAIGN_LEVEL_ARTICLES:
+        column_pairs = AD_CAMPAIGN_EFFICIENCY_ARTICLE_DISPLAY_COLUMNS
+    else:
+        column_pairs = AD_CAMPAIGN_EFFICIENCY_CAMPAIGN_DISPLAY_COLUMNS
+
+    if df.empty:
+        return pd.DataFrame(columns=[label for _, label in column_pairs])
+
+    working = df.copy()
+    display_df = pd.DataFrame(index=working.index)
+
+    if level == AD_CAMPAIGN_LEVEL_ARTICLES:
+        supplier_article_series = working.get("supplier_article", pd.Series(index=working.index, dtype=object)).map(_normalize_text_value)
+        working["supplier_article"] = supplier_article_series
+        hide_supplier_article = not _has_meaningful_display_values(
+            supplier_article_series.fillna(AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE)
+        )
+    else:
+        campaign_status_series = working.get("campaign_status", pd.Series(index=working.index, dtype=object)).map(
+            _normalize_campaign_status_display
+        )
+        campaign_type_series = working.get("campaign_type", pd.Series(index=working.index, dtype=object)).map(_normalize_text_value)
+        working["campaign_status"] = campaign_status_series
+        working["campaign_type"] = campaign_type_series
+        hide_status = not _has_meaningful_display_values(campaign_status_series.fillna(AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE))
+        hide_campaign_type = not _has_meaningful_display_values(campaign_type_series.fillna(AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE))
+
+    for source_column, display_label in column_pairs:
+        if source_column in AD_CAMPAIGN_EFFICIENCY_TECHNICAL_COLUMNS:
+            continue
+        if level == AD_CAMPAIGN_LEVEL_ARTICLES and source_column == "supplier_article" and hide_supplier_article:
+            continue
+        if level != AD_CAMPAIGN_LEVEL_ARTICLES and source_column == "campaign_status" and hide_status:
+            continue
+        if level != AD_CAMPAIGN_LEVEL_ARTICLES and source_column == "campaign_type" and hide_campaign_type:
+            continue
+
+        source_series = working.get(source_column, pd.Series(index=working.index, dtype=object))
+        if source_column in {"advert_id", "nm_id", "campaign_ids"}:
+            display_df[display_label] = source_series.fillna(AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE).astype(str)
+        elif source_column in {"campaign_name", "campaign_names", "title", "metric_name", "supplier_article", "campaign_status", "campaign_type"}:
+            display_df[display_label] = source_series.map(_normalize_text_value).fillna(AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE)
+        elif source_column in {"current_value", "previous_value"}:
+            display_df[display_label] = source_series.map(_format_efficiency_integer)
+        elif source_column == "change_absolute":
+            display_df[display_label] = source_series.map(_format_efficiency_signed_integer)
+        elif source_column == "change_percent":
+            display_df[display_label] = source_series.map(_format_efficiency_percent)
+        else:
+            display_df[display_label] = source_series.fillna(AD_CAMPAIGN_EFFICIENCY_DISPLAY_EMPTY_VALUE).astype(str)
+
+    return display_df.reset_index(drop=True)
+
+
+
+def _resolve_efficiency_signal_style(signal_code: object) -> str:
+    if signal_code == AD_CAMPAIGN_SIGNAL_GROWTH:
+        return "background-color: #dcfce7; color: #166534; font-weight: 600;"
+    if signal_code == AD_CAMPAIGN_SIGNAL_DECLINE:
+        return "background-color: #fee2e2; color: #b91c1c; font-weight: 600;"
+    if signal_code == AD_CAMPAIGN_SIGNAL_DROP_TO_ZERO:
+        return "background-color: #dc2626; color: #ffffff; font-weight: 700;"
+    if signal_code == AD_CAMPAIGN_SIGNAL_NEW_ACTIVITY:
+        return "background-color: #dbeafe; color: #1d4ed8; font-weight: 600;"
+    if signal_code == AD_CAMPAIGN_SIGNAL_INSUFFICIENT:
+        return "background-color: #e5e7eb; color: #4b5563;"
+    return ""
+
+
+
+def style_ad_campaign_efficiency_display_table(
+    display_df: pd.DataFrame,
+    source_df: pd.DataFrame,
+) -> pd.io.formats.style.Styler:
+    styler = display_df.style
+    if display_df.empty:
+        return styler
+
+    delta_columns = [column for column in ("Изменение", "Изменение, %") if column in display_df.columns]
+    if not delta_columns or "signal_code" not in source_df.columns:
+        return styler
+
+    signal_codes = source_df.reset_index(drop=True).get("signal_code", pd.Series(dtype=object))
+
+    def _style_delta_row(row: pd.Series) -> list[str]:
+        signal_code = signal_codes.iloc[row.name] if row.name < len(signal_codes) else None
+        style = _resolve_efficiency_signal_style(signal_code)
+        return [style] * len(row)
+
+    return styler.apply(_style_delta_row, axis=1, subset=delta_columns)
 
 
