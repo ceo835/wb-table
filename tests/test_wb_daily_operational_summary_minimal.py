@@ -227,6 +227,12 @@ def test_response_contract_keeps_existing_context_fields() -> None:
     assert "entry_point_context" in payload
     assert "price_context" in payload
     assert "logistics_context" in payload
+    assert "database_audit" in payload
+    assert "operating_profit_context" in payload
+    assert "logistics_summary" in payload
+    assert "pricing_spp_context" in payload
+    assert "competitor_context" in payload
+    assert "additional_data_candidates" in payload
     assert payload["data_gaps"] == [{"kind": "finance_semantics", "status": "PARTIAL"}]
 
 
@@ -326,6 +332,12 @@ def test_build_operational_summary_diagnostic_includes_stage_timings_and_keeps_q
         }
 
     monkeypatch.setattr(summary_module, "build_extended_context", _fake_build_extended_context)
+    monkeypatch.setattr(summary_module, "fetch_database_audit_block", lambda session, *, query_counter: (_inc(query_counter, "database_audit_vvbromo"), {"status": "OK", "inventory": []})[1])
+    monkeypatch.setattr(summary_module, "fetch_operating_profit_block", lambda session, **kwargs: (_inc(kwargs["query_counter"], "operating_profit_daily"), {"status": "OK", "overall": {}})[1])
+    monkeypatch.setattr(summary_module, "fetch_logistics_summary_block", lambda session, **kwargs: (_inc(kwargs["query_counter"], "logistics_summary_daily"), {"status": "PARTIAL", "overall": {}})[1])
+    monkeypatch.setattr(summary_module, "fetch_pricing_spp_block", lambda session, **kwargs: (_inc(kwargs["query_counter"], "pricing_spp_rows"), {"status": "OK", "top_price_changes": []})[1])
+    monkeypatch.setattr(summary_module, "fetch_competitor_block", lambda session, **kwargs: (_inc(kwargs["query_counter"], "competitor_snapshot_meta"), {"status": "PARTIAL", "items": []})[1])
+    monkeypatch.setattr(summary_module, "build_additional_data_candidates", lambda **kwargs: [{"candidate_key": "wb_site_price_alerts"}])
 
     response = build_operational_summary(
         _NoopSession(),
@@ -333,7 +345,7 @@ def test_build_operational_summary_diagnostic_includes_stage_timings_and_keeps_q
     )
 
     stage_names = {item.get("stage") for item in response.diagnostics.query_timings if item.get("stage")}
-    assert response.diagnostics.query_count == 17
+    assert response.diagnostics.query_count == 22
     assert {
         "core_source_freshness",
         "mart_daily_overview",
@@ -342,6 +354,11 @@ def test_build_operational_summary_diagnostic_includes_stage_timings_and_keeps_q
         "problem_campaigns",
         "stock_risks",
         "search_movers",
+        "database_audit",
+        "operating_profit_context",
+        "logistics_summary",
+        "pricing_spp_context",
+        "competitor_context",
         "article_context",
         "warehouse_context",
         "campaign_context",

@@ -551,6 +551,42 @@ def _build_transport_summary_response(*, diagnostic: bool) -> WbDailyOperational
                 "data_quality": {"entry_partial": False},
             }
         ],
+        "database_audit": {
+            "status": "OK",
+            "inventory": [{
+                "metric_key": "operating_profit",
+                "table": "fact_vvbromo_product_day",
+                "field": "operating_profit",
+                "quality_status": "OK",
+            }],
+        },
+        "operating_profit_context": {
+            "status": "OK",
+            "overall": {"operating_profit": Decimal("3210"), "delta_day": Decimal("210")},
+            "by_article": [{"nm_id": 1, "operating_profit": Decimal("3210")}],
+        },
+        "logistics_summary": {
+            "status": "PARTIAL",
+            "overall": {"total_logistics_cost": Decimal("780"), "logistics_per_unit": Decimal("39")},
+            "top_growth_articles": [{"nm_id": 1, "total_logistics_delta_day": Decimal("80")}],
+        },
+        "pricing_spp_context": {
+            "status": "OK",
+            "items_with_price": 1,
+            "items_with_spp": 1,
+            "top_price_changes": [{"nm_id": 1, "buyer_visible_price": Decimal("999"), "price_delta_day": Decimal("50")}],
+            "top_spp_changes": [{"nm_id": 1, "spp_pct": Decimal("12.5"), "spp_delta_day": Decimal("1.5")}],
+        },
+        "competitor_context": {
+            "status": "PARTIAL",
+            "comparison_mode": "LATEST_AVAILABLE_SNAPSHOT",
+            "snapshot_date": date(2026, 6, 18),
+            "items": [{"nm_id": 1, "our_buyer_visible_price": Decimal("999"), "min_competitor_price": Decimal("950")}],
+        },
+        "additional_data_candidates": [
+            {"candidate_key": "wb_site_price_alerts", "management_value": "high"},
+            {"candidate_key": "localization_region_day", "management_value": "medium"},
+        ],
         "business_priorities": [signal],
         "ranked_signals": [signal],
         "data_anomalies": [anomaly],
@@ -1222,6 +1258,12 @@ def test_wb_daily_operational_summary_normal_payload_preserves_numeric_and_rich_
     assert structured["sections"][0]["metrics"][0]["value"] == original["sections"][0]["metrics"][0]["value"]
     assert structured["sections"][0]["metrics"][0]["delta_pct"] == original["sections"][0]["metrics"][0]["delta_pct"]
     assert structured["article_analysis"] == original["article_analysis"]
+    assert structured["database_audit"] == original["database_audit"]
+    assert structured["operating_profit_context"] == original["operating_profit_context"]
+    assert structured["logistics_summary"] == original["logistics_summary"]
+    assert structured["pricing_spp_context"] == original["pricing_spp_context"]
+    assert structured["competitor_context"] == original["competitor_context"]
+    assert structured["additional_data_candidates"] == original["additional_data_candidates"]
     assert structured["business_priorities"][0]["impact_rub"] == original["business_priorities"][0]["impact_rub"]
     assert structured["business_priorities"][0]["supported_factors"] == original["business_priorities"][0]["supported_factors"]
     assert structured["business_priorities"][0]["evidence"] == original["business_priorities"][0]["evidence"]

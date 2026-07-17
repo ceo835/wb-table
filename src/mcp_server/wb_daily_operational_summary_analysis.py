@@ -1005,7 +1005,7 @@ def build_highlights_from_analysis(analysis_payload: dict[str, Any], *, top_n: i
     )
 
 
-def build_internal_analysis(*, report_date: date, daily_rows: Sequence[dict[str, Any]], article_context: Sequence[dict[str, Any]], warehouse_context: Sequence[dict[str, Any]], campaign_context: Sequence[dict[str, Any]], search_query_context: Sequence[dict[str, Any]], entry_point_context: Sequence[dict[str, Any]], price_context: Sequence[dict[str, Any]], logistics_context: Sequence[dict[str, Any]], data_gaps: Sequence[dict[str, Any]], rules: WbDailyOperationalSummaryRules, top_n: int) -> dict[str, Any]:
+def build_internal_analysis(*, report_date: date, daily_rows: Sequence[dict[str, Any]], article_context: Sequence[dict[str, Any]], warehouse_context: Sequence[dict[str, Any]], campaign_context: Sequence[dict[str, Any]], search_query_context: Sequence[dict[str, Any]], entry_point_context: Sequence[dict[str, Any]], price_context: Sequence[dict[str, Any]], logistics_context: Sequence[dict[str, Any]], database_audit: dict[str, Any] | None = None, operating_profit_context: dict[str, Any] | None = None, logistics_summary: dict[str, Any] | None = None, pricing_spp_context: dict[str, Any] | None = None, competitor_context: dict[str, Any] | None = None, additional_data_candidates: Sequence[dict[str, Any]] | None = None, data_gaps: Sequence[dict[str, Any]] = (), rules: WbDailyOperationalSummaryRules, top_n: int = 5) -> dict[str, Any]:
     article_analysis, analysis_gaps = build_article_analysis(
         report_date=report_date,
         article_context=article_context,
