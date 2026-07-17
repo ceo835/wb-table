@@ -18,7 +18,9 @@ from app_streamlit import (
     IVAN_MANUAL_AD_SOURCE_LABEL,
     TECHNICAL_EXTRA_COLUMNS_BY_DATE,
     CHART_LEVEL_ARTICLE,
+    CHART_LEVEL_BAND,
     CHART_LEVEL_CABINET,
+    CHART_ALL_BANDS_LABEL,
     apply_display_min_date_filter,
     apply_tracked_scope_filters,
     aggregate_ivan_manual_ads_for_charts,
@@ -37,6 +39,7 @@ from app_streamlit import (
     build_chart_metrics_by_date,
     build_chart_kpi_card_html,
     build_chart_period_summary,
+    format_ad_kpi_period_caption,
     build_ad_cart_cost_chart_series_map,
     build_ad_carts_chart_series_map,
     apply_product_bands,
@@ -3186,28 +3189,187 @@ def test_build_chart_metrics_by_date_marks_partial_ad_attribution_when_spend_cov
     source_df = pd.DataFrame(
         [
             {
-                "report_date": "2026-06-08",
-                "cart_count": 100,
-                "ad_atbs_total": 20,
-                "order_count": 40,
-                "ad_orders_total": 10,
-                "ad_campaign_spend_total": 1000,
-                "ad_cost_writeoff_total": 10000,
+                "report_date": "2026-06-29",
+                "cart_count": 4000,
+                "ad_atbs_total": 2310,
+                "order_count": 1200,
+                "ad_orders_total": 529,
+                "ad_campaign_spend_total": 80608.61,
+                "ad_cost_writeoff_total": 100000.0,
             }
         ]
     )
 
-    result = build_chart_metrics_by_date(source_df, reference_date=datetime(2026, 6, 17).date())
+    result = build_chart_metrics_by_date(source_df, reference_date=datetime(2026, 7, 17).date())
 
     row = result.iloc[0]
 
     assert row["ad_attribution_status"] == "AD_DATA_PARTIAL"
-    assert pd.isna(row["ad_atbs_total_confirmed"])
-    assert pd.isna(row["ad_orders_total_confirmed"])
-    assert pd.isna(row["ad_spend_confirmed"])
-    assert pd.isna(row["ad_cart_cost"])
-    assert pd.isna(row["ad_cpo"])
-    assert float(row["total_cart_cost"]) == 10.0
+    assert float(row["ad_atbs_total_confirmed"]) == 2310.0
+    assert float(row["ad_orders_total_confirmed"]) == 529.0
+    assert float(row["ad_spend_confirmed"]) == pytest.approx(80608.61)
+    assert float(row["ad_cart_cost"]) == pytest.approx(80608.61 / 2310.0, rel=1e-6)
+    assert float(row["ad_cpo"]) == pytest.approx(80608.61 / 529.0, rel=1e-6)
+    assert float(row["total_cart_cost"]) == pytest.approx(80608.61 / 4000.0, rel=1e-6)
+
+
+def test_build_chart_period_summary_includes_partial_days_and_excludes_lagged_days() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-06-05",
+                "cart_count": 10,
+                "ad_atbs_total": 5,
+                "order_count": 4,
+                "ad_orders_total": 2,
+                "ad_campaign_spend_total": 100.0,
+                "ad_cost_writeoff_total": 100.0,
+            },
+            {
+                "report_date": "2026-06-06",
+                "cart_count": 9,
+                "ad_atbs_total": 4,
+                "order_count": 5,
+                "ad_orders_total": 2,
+                "ad_campaign_spend_total": 80.0,
+                "ad_cost_writeoff_total": 100.0,
+            },
+            {
+                "report_date": "2026-06-07",
+                "cart_count": 8,
+                "ad_atbs_total": 3,
+                "order_count": 3,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 50.0,
+                "ad_cost_writeoff_total": 50.0,
+            },
+        ]
+    )
+
+    chart_df = build_chart_metrics_by_date(source_df, reference_date=datetime(2026, 6, 8).date())
+    summary = build_chart_period_summary(chart_df, reference_date=datetime(2026, 6, 8).date())
+
+    status_map = {row.report_date: row.ad_attribution_status for row in chart_df.itertuples()}
+    assert status_map[pd.to_datetime("2026-06-05").date()] == "OK"
+    assert status_map[pd.to_datetime("2026-06-06").date()] == "AD_DATA_PARTIAL"
+    assert status_map[pd.to_datetime("2026-06-07").date()] == "AD_ATTRIBUTION_LAGGED"
+
+    assert float(summary["ad_spend_total"]) == pytest.approx(180.0)
+    assert float(summary["ad_spend_confirmed"]) == pytest.approx(180.0)
+    assert float(summary["ad_carts"]) == pytest.approx(9.0)
+    assert float(summary["ad_orders"]) == pytest.approx(4.0)
+    assert float(summary["ad_cart_cost"]) == pytest.approx(20.0)
+    assert float(summary["ad_cpo"]) == pytest.approx(45.0)
+    assert summary["ad_kpi_period_start"] == pd.to_datetime("2026-06-05").date()
+    assert summary["ad_kpi_period_end"] == pd.to_datetime("2026-06-06").date()
+    assert summary["has_lagged_ad_attribution"] is True
+    assert summary["has_partial_ad_attribution"] is True
+
+
+def test_build_chart_period_summary_keeps_arithmetic_consistent_across_scopes() -> None:
+    filtered = pd.DataFrame(
+        [
+            {
+                "report_date": pd.to_datetime("2026-06-05").date(),
+                "nm_id": 1,
+                "supplier_article": "A-1",
+                "title": "Item A1",
+                "subject": "Категория A",
+                "band_name": "Band A",
+                "cart_count": 20,
+                "ad_atbs_total": 10,
+                "order_count": 8,
+                "ad_orders_total": 4,
+                "ad_campaign_spend_total": 200.0,
+                "ad_cost_writeoff_total": 200.0,
+            },
+            {
+                "report_date": pd.to_datetime("2026-06-05").date(),
+                "nm_id": 2,
+                "supplier_article": "B-1",
+                "title": "Item B1",
+                "subject": "Категория B",
+                "band_name": "Band B",
+                "cart_count": 10,
+                "ad_atbs_total": 5,
+                "order_count": 4,
+                "ad_orders_total": 2,
+                "ad_campaign_spend_total": 100.0,
+                "ad_cost_writeoff_total": 100.0,
+            },
+            {
+                "report_date": pd.to_datetime("2026-06-05").date(),
+                "nm_id": 3,
+                "supplier_article": "N-1",
+                "title": "Item N1",
+                "subject": "Категория N",
+                "band_name": None,
+                "cart_count": 4,
+                "ad_atbs_total": 2,
+                "order_count": 2,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 50.0,
+                "ad_cost_writeoff_total": 50.0,
+            },
+            {
+                "report_date": pd.to_datetime("2026-06-06").date(),
+                "nm_id": 1,
+                "supplier_article": "A-1",
+                "title": "Item A1",
+                "subject": "Категория A",
+                "band_name": "Band A",
+                "cart_count": 6,
+                "ad_atbs_total": 3,
+                "order_count": 2,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 90.0,
+                "ad_cost_writeoff_total": 120.0,
+            },
+            {
+                "report_date": pd.to_datetime("2026-06-07").date(),
+                "nm_id": 1,
+                "supplier_article": "A-1",
+                "title": "Item A1",
+                "subject": "Категория A",
+                "band_name": "Band A",
+                "cart_count": 2,
+                "ad_atbs_total": 1,
+                "order_count": 1,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 70.0,
+                "ad_cost_writeoff_total": 70.0,
+            },
+        ]
+    )
+
+    scopes = [
+        (CHART_LEVEL_CABINET, None, 440.0, 20.0, 8.0),
+        (CHART_LEVEL_BAND, CHART_ALL_BANDS_LABEL, 390.0, 18.0, 7.0),
+        (CHART_LEVEL_BAND, "Band A", 290.0, 13.0, 5.0),
+    ]
+
+    summaries = {}
+    for aggregation_level, selected_band, expected_spend, expected_carts, expected_orders in scopes:
+        scope_rows, _context = build_chart_scope_rows(
+            filtered,
+            aggregation_level,
+            None,
+            {},
+            selected_band=selected_band,
+        )
+        chart_df = build_chart_metrics_by_date(scope_rows, reference_date=datetime(2026, 6, 8).date())
+        summary = build_chart_period_summary(chart_df, reference_date=datetime(2026, 6, 8).date())
+        summaries[(aggregation_level, selected_band)] = summary
+
+        assert float(summary["ad_spend_total"]) == pytest.approx(expected_spend)
+        assert float(summary["ad_carts"]) == pytest.approx(expected_carts)
+        assert float(summary["ad_orders"]) == pytest.approx(expected_orders)
+        assert float(summary["ad_cart_cost"]) == pytest.approx(expected_spend / expected_carts, rel=1e-6)
+        assert float(summary["ad_cpo"]) == pytest.approx(expected_spend / expected_orders, rel=1e-6)
+        assert summary["ad_kpi_period_start"] == pd.to_datetime("2026-06-05").date()
+        assert summary["ad_kpi_period_end"] == pd.to_datetime("2026-06-06").date()
+
+    assert float(summaries[(CHART_LEVEL_CABINET, None)]["ad_spend_total"]) > float(summaries[(CHART_LEVEL_BAND, CHART_ALL_BANDS_LABEL)]["ad_spend_total"])
 
 
 def test_build_chart_period_summary_uses_separate_cutoffs_for_total_and_ad_metrics() -> None:
@@ -3244,16 +3406,117 @@ def test_build_chart_period_summary_uses_separate_cutoffs_for_total_and_ad_metri
 
     assert float(summary["total_carts"]) == 18.0
     assert float(summary["total_orders"]) == 7.0
-    assert float(summary["ad_spend_total"]) == 150.0
+    assert float(summary["ad_spend_total"]) == 100.0
     assert float(summary["ad_carts"]) == 5.0
     assert float(summary["ad_orders"]) == 2.0
     assert float(summary["ad_spend_confirmed"]) == 100.0
-    assert round(float(summary["total_cart_cost"]), 4) == round(150.0 / 18.0, 4)
-    assert round(float(summary["total_cpo"]), 4) == round(150.0 / 7.0, 4)
+    assert round(float(summary["total_cart_cost"]), 4) == round(100.0 / 18.0, 4)
+    assert round(float(summary["total_cpo"]), 4) == round(100.0 / 7.0, 4)
     assert float(summary["ad_cart_cost"]) == 20.0
     assert float(summary["ad_cpo"]) == 50.0
+    assert summary["ad_kpi_period_start"] == pd.to_datetime("2026-06-06").date()
+    assert summary["ad_kpi_period_end"] == pd.to_datetime("2026-06-06").date()
     assert summary["has_lagged_ad_attribution"] is True
     assert summary["has_partial_ad_attribution"] is False
+
+
+def test_build_chart_period_summary_returns_null_when_ad_denominators_are_zero() -> None:
+    chart_df = pd.DataFrame(
+        [
+            {
+                "report_date": pd.to_datetime("2026-06-06").date(),
+                "cart_count": 10,
+                "ad_atbs_total": 0,
+                "ad_atbs_total_confirmed": 0,
+                "order_count": 4,
+                "ad_orders_total": 0,
+                "ad_orders_total_confirmed": 0,
+                "ad_campaign_spend_total": 100,
+                "ad_spend_confirmed": 100,
+                "ad_attribution_status": "OK",
+            }
+        ]
+    )
+
+    summary = build_chart_period_summary(chart_df, reference_date=datetime(2026, 6, 8).date())
+
+    assert float(summary["ad_spend_total"]) == 100.0
+    assert float(summary["ad_carts"]) == 0.0
+    assert float(summary["ad_orders"]) == 0.0
+    assert summary["ad_kpi_period_start"] == pd.to_datetime("2026-06-06").date()
+    assert summary["ad_kpi_period_end"] == pd.to_datetime("2026-06-06").date()
+    assert summary["ad_cart_cost"] is None
+    assert summary["ad_cpo"] is None
+
+
+def test_build_chart_period_summary_uses_attribution_cutoff_for_ad_kpi_period() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-07-15",
+                "cart_count": 10,
+                "ad_atbs_total": 5,
+                "order_count": 4,
+                "ad_orders_total": 2,
+                "ad_campaign_spend_total": 100.0,
+                "ad_cost_writeoff_total": 100.0,
+            },
+            {
+                "report_date": "2026-07-16",
+                "cart_count": 8,
+                "ad_atbs_total": 3,
+                "order_count": 3,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 50.0,
+                "ad_cost_writeoff_total": 50.0,
+            },
+        ]
+    )
+
+    chart_df = build_chart_metrics_by_date(source_df, reference_date=datetime(2026, 7, 17).date())
+    summary = build_chart_period_summary(chart_df, reference_date=datetime(2026, 7, 17).date())
+
+    assert summary["ad_kpi_period_start"] == pd.to_datetime("2026-07-15").date()
+    assert summary["ad_kpi_period_end"] == pd.to_datetime("2026-07-15").date()
+    assert format_ad_kpi_period_caption(
+        summary["ad_kpi_period_start"],
+        summary["ad_kpi_period_end"],
+    ) == "Период расчёта рекламных KPI: 15.07.2026–15.07.2026"
+
+
+def test_build_chart_period_summary_returns_no_ad_kpi_period_after_cutoff() -> None:
+    source_df = pd.DataFrame(
+        [
+            {
+                "report_date": "2026-07-16",
+                "cart_count": 8,
+                "ad_atbs_total": 3,
+                "order_count": 3,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 50.0,
+                "ad_cost_writeoff_total": 50.0,
+            },
+            {
+                "report_date": "2026-07-17",
+                "cart_count": 7,
+                "ad_atbs_total": 2,
+                "order_count": 2,
+                "ad_orders_total": 1,
+                "ad_campaign_spend_total": 40.0,
+                "ad_cost_writeoff_total": 40.0,
+            },
+        ]
+    )
+
+    chart_df = build_chart_metrics_by_date(source_df, reference_date=datetime(2026, 7, 17).date())
+    summary = build_chart_period_summary(chart_df, reference_date=datetime(2026, 7, 17).date())
+
+    assert summary["ad_kpi_period_start"] is None
+    assert summary["ad_kpi_period_end"] is None
+    assert format_ad_kpi_period_caption(
+        summary["ad_kpi_period_start"],
+        summary["ad_kpi_period_end"],
+    ) == "Период расчёта рекламных KPI: нет доступных данных"
 
 
 def test_build_chart_product_options_filters_to_ad_active_products_by_default() -> None:

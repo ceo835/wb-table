@@ -8326,7 +8326,7 @@ def build_group_summary_table(
         cutoffs = get_chart_metric_cutoffs(reference_date)
         source_df["report_date"] = pd.to_datetime(source_df["report_date"], errors="coerce").dt.date
         total_df = source_df[source_df["report_date"].le(cutoffs["total_metrics_cutoff"])].copy()
-        confirmed_df = source_df[source_df["report_date"].le(cutoffs["ad_attribution_cutoff"])].copy()
+        confirmed_df = source_df[build_user_facing_ad_kpi_mask(source_df, reference_date=reference_date)].copy()
 
         total_columns = [
             column for column in ("cart_count", "ad_campaign_spend_total") if column in total_df.columns
@@ -8480,6 +8480,31 @@ def sum_chart_metric(
     return series.sum(min_count=1)
 
 
+def build_user_facing_ad_kpi_mask(
+    chart_df: pd.DataFrame,
+    *,
+    reference_date: date | None = None,
+) -> pd.Series:
+    if chart_df.empty or "report_date" not in chart_df.columns:
+        return pd.Series(False, index=chart_df.index, dtype="bool")
+
+    report_dates = pd.to_datetime(chart_df["report_date"], errors="coerce").dt.date
+    cutoffs = get_chart_metric_cutoffs(reference_date)
+    mask = report_dates.notna() & report_dates.le(cutoffs["ad_attribution_cutoff"])
+    if "ad_attribution_status" in chart_df.columns:
+        mask &= chart_df["ad_attribution_status"].fillna("OK").astype(str).ne("AD_ATTRIBUTION_LAGGED")
+    return mask
+
+
+def format_ad_kpi_period_caption(period_start: date | None, period_end: date | None) -> str:
+    if period_start is None or period_end is None:
+        return "Период расчёта рекламных KPI: нет доступных данных"
+    return (
+        "Период расчёта рекламных KPI: "
+        f"{period_start.strftime('%d.%m.%Y')}–{period_end.strftime('%d.%m.%Y')}"
+    )
+
+
 def build_chart_period_summary(
     chart_df: pd.DataFrame,
     *,
@@ -8497,6 +8522,8 @@ def build_chart_period_summary(
             "ad_cart_cost": None,
             "total_cpo": None,
             "ad_cpo": None,
+            "ad_kpi_period_start": None,
+            "ad_kpi_period_end": None,
             "has_lagged_ad_attribution": False,
             "has_partial_ad_attribution": False,
         }
@@ -8504,15 +8531,29 @@ def build_chart_period_summary(
     report_dates = pd.to_datetime(chart_df["report_date"], errors="coerce").dt.date
     cutoffs = get_chart_metric_cutoffs(reference_date)
     total_mask = report_dates.notna() & report_dates.le(cutoffs["total_metrics_cutoff"])
-    ad_spend_mask = report_dates.notna() & report_dates.le(cutoffs["ad_spend_cutoff"])
-    ad_attribution_mask = report_dates.notna() & report_dates.le(cutoffs["ad_attribution_cutoff"])
+    ad_attribution_mask = build_user_facing_ad_kpi_mask(chart_df, reference_date=reference_date)
+    ad_period_dates = report_dates[ad_attribution_mask]
+    ad_kpi_period_start = ad_period_dates.min() if not ad_period_dates.empty else None
+    ad_kpi_period_end = ad_period_dates.max() if not ad_period_dates.empty else None
 
     total_carts = sum_chart_metric(chart_df, "cart_count", total_mask)
     total_orders = sum_chart_metric(chart_df, "order_count", total_mask)
-    ad_spend_total = sum_chart_metric(chart_df, "ad_campaign_spend_total", ad_spend_mask)
-    ad_carts = sum_chart_metric(chart_df, "ad_atbs_total_confirmed", ad_attribution_mask)
-    ad_orders = sum_chart_metric(chart_df, "ad_orders_total_confirmed", ad_attribution_mask)
-    ad_spend_confirmed = sum_chart_metric(chart_df, "ad_spend_confirmed", ad_attribution_mask)
+    ad_spend_total = sum_chart_metric(chart_df, "ad_campaign_spend_total", ad_attribution_mask)
+    ad_carts = sum_chart_metric(
+        chart_df,
+        "ad_atbs_total_confirmed" if "ad_atbs_total_confirmed" in chart_df.columns else "ad_atbs_total",
+        ad_attribution_mask,
+    )
+    ad_orders = sum_chart_metric(
+        chart_df,
+        "ad_orders_total_confirmed" if "ad_orders_total_confirmed" in chart_df.columns else "ad_orders_total",
+        ad_attribution_mask,
+    )
+    ad_spend_confirmed = sum_chart_metric(
+        chart_df,
+        "ad_spend_confirmed" if "ad_spend_confirmed" in chart_df.columns else "ad_campaign_spend_total",
+        ad_attribution_mask,
+    )
 
     return {
         "total_carts": total_carts,
@@ -8525,6 +8566,8 @@ def build_chart_period_summary(
         "ad_cart_cost": safe_chart_divide(ad_spend_confirmed, ad_carts),
         "total_cpo": safe_chart_divide(ad_spend_total, total_orders),
         "ad_cpo": safe_chart_divide(ad_spend_confirmed, ad_orders),
+        "ad_kpi_period_start": ad_kpi_period_start,
+        "ad_kpi_period_end": ad_kpi_period_end,
         "has_lagged_ad_attribution": bool((report_dates > cutoffs["ad_attribution_cutoff"]).any()),
         "has_partial_ad_attribution": bool(
             "ad_attribution_status" in chart_df.columns
@@ -8573,6 +8616,10 @@ def build_chart_metrics_by_date(
     if "ad_campaign_spend_total" in grouped.columns and "ad_cost_writeoff_total" in grouped.columns:
         ad_campaign_spend_series = pd.to_numeric(grouped["ad_campaign_spend_total"], errors="coerce")
         ad_cost_writeoff_series = pd.to_numeric(grouped["ad_cost_writeoff_total"], errors="coerce")
+        # AD_DATA_PARTIAL compares campaign-statistics spend with writeoff spend.
+        # These sources use different date semantics.
+        # The flag is diagnostic only and must not exclude rows from user-facing
+        # fullstats advertising KPIs.
         partial_mask = (
             ~lagged_mask
             & ad_cost_writeoff_series.notna()
@@ -8584,7 +8631,7 @@ def build_chart_metrics_by_date(
     grouped["ad_attribution_status"] = "OK"
     grouped.loc[lagged_mask, "ad_attribution_status"] = "AD_ATTRIBUTION_LAGGED"
     grouped.loc[partial_mask, "ad_attribution_status"] = "AD_DATA_PARTIAL"
-    confirmed_mask = ~(lagged_mask | partial_mask)
+    confirmed_mask = ~lagged_mask
     if "ad_atbs_total" in grouped.columns:
         grouped["ad_atbs_total_confirmed"] = grouped["ad_atbs_total"].where(confirmed_mask)
     if "ad_atbs_total_api" in grouped.columns:
@@ -9114,6 +9161,12 @@ def render_charts_tab(
                 suffix=" руб.",
                 threshold=CHART_THRESHOLD_CPO,
             )
+    st.caption(
+        format_ad_kpi_period_caption(
+            period_summary.get("ad_kpi_period_start"),
+            period_summary.get("ad_kpi_period_end"),
+        )
+    )
 
     latest_report_date = chart_df["report_date"].dropna().max() if "report_date" in chart_df.columns else None
     if latest_report_date and latest_report_date > (datetime.now().date() - timedelta(days=2)):
@@ -9623,6 +9676,12 @@ def render_efficiency_charts(
                 threshold=CHART_THRESHOLD_CPO,
             )
     st.caption(f"Расход РК за период: {format_chart_kpi_value(ad_spend, digits=2, suffix=' руб.')}")
+    st.caption(
+        format_ad_kpi_period_caption(
+            period_summary.get("ad_kpi_period_start"),
+            period_summary.get("ad_kpi_period_end"),
+        )
+    )
 
     if period_summary["has_lagged_ad_attribution"]:
         st.caption("Статус рекламной атрибуции: AD_ATTRIBUTION_LAGGED")
