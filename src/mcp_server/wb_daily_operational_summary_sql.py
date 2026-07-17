@@ -353,8 +353,8 @@ def fetch_profit_overview(
         select
             day,
             sum(coalesce(operating_profit, 0)) as operating_profit,
-            sum(coalesce(organic_sales_qty, 0)) as organic_sales_qty,
-            case when sum(coalesce(organic_sales_qty, 0)) > 0 then sum(coalesce(operating_profit, 0)) / nullif(sum(coalesce(organic_sales_qty, 0)), 0) end as profit_per_unit
+            sum(coalesce(organic_sales, 0)) as organic_sales,
+            case when sum(coalesce(organic_sales, 0)) > 0 then sum(coalesce(operating_profit, 0)) / nullif(sum(coalesce(organic_sales, 0)), 0) end as profit_per_unit
         from fact_vvbromo_product_day
         where day in (:report_date, :compare_date)
         group by day
@@ -374,12 +374,11 @@ def fetch_profit_overview(
             end as bucket,
             max(day) as max_day,
             sum(coalesce(operating_profit, 0)) as operating_profit,
-            sum(coalesce(organic_sales_qty, 0)) as organic_sales_qty,
-            case when sum(coalesce(organic_sales_qty, 0)) > 0 then sum(coalesce(operating_profit, 0)) / nullif(sum(coalesce(organic_sales_qty, 0)), 0) end as profit_per_unit
+            sum(coalesce(organic_sales, 0)) as organic_sales,
+            case when sum(coalesce(organic_sales, 0)) > 0 then sum(coalesce(operating_profit, 0)) / nullif(sum(coalesce(organic_sales, 0)), 0) end as profit_per_unit
         from fact_vvbromo_product_day
         where day >= :trend_previous_from and day <= :trend_current_to
         group by bucket
-        having bucket is not null
         order by bucket asc
         """
     )

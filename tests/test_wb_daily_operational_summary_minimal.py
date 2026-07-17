@@ -373,6 +373,60 @@ def test_build_operational_summary_diagnostic_includes_stage_timings_and_keeps_q
     }.issubset(stage_names)
 
 
+def test_build_operational_summary_returns_unavailable_additional_block_when_helper_fails(monkeypatch) -> None:
+    def _inc(query_counter, name, ms=1):
+        query_counter["count"] = int(query_counter.get("count") or 0) + 1
+        query_counter.setdefault("timings", []).append({"query": name, "ms": ms})
+
+    monkeypatch.setattr(summary_module, "fetch_core_source_freshness", lambda session, query_counter: (_inc(query_counter, "core_source_freshness"), [{"source_name": "mart_total_report", "max_date": date(2026, 7, 15)}])[1])
+    monkeypatch.setattr(summary_module, "fetch_mart_daily_overview", lambda session, report_date, compare_date, query_counter: (_inc(query_counter, "mart_daily_overview"), [{"report_date": compare_date}, {"report_date": report_date}])[1])
+    monkeypatch.setattr(summary_module, "fetch_mart_window_overview", lambda session, *args: [_inc(args[-1], "mart_window_overview"), [{"bucket": "current"}, {"bucket": "previous"}]][1])
+    monkeypatch.setattr(summary_module, "fetch_assortment_changes", lambda session, report_date, compare_date, query_counter: (_inc(query_counter, "assortment_changes"), [])[1])
+    monkeypatch.setattr(summary_module, "fetch_problem_campaigns", lambda session, report_date, compare_date, query_counter: (_inc(query_counter, "problem_campaigns"), [])[1])
+    monkeypatch.setattr(summary_module, "fetch_stock_risks", lambda session, report_date, trend_current_from, query_counter: (_inc(query_counter, "stock_risks"), [])[1])
+    monkeypatch.setattr(summary_module, "fetch_search_movers", lambda session, report_date, compare_date, query_counter: (_inc(query_counter, "search_movers"), [])[1])
+    monkeypatch.setattr(summary_module, "build_extended_context", lambda session, **kwargs: {"additional_source_freshness": [], "article_context": [], "warehouse_context": [], "campaign_context": [], "search_query_context": [], "entry_point_context": [], "price_context": [], "logistics_context": [], "data_gaps": []})
+    monkeypatch.setattr(summary_module, "fetch_database_audit_block", lambda session, *, query_counter: (_inc(query_counter, "database_audit_vvbromo"), {"status": "OK", "inventory": []})[1])
+    monkeypatch.setattr(summary_module, "fetch_operating_profit_block", lambda session, **kwargs: (_ for _ in ()).throw(RuntimeError("missing profit source")))
+    monkeypatch.setattr(summary_module, "fetch_logistics_summary_block", lambda session, **kwargs: {"status": "PARTIAL"})
+    monkeypatch.setattr(summary_module, "fetch_pricing_spp_block", lambda session, **kwargs: {"status": "OK"})
+    monkeypatch.setattr(summary_module, "fetch_competitor_block", lambda session, **kwargs: {"status": "MISSING"})
+    monkeypatch.setattr(summary_module, "build_additional_data_candidates", lambda **kwargs: [])
+
+    response = build_operational_summary(_NoopSession(), WbDailyOperationalSummaryRequest(report_date=date(2026, 7, 15), top_n=5))
+
+    assert response.operating_profit_context["status"] == "UNAVAILABLE"
+    assert response.operating_profit_context["source_table"] == "fact_vvbromo_product_day"
+    assert response.operating_profit_context["diagnostic"]["error_type"] == "RuntimeError"
+
+
+def test_build_operational_summary_keeps_report_when_fetch_profit_overview_fails(monkeypatch) -> None:
+    monkeypatch.setattr(summary_module, "fetch_core_source_freshness", lambda session, query_counter: [{"source_name": "mart_total_report", "max_date": date(2026, 7, 15)}])
+    monkeypatch.setattr(summary_module, "fetch_mart_daily_overview", lambda session, report_date, compare_date, query_counter: [{"report_date": compare_date}, {"report_date": report_date}])
+    monkeypatch.setattr(summary_module, "fetch_mart_window_overview", lambda session, *args: [{"bucket": "current"}, {"bucket": "previous"}])
+    monkeypatch.setattr(summary_module, "fetch_assortment_changes", lambda session, report_date, compare_date, query_counter: [])
+    monkeypatch.setattr(summary_module, "fetch_problem_campaigns", lambda session, report_date, compare_date, query_counter: [])
+    monkeypatch.setattr(summary_module, "fetch_stock_risks", lambda session, report_date, trend_current_from, query_counter: [])
+    monkeypatch.setattr(summary_module, "fetch_search_movers", lambda session, report_date, compare_date, query_counter: [])
+    monkeypatch.setattr(summary_module, "build_extended_context", lambda session, **kwargs: {"additional_source_freshness": [], "article_context": [], "warehouse_context": [], "campaign_context": [], "search_query_context": [], "entry_point_context": [], "price_context": [], "logistics_context": [], "data_gaps": []})
+    monkeypatch.setattr(summary_module, "fetch_database_audit_block", lambda session, *, query_counter: {"status": "OK", "inventory": []})
+    monkeypatch.setattr(summary_module, "fetch_operating_profit_block", lambda session, **kwargs: {"status": "MISSING"})
+    monkeypatch.setattr(summary_module, "fetch_logistics_summary_block", lambda session, **kwargs: {"status": "PARTIAL"})
+    monkeypatch.setattr(summary_module, "fetch_pricing_spp_block", lambda session, **kwargs: {"status": "OK"})
+    monkeypatch.setattr(summary_module, "fetch_competitor_block", lambda session, **kwargs: {"status": "MISSING"})
+    monkeypatch.setattr(summary_module, "build_additional_data_candidates", lambda **kwargs: [])
+    monkeypatch.setattr(summary_module, "fetch_profit_overview", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("missing organic_sales field")))
+
+    response = build_operational_summary(
+        _NoopSession(),
+        WbDailyOperationalSummaryRequest(report_date=date(2026, 7, 15), include_profit=True, include_partial_sections=True, top_n=5),
+    )
+
+    excluded_profit = next(item for item in response.diagnostics.excluded_sections if item.key == "profit")
+    assert "временно недоступен" in excluded_profit.reason
+    assert all(section.key != "profit" for section in response.sections)
+
+
 def test_append_analysis_narratives_adds_ai_comment_and_action() -> None:
     section = build_traffic_section(
         {

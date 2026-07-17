@@ -140,6 +140,36 @@ def _stage_elapsed_ms(started_at: float) -> int:
     return int((perf_counter() - started_at) * 1000)
 
 
+def _unavailable_additional_block(*, source_table: str, error: Exception) -> dict[str, Any]:
+    return {
+        "status": "UNAVAILABLE",
+        "source_table": source_table,
+        "diagnostic": {
+            "error_type": type(error).__name__,
+            "message": str(error),
+        },
+        "limitations": [
+            f"Source {source_table} is unavailable for this request; MCP keeps the rest of the daily summary available.",
+        ],
+    }
+
+
+def _run_safe_additional_block(
+    *,
+    stage_timings: list[dict[str, Any]],
+    stage_name: str,
+    source_table: str,
+    builder,
+) -> dict[str, Any]:
+    stage_started = perf_counter()
+    try:
+        return builder()
+    except Exception as error:
+        return _unavailable_additional_block(source_table=source_table, error=error)
+    finally:
+        stage_timings.append({"stage": stage_name, "ms": _stage_elapsed_ms(stage_started)})
+
+
 def _query_ms(query_counter: dict[str, Any], *query_names: str) -> int:
     names = set(query_names)
     return sum(int(item.get("ms") or 0) for item in query_counter.get("timings", []) if item.get("query") in names)
@@ -764,59 +794,80 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         query_counter=query_counter,
     )
 
-    stage_started = perf_counter()
-    database_audit = fetch_database_audit_block(session, query_counter=query_counter)
-    stage_timings.append({"stage": "database_audit", "ms": _stage_elapsed_ms(stage_started)})
-
-    stage_started = perf_counter()
-    operating_profit_context = fetch_operating_profit_block(
-        session,
-        report_date=window.report_date,
-        compare_date=window.compare_date,
-        trend_current_from=window.trend_current_from,
-        trend_current_to=window.trend_current_to,
-        trend_previous_from=window.trend_previous_from,
-        trend_previous_to=window.trend_previous_to,
-        top_n=payload.top_n,
-        query_counter=query_counter,
+    database_audit = _run_safe_additional_block(
+        stage_timings=stage_timings,
+        stage_name="database_audit",
+        source_table="fact_vvbromo_product_day + fact_finance_realization_line + fact_wb_site_price_snapshot + fact_wb_seller_price_snapshot + fact_competitor_wb_site_price_snapshot",
+        builder=lambda: fetch_database_audit_block(session, query_counter=query_counter),
     )
-    stage_timings.append({"stage": "operating_profit_context", "ms": _stage_elapsed_ms(stage_started)})
 
-    stage_started = perf_counter()
-    logistics_summary = fetch_logistics_summary_block(
-        session,
-        report_date=window.report_date,
-        compare_date=window.compare_date,
-        trend_current_from=window.trend_current_from,
-        trend_current_to=window.trend_current_to,
-        trend_previous_from=window.trend_previous_from,
-        trend_previous_to=window.trend_previous_to,
-        top_n=payload.top_n,
-        query_counter=query_counter,
+    operating_profit_context = _run_safe_additional_block(
+        stage_timings=stage_timings,
+        stage_name="operating_profit_context",
+        source_table="fact_vvbromo_product_day",
+        builder=lambda: fetch_operating_profit_block(
+            session,
+            report_date=window.report_date,
+            compare_date=window.compare_date,
+            trend_current_from=window.trend_current_from,
+            trend_current_to=window.trend_current_to,
+            trend_previous_from=window.trend_previous_from,
+            trend_previous_to=window.trend_previous_to,
+            top_n=payload.top_n,
+            query_counter=query_counter,
+        ),
     )
-    stage_timings.append({"stage": "logistics_summary", "ms": _stage_elapsed_ms(stage_started)})
 
-    stage_started = perf_counter()
-    pricing_spp_context = fetch_pricing_spp_block(
-        session,
-        report_date=window.report_date,
-        compare_date=window.compare_date,
-        trend_current_from=window.trend_current_from,
-        top_n=payload.top_n,
-        query_counter=query_counter,
+    logistics_summary = _run_safe_additional_block(
+        stage_timings=stage_timings,
+        stage_name="logistics_summary",
+        source_table="fact_finance_realization_line",
+        builder=lambda: fetch_logistics_summary_block(
+            session,
+            report_date=window.report_date,
+            compare_date=window.compare_date,
+            trend_current_from=window.trend_current_from,
+            trend_current_to=window.trend_current_to,
+            trend_previous_from=window.trend_previous_from,
+            trend_previous_to=window.trend_previous_to,
+            top_n=payload.top_n,
+            query_counter=query_counter,
+        ),
     )
-    stage_timings.append({"stage": "pricing_spp_context", "ms": _stage_elapsed_ms(stage_started)})
 
-    stage_started = perf_counter()
-    competitor_context = fetch_competitor_block(
-        session,
-        report_date=window.report_date,
-        top_n=payload.top_n,
-        query_counter=query_counter,
+    pricing_spp_context = _run_safe_additional_block(
+        stage_timings=stage_timings,
+        stage_name="pricing_spp_context",
+        source_table="fact_wb_site_price_snapshot + fact_wb_seller_price_snapshot",
+        builder=lambda: fetch_pricing_spp_block(
+            session,
+            report_date=window.report_date,
+            compare_date=window.compare_date,
+            trend_current_from=window.trend_current_from,
+            top_n=payload.top_n,
+            query_counter=query_counter,
+        ),
     )
-    stage_timings.append({"stage": "competitor_context", "ms": _stage_elapsed_ms(stage_started)})
 
-    additional_data_candidates = build_additional_data_candidates(database_audit_block=database_audit)
+    competitor_context = _run_safe_additional_block(
+        stage_timings=stage_timings,
+        stage_name="competitor_context",
+        source_table="fact_competitor_wb_site_price_snapshot",
+        builder=lambda: fetch_competitor_block(
+            session,
+            report_date=window.report_date,
+            top_n=payload.top_n,
+            query_counter=query_counter,
+        ),
+    )
+
+    if database_audit.get("status") == "UNAVAILABLE":
+        additional_data_candidates = []
+    else:
+        try:
+            additional_data_candidates = build_additional_data_candidates(database_audit_block=database_audit)
+        except Exception:
+            additional_data_candidates = []
     source_freshness = build_source_freshness(freshness_rows + extended_context.get("additional_source_freshness", []), report_date)
 
     daily_by_date = _row_by_key(daily_rows, "report_date")
@@ -876,12 +927,17 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
     append_analysis_narratives(sections, analysis_summary=analysis_payload.get("analysis_summary", {}))
 
     if payload.include_profit and payload.include_partial_sections:
-        profit_payload = fetch_profit_overview(session, window.report_date, window.compare_date, window.trend_current_from, window.trend_current_to, window.trend_previous_from, window.trend_previous_to, query_counter)
-        profit_section = build_profit_section(profit_payload, window.report_date, window.compare_date)
-        if profit_section is None:
-            excluded_sections.append(_empty_section("profit", "Источник прибыли не вернул данные на отчетную дату."))
+        try:
+            profit_payload = fetch_profit_overview(session, window.report_date, window.compare_date, window.trend_current_from, window.trend_current_to, window.trend_previous_from, window.trend_previous_to, query_counter)
+            profit_section = build_profit_section(profit_payload, window.report_date, window.compare_date)
+        except Exception as error:
+            profit_section = None
+            excluded_sections.append(_empty_section("profit", f"Источник прибыли временно недоступен: {type(error).__name__}."))
         else:
-            sections.append(profit_section)
+            if profit_section is None:
+                excluded_sections.append(_empty_section("profit", "Источник прибыли не вернул данные на отчетную дату."))
+            else:
+                sections.append(profit_section)
     else:
         excluded_sections.append(_empty_section("profit", "Блок прибыли выключен по параметрам include_profit/include_partial_sections."))
 
@@ -937,6 +993,12 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         entry_point_context=extended_context.get("entry_point_context", []),
         price_context=extended_context.get("price_context", []),
         logistics_context=extended_context.get("logistics_context", []),
+        database_audit=database_audit,
+        operating_profit_context=operating_profit_context,
+        logistics_summary=logistics_summary,
+        pricing_spp_context=pricing_spp_context,
+        competitor_context=competitor_context,
+        additional_data_candidates=additional_data_candidates,
         data_gaps=combined_data_gaps,
         article_analysis=analysis_payload.get("article_analysis", []),
         business_priorities=analysis_payload.get("business_priorities", analysis_payload.get("ranked_signals", [])),
