@@ -305,6 +305,10 @@ class WbDailyOperationalSummaryResponse(ApiModel):
     price_context: list[dict[str, Any]] = Field(default_factory=list)
     logistics_context: list[dict[str, Any]] = Field(default_factory=list)
     data_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    article_analysis: list[dict[str, Any]] = Field(default_factory=list)
+    ranked_signals: list[dict[str, Any]] = Field(default_factory=list)
+    data_anomalies: list[dict[str, Any]] = Field(default_factory=list)
+    analysis_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class ErrorResponse(ApiModel):

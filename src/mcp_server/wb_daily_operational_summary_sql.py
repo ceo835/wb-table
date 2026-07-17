@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -70,13 +70,14 @@ def fetch_mart_daily_overview(
             sum(search_cart) as search_cart,
             sum(search_orders) as search_orders
         from mart_total_report
-        where report_date >= :compare_date and report_date <= :report_date
+        where report_date >= :history_from and report_date <= :report_date
         group by report_date
         order by report_date asc
         """
     )
     _increment(query_counter)
-    return [dict(row) for row in session.execute(sql, {"report_date": report_date, "compare_date": compare_date}).mappings().all()]
+    history_from = report_date - timedelta(days=14)
+    return [dict(row) for row in session.execute(sql, {"report_date": report_date, "compare_date": compare_date, "history_from": history_from}).mappings().all()]
 
 
 
@@ -197,7 +198,8 @@ def fetch_assortment_changes(
         """
     )
     _increment(query_counter)
-    return [dict(row) for row in session.execute(sql, {"report_date": report_date, "compare_date": compare_date}).mappings().all()]
+    history_from = report_date - timedelta(days=14)
+    return [dict(row) for row in session.execute(sql, {"report_date": report_date, "compare_date": compare_date, "history_from": history_from}).mappings().all()]
 
 
 
@@ -227,7 +229,8 @@ def fetch_problem_campaigns(
         """
     )
     _increment(query_counter)
-    return [dict(row) for row in session.execute(sql, {"report_date": report_date, "compare_date": compare_date}).mappings().all()]
+    history_from = report_date - timedelta(days=14)
+    return [dict(row) for row in session.execute(sql, {"report_date": report_date, "compare_date": compare_date, "history_from": history_from}).mappings().all()]
 
 
 
@@ -330,7 +333,8 @@ def fetch_search_movers(
         """
     )
     _increment(query_counter)
-    return [dict(row) for row in session.execute(sql, {"report_date": report_date, "compare_date": compare_date}).mappings().all()]
+    history_from = report_date - timedelta(days=14)
+    return [dict(row) for row in session.execute(sql, {"report_date": report_date, "compare_date": compare_date, "history_from": history_from}).mappings().all()]
 
 
 
@@ -395,3 +399,4 @@ def fetch_profit_overview(
         "trend": trend_rows,
         "max_day": freshness_row.get("max_day"),
     }
+

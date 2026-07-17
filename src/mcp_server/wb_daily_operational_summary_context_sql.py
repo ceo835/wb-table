@@ -82,7 +82,7 @@ def fetch_additional_source_freshness(session: Session, query_counter: dict[str,
     return _execute_mappings(session, sql, {}, query_counter, "additional_source_freshness")
 
 
-def fetch_article_context(session: Session, *, report_date: date, nm_ids: Sequence[int], query_counter: dict[str, Any]) -> list[dict[str, Any]]:
+def fetch_article_context(session: Session, *, report_date: date, history_from: date, nm_ids: Sequence[int], query_counter: dict[str, Any]) -> list[dict[str, Any]]:
     if not nm_ids:
         return []
     sql = text(
@@ -95,7 +95,7 @@ def fetch_article_context(session: Session, *, report_date: date, nm_ids: Sequen
                 count(distinct case when coalesce(stock_qty, 0) > 0 then warehouse_id end) as warehouses_with_stock,
                 count(distinct case when coalesce(stock_qty, 0) = 0 then warehouse_id end) as warehouses_zero_stock
             from fact_stock_warehouse_snapshot
-            where snapshot_date = :report_date and nm_id in :nm_ids
+            where snapshot_date >= :history_from and snapshot_date <= :report_date and nm_id in :nm_ids
             group by snapshot_date, nm_id
         )
         select
@@ -122,11 +122,48 @@ def fetch_article_context(session: Session, *, report_date: date, nm_ids: Sequen
             m.buyout_sum
         from mart_total_report m
         left join warehouse_agg w on w.report_date = m.report_date and w.nm_id = m.nm_id
-        where m.report_date = :report_date and m.nm_id in :nm_ids
-        order by coalesce(m.order_sum, 0) desc, m.nm_id asc
+        where m.report_date >= :history_from and m.report_date <= :report_date and m.nm_id in :nm_ids
+        order by m.nm_id asc, m.report_date asc
         """
     ).bindparams(bindparam("nm_ids", expanding=True))
-    return _execute_mappings(session, sql, {"report_date": report_date, "nm_ids": list(nm_ids)}, query_counter, "article_context")
+    rows = _execute_mappings(session, sql, {"report_date": report_date, "history_from": history_from, "nm_ids": list(nm_ids)}, query_counter, "article_context")
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[int(row["nm_id"])].append(row)
+
+    ranked: list[dict[str, Any]] = []
+    for nm_id in nm_ids:
+        group_rows = grouped.get(int(nm_id), [])
+        row_by_date = {row["report_date"]: row for row in group_rows}
+        current = row_by_date.get(report_date)
+        if not current:
+            continue
+        ranked.append({
+            "report_date": report_date,
+            "nm_id": int(nm_id),
+            "supplier_article": current.get("supplier_article"),
+            "title": current.get("title"),
+            "subject": current.get("subject"),
+            "brand": current.get("brand"),
+            "impressions": current.get("impressions"),
+            "card_clicks": current.get("card_clicks"),
+            "cart_count": current.get("cart_count"),
+            "order_count": current.get("order_count"),
+            "order_sum": current.get("order_sum"),
+            "ad_spend_total": current.get("ad_spend_total"),
+            "search_avg_position": current.get("search_avg_position"),
+            "search_visibility": current.get("search_visibility"),
+            "current_stock_qty": current.get("current_stock_qty"),
+            "stock_snapshot_date": current.get("stock_snapshot_date"),
+            "warehouse_stock_qty": current.get("warehouse_stock_qty"),
+            "warehouses_with_stock": current.get("warehouses_with_stock"),
+            "warehouses_zero_stock": current.get("warehouses_zero_stock"),
+            "buyout_count": current.get("buyout_count"),
+            "buyout_sum": current.get("buyout_sum"),
+            "trend_14d": _trend_points(group_rows, date_key="report_date", metric_keys=("impressions", "card_clicks", "cart_count", "order_count", "order_sum", "ad_spend_total", "search_avg_position", "search_visibility", "warehouse_stock_qty", "warehouses_with_stock", "warehouses_zero_stock")),
+        })
+    ranked.sort(key=lambda row: (_to_decimal(row.get("order_sum")) or Decimal("0"), _to_decimal(row.get("order_count")) or Decimal("0")), reverse=True)
+    return ranked
 
 
 def fetch_price_context(
@@ -607,7 +644,8 @@ def build_extended_context(
             ],
         }
 
-    article_rows = fetch_article_context(session, report_date=report_date, nm_ids=resolved_nm_ids, query_counter=query_counter)
+    history_from = report_date - timedelta(days=14)
+    article_rows = fetch_article_context(session, report_date=report_date, history_from=history_from, nm_ids=resolved_nm_ids, query_counter=query_counter)
     price_context = fetch_price_context(session, report_date=report_date, compare_date=compare_date, trend_current_from=trend_current_from, nm_ids=resolved_nm_ids, query_counter=query_counter)
     logistics_context = fetch_logistics_context(session, report_date=report_date, compare_date=compare_date, trend_current_from=trend_current_from, nm_ids=resolved_nm_ids, query_counter=query_counter)
     warehouse_context = fetch_warehouse_context(session, report_date=report_date, trend_current_from=trend_current_from, nm_ids=resolved_nm_ids, top_n=top_n, query_counter=query_counter)
@@ -683,3 +721,4 @@ def build_extended_context(
         "logistics_context": logistics_context,
         "data_gaps": data_gaps,
     }
+

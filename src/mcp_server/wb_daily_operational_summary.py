@@ -21,6 +21,7 @@ from src.mcp_server.schemas import (
     WbDailyOperationalSummaryResponse,
     WbDailyOperationalTableResponse,
 )
+from src.mcp_server.wb_daily_operational_summary_analysis import build_highlights_from_analysis, build_internal_analysis
 from src.mcp_server.wb_daily_operational_summary_context_sql import build_extended_context
 from src.mcp_server.wb_daily_operational_summary_rules import WbDailyOperationalSummaryRules, get_default_rules
 from src.mcp_server.wb_daily_operational_summary_sql import (
@@ -306,10 +307,11 @@ def build_traffic_section(current: dict[str, Any], previous: dict[str, Any], cur
         status="OK",
         summary=summary or ["Трафиковые метрики доступны по последнему полному дню и 7-дневному окну."],
         metrics=[
-            _metric_row("Показы", current.get("impressions"), previous.get("impressions"), current_7d.get("impressions"), previous_7d.get("impressions")),
-            _metric_row("Клики", current.get("card_clicks"), previous.get("card_clicks"), current_7d.get("card_clicks"), previous_7d.get("card_clicks")),
-            _metric_row("CTR", current.get("ctr"), previous.get("ctr"), current_7d.get("ctr"), previous_7d.get("ctr"), use_percentage_points=True),
+            _metric_row("Общие показы", current.get("impressions"), previous.get("impressions"), current_7d.get("impressions"), previous_7d.get("impressions")),
+            _metric_row("Общие клики", current.get("card_clicks"), previous.get("card_clicks"), current_7d.get("card_clicks"), previous_7d.get("card_clicks")),
+            _metric_row("CTR общий", current.get("ctr"), previous.get("ctr"), current_7d.get("ctr"), previous_7d.get("ctr"), use_percentage_points=True),
             _metric_row("Рекламные показы", current.get("ad_views"), previous.get("ad_views"), current_7d.get("ad_views"), previous_7d.get("ad_views")),
+            _metric_row("Рекламные клики", current.get("ad_clicks"), previous.get("ad_clicks"), current_7d.get("ad_clicks"), previous_7d.get("ad_clicks")),
         ],
     )
 
@@ -338,9 +340,9 @@ def build_funnel_section(current: dict[str, Any], previous: dict[str, Any], curr
             _metric_row("Конверсия в заказ", current.get("cart_to_order_conversion"), previous.get("cart_to_order_conversion"), current_7d.get("cart_to_order_conversion"), previous_7d.get("cart_to_order_conversion"), use_percentage_points=True),
             _metric_row("Средний чек", current.get("avg_check"), previous.get("avg_check"), current_7d.get("avg_check"), previous_7d.get("avg_check")),
             _metric_row("Сумма заказов", current.get("order_sum"), previous.get("order_sum"), current_7d.get("order_sum"), previous_7d.get("order_sum")),
-            _metric_row("Выкупы", current.get("buyout_count"), previous.get("buyout_count"), current_7d.get("buyout_count"), previous_7d.get("buyout_count"), note="PARTIAL buyout metric; do not use for causal reasoning."),
+
         ],
-        notes=["Выкупы пока считаются partial-метрикой: источник и дата показателя еще не подтверждены для причинных выводов."],
+
     )
 
 
@@ -431,11 +433,11 @@ def build_sales_section(current: dict[str, Any], previous: dict[str, Any], curre
         metrics=[
             _metric_row("Оборот заказов", current.get("order_sum"), previous.get("order_sum"), current_7d.get("order_sum"), previous_7d.get("order_sum")),
             _metric_row("Заказы", current.get("order_count"), previous.get("order_count"), current_7d.get("order_count"), previous_7d.get("order_count")),
-            _metric_row("Выкупы", current.get("buyout_count"), previous.get("buyout_count"), current_7d.get("buyout_count"), previous_7d.get("buyout_count"), note="PARTIAL buyout metric; do not use for causal reasoning."),
-            _metric_row("Сумма выкупов", current.get("buyout_sum"), previous.get("buyout_sum"), current_7d.get("buyout_sum"), previous_7d.get("buyout_sum"), note="PARTIAL buyout metric; do not use for causal reasoning."),
+
+
             _metric_row("Средний чек", current.get("avg_check"), previous.get("avg_check"), current_7d.get("avg_check"), previous_7d.get("avg_check")),
         ],
-        notes=["Выкупы и сумма выкупов показаны как partial-метрики и не участвуют в факторных выводах первого этапа."],
+
     )
 
 
@@ -603,9 +605,9 @@ def collect_highlights(sections: list[WbDailyOperationalSectionResponse], top_n:
     for section in sections:
         if section.key == "traffic":
             for metric in section.metrics:
-                if metric.metric == "CTR" and _is_negative(metric.delta_pp):
+                if metric.metric == "CTR общий" and _is_negative(metric.delta_pp):
                     worse.append(f"CTR снизился на {_format_pp(metric.delta_pp)}.")
-                if metric.metric == "Показы" and _is_positive(metric.delta_pct):
+                if metric.metric == "Общие показы" and _is_positive(metric.delta_pct):
                     better.append(f"Показы выросли на {_format_percent(metric.delta_pct)}.")
         elif section.key == "funnel":
             for metric in section.metrics:
@@ -712,6 +714,23 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         logistics_context=extended_context.get("logistics_context", []),
     )
 
+    combined_data_gaps = list(extended_context.get("data_gaps", []))
+    analysis_payload = build_internal_analysis(
+        report_date=window.report_date,
+        daily_rows=daily_rows,
+        article_context=extended_context.get("article_context", []),
+        warehouse_context=extended_context.get("warehouse_context", []),
+        campaign_context=extended_context.get("campaign_context", []),
+        search_query_context=extended_context.get("search_query_context", []),
+        entry_point_context=extended_context.get("entry_point_context", []),
+        price_context=extended_context.get("price_context", []),
+        logistics_context=extended_context.get("logistics_context", []),
+        data_gaps=combined_data_gaps,
+        rules=resolved_rules,
+        top_n=payload.top_n,
+    )
+    combined_data_gaps.extend(analysis_payload.get("data_gaps", []))
+
     if payload.include_profit and payload.include_partial_sections:
         profit_payload = fetch_profit_overview(session, window.report_date, window.compare_date, window.trend_current_from, window.trend_current_to, window.trend_previous_from, window.trend_previous_to, query_counter)
         profit_section = build_profit_section(profit_payload, window.report_date, window.compare_date)
@@ -722,7 +741,8 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
     else:
         excluded_sections.append(_empty_section("profit", "Блок прибыли выключен по параметрам include_profit/include_partial_sections."))
 
-    highlights = collect_highlights(sections, payload.top_n)
+    analysis_highlights = build_highlights_from_analysis(analysis_payload, top_n=payload.top_n)
+    highlights = analysis_highlights if (analysis_highlights.worse or analysis_highlights.better or analysis_highlights.priority_checks) else collect_highlights(sections, payload.top_n)
     priority = build_priority_section(highlights)
     if priority is None:
         excluded_sections.append(_empty_section("priority", "Нет сигналов для приоритетных проверок."))
@@ -764,5 +784,13 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         entry_point_context=extended_context.get("entry_point_context", []),
         price_context=extended_context.get("price_context", []),
         logistics_context=extended_context.get("logistics_context", []),
-        data_gaps=extended_context.get("data_gaps", []),
+        data_gaps=combined_data_gaps,
+        article_analysis=analysis_payload.get("article_analysis", []),
+        ranked_signals=analysis_payload.get("ranked_signals", []),
+        data_anomalies=analysis_payload.get("data_anomalies", []),
+        analysis_summary=analysis_payload.get("analysis_summary", {}),
     )
+
+
+
+
