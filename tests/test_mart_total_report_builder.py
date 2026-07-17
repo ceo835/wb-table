@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from src.db.mart_total_report_builder import (
     MART_TOTAL_REPORT_CONFLICT_COLUMNS,
     _build_mart_total_report_v2_row,
+    _stock_rows_by_date_nm,
     aggregate_ad_cost_stats,
     aggregate_ad_campaign_stats,
     aggregate_entry_point_stats,
@@ -22,6 +23,24 @@ from src.db.mart_total_report_builder import (
 
 def test_mart_total_report_conflict_columns_match_grain():
     assert MART_TOTAL_REPORT_CONFLICT_COLUMNS == ("report_date", "nm_id")
+
+
+def test_stock_rows_by_date_nm_keeps_same_day_snapshot() -> None:
+    rows = [
+        SimpleNamespace(snapshot_date=date(2026, 6, 1), nm_id=197330807, stock_total_qty=Decimal("10"), loaded_at=datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)),
+        SimpleNamespace(snapshot_date=date(2026, 6, 2), nm_id=197330807, stock_total_qty=Decimal("30"), loaded_at=datetime(2026, 6, 2, 10, 0, tzinfo=timezone.utc)),
+    ]
+    indexed = _stock_rows_by_date_nm(rows)
+    assert indexed[(date(2026, 6, 1), 197330807)].stock_total_qty == Decimal("10")
+    assert indexed[(date(2026, 6, 2), 197330807)].stock_total_qty == Decimal("30")
+
+
+def test_stock_rows_by_date_nm_does_not_create_future_fallback_for_missing_day() -> None:
+    rows = [
+        SimpleNamespace(snapshot_date=date(2026, 6, 2), nm_id=197330807, stock_total_qty=Decimal("30"), loaded_at=datetime(2026, 6, 2, 10, 0, tzinfo=timezone.utc)),
+    ]
+    indexed = _stock_rows_by_date_nm(rows)
+    assert (date(2026, 6, 1), 197330807) not in indexed
 
 
 def test_aggregate_ad_campaign_stats_splits_conversion_buckets():
@@ -463,3 +482,6 @@ def test_build_mart_ad_metrics_keeps_formula_fields_null_when_sources_missing():
     assert metrics["organic_cart_share_calc"] is None
     assert metrics["ad_cost_per_all_carts_calc"] is None
     assert metrics["organic_cart_share_status"] == "MISSING_SOURCE"
+
+
+

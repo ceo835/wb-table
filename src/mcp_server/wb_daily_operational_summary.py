@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -21,6 +21,7 @@ from src.mcp_server.schemas import (
     WbDailyOperationalSummaryResponse,
     WbDailyOperationalTableResponse,
 )
+from src.mcp_server.wb_daily_operational_summary_context_sql import build_extended_context
 from src.mcp_server.wb_daily_operational_summary_rules import WbDailyOperationalSummaryRules, get_default_rules
 from src.mcp_server.wb_daily_operational_summary_sql import (
     fetch_assortment_changes,
@@ -125,6 +126,63 @@ def _row_by_key(rows: Iterable[dict[str, Any]], key: str) -> dict[Any, dict[str,
     return result
 
 
+
+def _limited_distinct_ints(values: Iterable[Any], limit: int) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        result.append(parsed)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def collect_context_candidate_nm_ids(
+    assortment_rows: list[dict[str, Any]],
+    stock_rows: list[dict[str, Any]],
+    search_rows: list[dict[str, Any]],
+    *,
+    top_n: int,
+) -> list[int]:
+    ranked_assortment = sorted(assortment_rows, key=lambda row: _to_decimal(row.get("order_sum_delta")) or Decimal("0"), reverse=True)
+    weakest_assortment = sorted(assortment_rows, key=lambda row: _to_decimal(row.get("order_sum_delta")) or Decimal("0"))
+    values: list[Any] = []
+    values.extend(row.get("nm_id") for row in ranked_assortment[:top_n])
+    values.extend(row.get("nm_id") for row in weakest_assortment[:top_n])
+    values.extend(row.get("nm_id") for row in stock_rows[:top_n])
+    values.extend(row.get("nm_id") for row in search_rows[:top_n])
+    return _limited_distinct_ints(values, top_n * 4)
+
+
+def append_context_summaries(
+    sections: list[WbDailyOperationalSectionResponse],
+    *,
+    price_context: list[dict[str, Any]],
+    logistics_context: list[dict[str, Any]],
+) -> None:
+    overview = next((section for section in sections if section.key == "overview"), None)
+    sales = next((section for section in sections if section.key == "sales"), None)
+    if overview is not None:
+        biggest_price = max(price_context, key=lambda row: abs(_to_decimal(row.get("price_delta_day")) or Decimal("0")), default=None)
+        if biggest_price and _to_decimal(biggest_price.get("price_delta_day")) not in (None, Decimal("0")):
+            overview.summary.append(
+                f"Есть подтвержденное изменение клиентской цены по артикулу {biggest_price.get('nm_id')}: {_format_currency(biggest_price.get('price_delta_day'))} к предыдущему дню."
+            )
+    if sales is not None:
+        biggest_logistics = max(logistics_context, key=lambda row: abs(_to_decimal(row.get("total_logistics_delta_day")) or Decimal("0")), default=None)
+        if biggest_logistics and _to_decimal(biggest_logistics.get("total_logistics_delta_day")) not in (None, Decimal("0")):
+            sales.summary.append(
+                f"Логистические расходы по finance-слою изменились по артикулу {biggest_logistics.get('nm_id')} на {_format_currency(biggest_logistics.get('total_logistics_delta_day'))}; блок остается PARTIAL по дате rr_dt."
+            )
+
+
 def get_current_moscow_date() -> date:
     return datetime.now(MOSCOW_TZ).date()
 
@@ -187,6 +245,7 @@ def _metric_row(
     trend_previous_value: Any,
     *,
     use_percentage_points: bool = False,
+    note: str | None = None,
 ) -> WbDailyOperationalMetricRowResponse:
     return WbDailyOperationalMetricRowResponse(
         metric=label,
@@ -197,6 +256,7 @@ def _metric_row(
         delta_pp=_safe_pp_delta(current_value, previous_value) if use_percentage_points else None,
         trend_7d_pct=None if use_percentage_points else _safe_pct_delta(trend_current_value, trend_previous_value),
         trend_7d_pp=_safe_pp_delta(trend_current_value, trend_previous_value) if use_percentage_points else None,
+        note=note,
     )
 
 
@@ -278,8 +338,9 @@ def build_funnel_section(current: dict[str, Any], previous: dict[str, Any], curr
             _metric_row("Конверсия в заказ", current.get("cart_to_order_conversion"), previous.get("cart_to_order_conversion"), current_7d.get("cart_to_order_conversion"), previous_7d.get("cart_to_order_conversion"), use_percentage_points=True),
             _metric_row("Средний чек", current.get("avg_check"), previous.get("avg_check"), current_7d.get("avg_check"), previous_7d.get("avg_check")),
             _metric_row("Сумма заказов", current.get("order_sum"), previous.get("order_sum"), current_7d.get("order_sum"), previous_7d.get("order_sum")),
-            _metric_row("Выкупы", current.get("buyout_count"), previous.get("buyout_count"), current_7d.get("buyout_count"), previous_7d.get("buyout_count")),
+            _metric_row("Выкупы", current.get("buyout_count"), previous.get("buyout_count"), current_7d.get("buyout_count"), previous_7d.get("buyout_count"), note="PARTIAL buyout metric; do not use for causal reasoning."),
         ],
+        notes=["Выкупы пока считаются partial-метрикой: источник и дата показателя еще не подтверждены для причинных выводов."],
     )
 
 
@@ -370,10 +431,11 @@ def build_sales_section(current: dict[str, Any], previous: dict[str, Any], curre
         metrics=[
             _metric_row("Оборот заказов", current.get("order_sum"), previous.get("order_sum"), current_7d.get("order_sum"), previous_7d.get("order_sum")),
             _metric_row("Заказы", current.get("order_count"), previous.get("order_count"), current_7d.get("order_count"), previous_7d.get("order_count")),
-            _metric_row("Выкупы", current.get("buyout_count"), previous.get("buyout_count"), current_7d.get("buyout_count"), previous_7d.get("buyout_count")),
-            _metric_row("Сумма выкупов", current.get("buyout_sum"), previous.get("buyout_sum"), current_7d.get("buyout_sum"), previous_7d.get("buyout_sum")),
+            _metric_row("Выкупы", current.get("buyout_count"), previous.get("buyout_count"), current_7d.get("buyout_count"), previous_7d.get("buyout_count"), note="PARTIAL buyout metric; do not use for causal reasoning."),
+            _metric_row("Сумма выкупов", current.get("buyout_sum"), previous.get("buyout_sum"), current_7d.get("buyout_sum"), previous_7d.get("buyout_sum"), note="PARTIAL buyout metric; do not use for causal reasoning."),
             _metric_row("Средний чек", current.get("avg_check"), previous.get("avg_check"), current_7d.get("avg_check"), previous_7d.get("avg_check")),
         ],
+        notes=["Выкупы и сумма выкупов показаны как partial-метрики и не участвуют в факторных выводах первого этапа."],
     )
 
 
@@ -595,12 +657,11 @@ def build_scenario_section(highlights: WbDailyOperationalHighlightsResponse) -> 
 def build_operational_summary(session: Session, payload: WbDailyOperationalSummaryRequest, *, rules: WbDailyOperationalSummaryRules | None = None, now_date: date | None = None) -> WbDailyOperationalSummaryResponse:
     resolved_rules = rules or get_default_rules()
     started_at = perf_counter()
-    query_counter = {"count": 0}
+    query_counter = {"count": 0, "timings": []}
 
     freshness_rows = fetch_core_source_freshness(session, query_counter)
     report_date, report_date_source = resolve_report_date(payload.report_date, freshness_rows, now_date=now_date)
     window = build_report_window(report_date, report_date_source)
-    source_freshness = build_source_freshness(freshness_rows, report_date)
 
     daily_rows = fetch_mart_daily_overview(session, window.report_date, window.compare_date, query_counter)
     window_rows = fetch_mart_window_overview(session, window.trend_current_from, window.trend_current_to, window.trend_previous_from, window.trend_previous_to, query_counter)
@@ -608,6 +669,18 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
     campaign_rows = fetch_problem_campaigns(session, window.report_date, window.compare_date, query_counter)
     stock_rows = fetch_stock_risks(session, window.report_date, window.trend_current_from, query_counter)
     search_rows = fetch_search_movers(session, window.report_date, window.compare_date, query_counter)
+
+    candidate_nm_ids = collect_context_candidate_nm_ids(assortment_rows, stock_rows, search_rows, top_n=payload.top_n)
+    extended_context = build_extended_context(
+        session,
+        report_date=window.report_date,
+        compare_date=window.compare_date,
+        trend_current_from=window.trend_current_from,
+        top_n=payload.top_n,
+        nm_ids=candidate_nm_ids,
+        query_counter=query_counter,
+    )
+    source_freshness = build_source_freshness(freshness_rows + extended_context.get("additional_source_freshness", []), report_date)
 
     daily_by_date = _row_by_key(daily_rows, "report_date")
     window_by_bucket = _row_by_key(window_rows, "bucket")
@@ -633,6 +706,12 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         else:
             sections.append(section)
 
+    append_context_summaries(
+        sections,
+        price_context=extended_context.get("price_context", []),
+        logistics_context=extended_context.get("logistics_context", []),
+    )
+
     if payload.include_profit and payload.include_partial_sections:
         profit_payload = fetch_profit_overview(session, window.report_date, window.compare_date, window.trend_current_from, window.trend_current_to, window.trend_previous_from, window.trend_previous_to, query_counter)
         profit_section = build_profit_section(profit_payload, window.report_date, window.compare_date)
@@ -652,12 +731,14 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
     sections.append(build_scenario_section(highlights))
 
     execution_ms = int((perf_counter() - started_at) * 1000)
+    query_timings = sorted(query_counter.get("timings", []), key=lambda item: int(item.get("ms") or 0), reverse=True)[:10]
     diagnostics = WbDailyOperationalDiagnosticsResponse(
         included_sections=[section.key for section in sections],
         partial_sections=[section.key for section in sections if section.status in {"PARTIAL", "STALE"}],
         excluded_sections=excluded_sections,
         query_count=int(query_counter["count"]),
         execution_ms=execution_ms,
+        query_timings=query_timings,
         formula_version=FORMULA_VERSION,
     )
 
@@ -676,4 +757,12 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         sections=sections,
         highlights=highlights,
         diagnostics=diagnostics,
+        article_context=extended_context.get("article_context", []),
+        warehouse_context=extended_context.get("warehouse_context", []),
+        campaign_context=extended_context.get("campaign_context", []),
+        search_query_context=extended_context.get("search_query_context", []),
+        entry_point_context=extended_context.get("entry_point_context", []),
+        price_context=extended_context.get("price_context", []),
+        logistics_context=extended_context.get("logistics_context", []),
+        data_gaps=extended_context.get("data_gaps", []),
     )

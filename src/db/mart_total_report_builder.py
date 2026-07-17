@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -626,13 +626,16 @@ def delete_mart_total_report_rows_for_inactive_products(
     return result.rowcount or 0
 
 
-def _latest_stock_rows_by_nm(rows: Sequence[FactStockSnapshot]) -> dict[int, FactStockSnapshot]:
-    latest: dict[int, FactStockSnapshot] = {}
+def _stock_rows_by_date_nm(rows: Sequence[FactStockSnapshot]) -> dict[tuple[date, int], FactStockSnapshot]:
+    indexed: dict[tuple[date, int], FactStockSnapshot] = {}
     for row in rows:
-        current = latest.get(row.nm_id)
-        if current is None or row.snapshot_date > current.snapshot_date:
-            latest[row.nm_id] = row
-    return latest
+        key = (row.snapshot_date, row.nm_id)
+        current = indexed.get(key)
+        current_loaded_at = getattr(current, "loaded_at", None) if current is not None else None
+        row_loaded_at = getattr(row, "loaded_at", None)
+        if current is None or (row_loaded_at is not None and (current_loaded_at is None or row_loaded_at >= current_loaded_at)):
+            indexed[key] = row
+    return indexed
 
 
 def _first_nonempty(*values: Any) -> Any:
@@ -745,9 +748,9 @@ def _build_mart_total_report_v1(session: Session, start: date, end: date) -> dic
     localization_rows = session.execute(
         select(FactLocalizationRegionDay).where(FactLocalizationRegionDay.period_end >= start, FactLocalizationRegionDay.period_end <= end)
     ).scalars().all()
-    stock_rows = session.execute(select(FactStockSnapshot)).scalars().all()
+    stock_rows = session.execute(select(FactStockSnapshot).where(FactStockSnapshot.snapshot_date >= start, FactStockSnapshot.snapshot_date <= end)).scalars().all()
 
-    latest_stock_by_nm = _latest_stock_rows_by_nm(stock_rows)
+    stock_rows_by_date_nm = _stock_rows_by_date_nm(stock_rows)
     ad_cost_index = aggregate_ad_cost_stats(ad_cost_rows)
     ad_campaign_index = aggregate_ad_campaign_stats(ad_campaign_rows)
     search_index = aggregate_search_stats(search_rows)
@@ -755,7 +758,7 @@ def _build_mart_total_report_v1(session: Session, start: date, end: date) -> dic
 
     mart_rows: list[dict[str, Any]] = []
     for funnel_row in funnel_rows:
-        stock_row = latest_stock_by_nm.get(funnel_row.nm_id)
+        stock_row = stock_rows_by_date_nm.get((funnel_row.date, funnel_row.nm_id))
         row = build_mart_total_report_row(
             funnel_row=funnel_row,
             stock_row=stock_row,
@@ -807,10 +810,10 @@ def _build_mart_total_report_v2(session: Session, start: date, end: date) -> dic
     entry_point_rows = session.execute(
         select(FactEntryPointDay).where(FactEntryPointDay.date >= start, FactEntryPointDay.date <= end)
     ).scalars().all()
-    stock_rows = session.execute(select(FactStockSnapshot)).scalars().all()
+    stock_rows = session.execute(select(FactStockSnapshot).where(FactStockSnapshot.snapshot_date >= start, FactStockSnapshot.snapshot_date <= end)).scalars().all()
 
     funnel_index = {(row.date, row.nm_id): row for row in funnel_rows}
-    latest_stock_by_nm = _latest_stock_rows_by_nm(stock_rows)
+    stock_rows_by_date_nm = _stock_rows_by_date_nm(stock_rows)
     entry_point_index = aggregate_entry_point_stats(entry_point_rows)
     ad_cost_index = aggregate_ad_cost_stats(ad_cost_rows)
     ad_campaign_index = aggregate_ad_campaign_stats(ad_campaign_rows)
@@ -834,7 +837,7 @@ def _build_mart_total_report_v2(session: Session, start: date, end: date) -> dic
     for base_row in base_rows:
         report_date = base_row["report_date"]
         nm_id = base_row["nm_id"]
-        stock_row = latest_stock_by_nm.get(nm_id)
+        stock_row = stock_rows_by_date_nm.get((report_date, nm_id))
         row = _build_mart_total_report_v2_row(
             base_row=base_row,
             stock_row=stock_row,
@@ -972,3 +975,5 @@ def _build_mart_total_report_v2(session: Session, start: date, end: date) -> dic
         "rows_with_associated_ad_atbs": sum(1 for row in mart_rows if row.get("associated_ad_atbs") not in (None, Decimal("0"), 0)),
         "formula_samples": formula_samples,
     }
+
+

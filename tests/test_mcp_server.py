@@ -1029,6 +1029,14 @@ def test_mcp_tools_call_wb_daily_operational_summary_returns_structured_content(
     assert structured["requested_options"]["mode"] == "full"
     assert structured["diagnostics"]["query_count"] == 9
     assert structured["diagnostics"]["excluded_sections"][0]["key"] == "profit"
+    assert structured["article_context"] == []
+    assert structured["warehouse_context"] == []
+    assert structured["campaign_context"] == []
+    assert structured["search_query_context"] == []
+    assert structured["entry_point_context"] == []
+    assert structured["price_context"] == []
+    assert structured["logistics_context"] == []
+    assert structured["data_gaps"] == []
     section_keys = [section["key"] for section in structured["sections"]]
     assert "overview" in section_keys
     assert "ads" in section_keys

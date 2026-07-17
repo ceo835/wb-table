@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
@@ -285,6 +285,7 @@ class WbDailyOperationalDiagnosticsResponse(ApiModel):
     excluded_sections: list[WbDailyOperationalExcludedSectionResponse] = Field(default_factory=list)
     query_count: int = 0
     execution_ms: int | None = None
+    query_timings: list[dict[str, Any]] = Field(default_factory=list)
     formula_version: str = "v1"
 
 
@@ -296,9 +297,18 @@ class WbDailyOperationalSummaryResponse(ApiModel):
     sections: list[WbDailyOperationalSectionResponse]
     highlights: WbDailyOperationalHighlightsResponse
     diagnostics: WbDailyOperationalDiagnosticsResponse
+    article_context: list[dict[str, Any]] = Field(default_factory=list)
+    warehouse_context: list[dict[str, Any]] = Field(default_factory=list)
+    campaign_context: list[dict[str, Any]] = Field(default_factory=list)
+    search_query_context: list[dict[str, Any]] = Field(default_factory=list)
+    entry_point_context: list[dict[str, Any]] = Field(default_factory=list)
+    price_context: list[dict[str, Any]] = Field(default_factory=list)
+    logistics_context: list[dict[str, Any]] = Field(default_factory=list)
+    data_gaps: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ErrorResponse(ApiModel):
     detail: str
     code: str | None = None
     extra: dict[str, Any] | None = Field(default=None)
+
