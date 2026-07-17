@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
-from src.mcp_server.app import create_app
+from src.mcp_server.app import (
+    WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT,
+    _build_tool_result_payload,
+    create_app,
+)
 from src.mcp_server.schemas import (
     ActiveProductsItemResponse,
     ActiveProductsRequest,
@@ -496,6 +501,112 @@ def build_test_client(*, mcp_public_mode: bool = False, repository=None) -> Test
     )
     app = create_app(repository=repository or FakeRepository(), settings=settings)
     return TestClient(app)
+
+
+def _build_transport_summary_response(*, diagnostic: bool) -> WbDailyOperationalSummaryResponse:
+    base = FakeRepository().get_wb_daily_operational_summary(
+        WbDailyOperationalSummaryRequest(mode="full", top_n=5, diagnostic=diagnostic)
+    )
+    signal = {
+        "kind": "large_turnover_loss",
+        "signal_key": "large_turnover_loss",
+        "direction": "negative",
+        "entity_type": "product",
+        "entity_id": 1,
+        "nm_id": 1,
+        "metric": "order_sum",
+        "title": "??????? ?????? ???????",
+        "summary": "?????? ??: ??????? 1 ??? ?????? ???????.",
+        "check": {"text": "???????????? ????????: ????????? ?????? ???????? 1."},
+        "impact_rub": Decimal("-1234"),
+        "cause_status": "needs_check",
+        "supporting_signals": [
+            {
+                "kind": "traffic",
+                "summary": "?????????????: ?????? ???????? 1 ????????.",
+                "check": {"text": "????????: ????????? ?????."},
+                "recommended_check": "????????? ????? ???????? 1.",
+                "evidence": ["clicks_down"],
+            }
+        ],
+        "supported_factors": ["traffic"],
+        "evidence": ["clicks_down", "orders_down"],
+        "missing_evidence": ["confirmed_primary_cause"],
+        "recommended_check": "????????? ????? ? ??????? ???????? 1.",
+        "recommended_checks": ["????????? ?????", "????????? ???????"],
+        "confidence": "medium",
+    }
+    anomaly = {
+        "kind": "orders_without_carts",
+        "nm_id": 1,
+        "severity": "high",
+        "summary": "?????????????: ? ???????? ???? ?????? ??? ??????? ????????.",
+    }
+    return base.model_copy(update={
+        "article_analysis": [
+            {
+                "nm_id": 1,
+                "sales": {"baseline": {"delta_vs_previous_day": Decimal("-1234")}},
+                "traffic": {"card_clicks": Decimal("50")},
+                "data_quality": {"entry_partial": False},
+            }
+        ],
+        "business_priorities": [signal],
+        "ranked_signals": [signal],
+        "data_anomalies": [anomaly],
+        "analysis_summary": {
+            "section_narratives": {
+                "overview": {
+                    "comment": "?????? ??: ?????? ??? ?????? ???????.",
+                    "action": "????????: ????????? ?????? ? ???????.",
+                }
+            },
+            "priority_narratives": [
+                {
+                    "nm_id": 1,
+                    "text": "???????????? ????????: ??????? 1 ?????? ??????.",
+                    "action": "????????: ????????? ???????? ? ???????.",
+                }
+            ],
+            "scenario_narrative": "?????????????: ??????? ?????? ???????? ??????? 1.",
+            "action_items": [{"text": "????????? ???????? 101."}],
+            "priority_checks": [{"text": "????????? ???????? 101."}],
+            "user_worse": ["??????? 1 ?????? ??????."],
+            "user_better": ["??????? 2 ??????."],
+            "top_anomalies": [anomaly],
+            "data_quality_checks": ["????????? anomaly orders_without_carts."],
+        },
+    })
+
+
+def _collect_keys(payload: Any) -> set[str]:
+    if isinstance(payload, dict):
+        keys = set(payload.keys())
+        for value in payload.values():
+            keys.update(_collect_keys(value))
+        return keys
+    if isinstance(payload, list):
+        keys: set[str] = set()
+        for item in payload:
+            keys.update(_collect_keys(item))
+        return keys
+    return set()
+
+
+def _collect_strings(payload: Any) -> list[str]:
+    if isinstance(payload, str):
+        return [payload]
+    if isinstance(payload, dict):
+        values: list[str] = []
+        for item in payload.values():
+            values.extend(_collect_strings(item))
+        return values
+    if isinstance(payload, list):
+        values: list[str] = []
+        for item in payload:
+            values.extend(_collect_strings(item))
+        return values
+    return []
 
 
 def test_health_responds() -> None:
@@ -1055,6 +1166,69 @@ def test_mcp_tools_call_wb_daily_operational_summary_returns_structured_content(
     )
     assert structured["legacy_markdown"] == expected
     assert structured["legacy_markdown"] != body_text
+
+def test_wb_daily_operational_summary_normal_payload_removes_server_generated_narratives() -> None:
+    response = _build_transport_summary_response(diagnostic=False)
+    payload = _build_tool_result_payload(response)
+    structured = payload["structuredContent"]
+
+    assert payload["content"][0]["text"] == WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    assert "legacy_markdown" not in structured
+    forbidden_keys = {
+        "analysis_summary",
+        "check",
+        "highlights",
+        "legacy_markdown",
+        "note",
+        "notes",
+        "recommended_check",
+        "recommended_checks",
+        "signals",
+        "summary",
+    }
+    assert forbidden_keys.isdisjoint(_collect_keys(structured))
+
+    strings = _collect_strings(structured)
+    for marker_text in (
+        "\u041c\u043d\u0435\u043d\u0438\u0435 \u0418\u0418",
+        "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435",
+        "\u0418\u043d\u0442\u0435\u0440\u043f\u0440\u0435\u0442\u0430\u0446\u0438\u044f",
+        "\u041f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442\u043d\u0430\u044f \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430",
+        "<!-- FINAL_USER_REPORT",
+    ):
+        assert all(marker_text not in item for item in strings)
+
+
+def test_wb_daily_operational_summary_diagnostic_payload_keeps_legacy_markdown_and_narratives() -> None:
+    response = _build_transport_summary_response(diagnostic=True)
+    payload = _build_tool_result_payload(response)
+    structured = payload["structuredContent"]
+
+    assert payload["content"][0]["text"] == WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    assert "legacy_markdown" in structured
+    assert "analysis_summary" in structured
+    assert "highlights" in structured
+    assert "summary" in structured["sections"][0]
+    assert any(section.get("signals") for section in structured["sections"])
+    assert structured["business_priorities"][0]["summary"]
+    assert structured["ranked_signals"][0]["check"]["text"]
+
+
+def test_wb_daily_operational_summary_normal_payload_preserves_numeric_and_rich_analysis_fields() -> None:
+    response = _build_transport_summary_response(diagnostic=False)
+    original = response.model_dump(mode="json")
+    structured = _build_tool_result_payload(response)["structuredContent"]
+
+    assert structured["sections"][0]["metrics"][0]["value"] == original["sections"][0]["metrics"][0]["value"]
+    assert structured["sections"][0]["metrics"][0]["delta_pct"] == original["sections"][0]["metrics"][0]["delta_pct"]
+    assert structured["article_analysis"] == original["article_analysis"]
+    assert structured["business_priorities"][0]["impact_rub"] == original["business_priorities"][0]["impact_rub"]
+    assert structured["business_priorities"][0]["supported_factors"] == original["business_priorities"][0]["supported_factors"]
+    assert structured["business_priorities"][0]["evidence"] == original["business_priorities"][0]["evidence"]
+    assert structured["business_priorities"][0]["missing_evidence"] == original["business_priorities"][0]["missing_evidence"]
+    assert structured["ranked_signals"][0]["supporting_signals"][0]["kind"] == original["ranked_signals"][0]["supporting_signals"][0]["kind"]
+    assert "summary" not in structured["ranked_signals"][0]["supporting_signals"][0]
+
 
 def test_resolve_report_date_chooses_last_full_day() -> None:
     freshness = [

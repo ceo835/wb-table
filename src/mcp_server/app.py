@@ -45,6 +45,64 @@ WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT = (
     "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0435\u0440\u0435\u0434\u0430\u043d\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435. \u041d\u0435 \u0443\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0439 \u043f\u0440\u0438\u0447\u0438\u043d\u043d\u043e\u0441\u0442\u044c \u0431\u0435\u0437 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f.\n"
     "\u041d\u0435 \u043a\u043e\u043f\u0438\u0440\u0443\u0439 server-generated narrative \u043c\u0435\u0445\u0430\u043d\u0438\u0447\u0435\u0441\u043a\u0438."
 )
+WB_DAILY_OPERATIONAL_SUMMARY_NORMAL_EXCLUDED_KEYS = frozenset({
+    "analysis_summary",
+    "check",
+    "highlights",
+    "legacy_markdown",
+    "note",
+    "notes",
+    "recommended_check",
+    "recommended_checks",
+    "signals",
+    "summary",
+})
+
+
+def _is_wb_daily_operational_summary_diagnostic(tool_result: WbDailyOperationalSummaryResponse) -> bool:
+    return bool((tool_result.requested_options or {}).get("diagnostic"))
+
+
+def _prune_wb_daily_operational_signal_payload(payload: Any) -> Any:
+    if isinstance(payload, list):
+        return [_prune_wb_daily_operational_signal_payload(item) for item in payload]
+    if isinstance(payload, dict):
+        result: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key in WB_DAILY_OPERATIONAL_SUMMARY_NORMAL_EXCLUDED_KEYS:
+                continue
+            result[key] = _prune_wb_daily_operational_signal_payload(value)
+        return result
+    return payload
+
+
+def _build_wb_daily_operational_summary_structured_content(
+    tool_result: WbDailyOperationalSummaryResponse,
+) -> dict[str, Any]:
+    structured = tool_result.model_dump(mode="json")
+    if _is_wb_daily_operational_summary_diagnostic(tool_result):
+        structured["legacy_markdown"] = render_wb_daily_operational_summary_markdown(tool_result)
+        return structured
+
+    structured.pop("analysis_summary", None)
+    structured.pop("highlights", None)
+    for section in structured.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        section.pop("summary", None)
+        section.pop("notes", None)
+        section.pop("signals", None)
+        for metric in section.get("metrics") or []:
+            if isinstance(metric, dict):
+                metric.pop("note", None)
+        for table in section.get("tables") or []:
+            if isinstance(table, dict):
+                table.pop("note", None)
+
+    for key in ("business_priorities", "ranked_signals", "data_anomalies"):
+        if key in structured:
+            structured[key] = _prune_wb_daily_operational_signal_payload(structured.get(key) or [])
+    return structured
 
 
 def _tool_schema(model) -> dict:
@@ -455,15 +513,16 @@ def _format_tool_content(tool_result) -> str:
 
 
 def _build_tool_result_payload(tool_result) -> dict:
-    structured = tool_result.model_dump(mode="json")
     try:
         if isinstance(tool_result, WbDailyOperationalSummaryResponse):
-            structured["legacy_markdown"] = render_wb_daily_operational_summary_markdown(tool_result)
+            structured = _build_wb_daily_operational_summary_structured_content(tool_result)
             text_content = WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
         else:
+            structured = tool_result.model_dump(mode="json")
             text_content = _format_tool_content(tool_result)
     except Exception:
         logger.exception("Failed to build human-readable MCP content")
+        structured = tool_result.model_dump(mode="json")
         text_content = json.dumps(structured, ensure_ascii=False)
     return {
         "content": [

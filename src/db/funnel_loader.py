@@ -5,10 +5,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.db.models import FactFunnelDay
-from src.db.session import session_scope, upsert_rows
+from src.db.session import session_scope
 from src.pipelines.mvp_real_run import MvpRealRun, TEST_NM_IDS, _first_int, _first_text, _sum_numbers, _to_date_text
 
 
@@ -125,6 +126,16 @@ def build_fact_funnel_day_db_row(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_fact_funnel_day_rows(existing: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if key in FACT_FUNNEL_DAY_CONFLICT_COLUMNS:
+            continue
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
 def prepare_fact_funnel_day_upsert_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     prepared: dict[tuple[date, int], dict[str, Any]] = {}
     for row in rows:
@@ -132,8 +143,30 @@ def prepare_fact_funnel_day_upsert_rows(rows: Sequence[Mapping[str, Any]]) -> li
         key = (mapped.get("date"), mapped.get("nm_id"))
         if key[0] is None or key[1] is None:
             continue
-        prepared[key] = mapped
+        existing = prepared.get(key)
+        prepared[key] = _merge_fact_funnel_day_rows(existing, mapped) if existing else mapped
     return list(prepared.values())
+
+
+def build_fact_funnel_day_upsert_statement(rows: Sequence[dict[str, Any]]):
+    if not rows:
+        raise ValueError("rows cannot be empty for fact_funnel_day upsert")
+
+    table = FactFunnelDay.__table__
+    stmt = pg_insert(table).values(list(rows))
+    update_columns = [
+        column.name
+        for column in table.columns
+        if column.name not in set(FACT_FUNNEL_DAY_CONFLICT_COLUMNS) and not column.primary_key
+    ]
+    set_map = {
+        column_name: func.coalesce(getattr(stmt.excluded, column_name), table.c[column_name])
+        for column_name in update_columns
+    }
+    return stmt.on_conflict_do_update(
+        index_elements=[table.c[column_name] for column_name in FACT_FUNNEL_DAY_CONFLICT_COLUMNS],
+        set_=set_map,
+    )
 
 
 def collect_funnel_rows(
@@ -200,13 +233,11 @@ def collect_funnel_rows(
 
 def upsert_fact_funnel_day(session: Session, rows: Sequence[Mapping[str, Any]]) -> int:
     prepared_rows = prepare_fact_funnel_day_upsert_rows(rows)
-    upsert_rows(
-        session=session,
-        model=FactFunnelDay,
-        rows=prepared_rows,
-        conflict_columns=FACT_FUNNEL_DAY_CONFLICT_COLUMNS,
-    )
-    return len(prepared_rows)
+    if not prepared_rows:
+        return 0
+    stmt = build_fact_funnel_day_upsert_statement(prepared_rows)
+    result = session.execute(stmt)
+    return result.rowcount or 0
 
 
 def count_fact_funnel_day_rows(session: Session, start: date, end: date, nm_ids: Sequence[int] | None = None) -> int:
@@ -278,6 +309,65 @@ def count_null_ctr_rows(session: Session, start: date, end: date, nm_ids: Sequen
     return int(session.execute(stmt).scalar_one())
 
 
+def count_null_impressions_rows(session: Session, start: date, end: date, nm_ids: Sequence[int] | None = None) -> int:
+    resolved_nm_ids = _resolve_nm_ids(nm_ids)
+    stmt = (
+        select(func.count())
+        .select_from(FactFunnelDay)
+        .where(
+            FactFunnelDay.date >= start,
+            FactFunnelDay.date <= end,
+            FactFunnelDay.nm_id.in_(list(resolved_nm_ids)),
+            FactFunnelDay.impressions.is_(None),
+        )
+    )
+    return int(session.execute(stmt).scalar_one())
+
+
+def count_clicks_without_impressions_rows(
+    session: Session,
+    start: date,
+    end: date,
+    nm_ids: Sequence[int] | None = None,
+) -> int:
+    resolved_nm_ids = _resolve_nm_ids(nm_ids)
+    stmt = (
+        select(func.count())
+        .select_from(FactFunnelDay)
+        .where(
+            FactFunnelDay.date >= start,
+            FactFunnelDay.date <= end,
+            FactFunnelDay.nm_id.in_(list(resolved_nm_ids)),
+            FactFunnelDay.impressions.is_(None),
+            FactFunnelDay.card_clicks.is_not(None),
+            FactFunnelDay.card_clicks > Decimal("0"),
+        )
+    )
+    return int(session.execute(stmt).scalar_one())
+
+
+def count_clicks_greater_than_impressions_rows(
+    session: Session,
+    start: date,
+    end: date,
+    nm_ids: Sequence[int] | None = None,
+) -> int:
+    resolved_nm_ids = _resolve_nm_ids(nm_ids)
+    stmt = (
+        select(func.count())
+        .select_from(FactFunnelDay)
+        .where(
+            FactFunnelDay.date >= start,
+            FactFunnelDay.date <= end,
+            FactFunnelDay.nm_id.in_(list(resolved_nm_ids)),
+            FactFunnelDay.card_clicks.is_not(None),
+            FactFunnelDay.impressions.is_not(None),
+            FactFunnelDay.card_clicks > FactFunnelDay.impressions,
+        )
+    )
+    return int(session.execute(stmt).scalar_one())
+
+
 def load_funnel_to_db(start: date, end: date, nm_ids: Sequence[int] | None = None) -> dict[str, Any]:
     resolved_nm_ids = _resolve_nm_ids(nm_ids)
     runner = MvpRealRun()
@@ -292,6 +382,22 @@ def load_funnel_to_db(start: date, end: date, nm_ids: Sequence[int] | None = Non
         fallback_ctr_rows = count_suspicious_fallback_ctr_rows(session, start, end, resolved_nm_ids)
         null_card_clicks_rows = count_null_card_clicks_rows(session, start, end, resolved_nm_ids)
         null_ctr_rows = count_null_ctr_rows(session, start, end, resolved_nm_ids)
+        null_impressions_rows = count_null_impressions_rows(session, start, end, resolved_nm_ids)
+        clicks_without_impressions_rows = count_clicks_without_impressions_rows(
+            session,
+            start,
+            end,
+            resolved_nm_ids,
+        )
+        clicks_gt_impressions_rows = count_clicks_greater_than_impressions_rows(
+            session,
+            start,
+            end,
+            resolved_nm_ids,
+        )
+
+    impressions_rows_filled = max(total_rows - null_impressions_rows, 0)
+    impressions_coverage_pct = round(impressions_rows_filled / total_rows * 100, 2) if total_rows else None
 
     return {
         "date_from": start.isoformat(),
@@ -304,6 +410,11 @@ def load_funnel_to_db(start: date, end: date, nm_ids: Sequence[int] | None = Non
         "suspicious_fallback_ctr_rows": fallback_ctr_rows,
         "null_card_clicks_rows": null_card_clicks_rows,
         "null_ctr_rows": null_ctr_rows,
+        "null_impressions_rows": null_impressions_rows,
+        "clicks_without_impressions_rows": clicks_without_impressions_rows,
+        "clicks_gt_impressions_rows": clicks_gt_impressions_rows,
+        "impressions_rows_filled": impressions_rows_filled,
+        "impressions_coverage_pct": impressions_coverage_pct,
         "history_status": metadata["history_status"],
         "products_status": metadata["products_status"],
     }
