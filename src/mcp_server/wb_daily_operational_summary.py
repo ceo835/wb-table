@@ -23,6 +23,7 @@ from src.mcp_server.schemas import (
 )
 from src.mcp_server.wb_daily_operational_summary_analysis import build_highlights_from_analysis, build_internal_analysis
 from src.mcp_server.wb_daily_operational_summary_context_sql import build_extended_context
+from src.mcp_server.wb_daily_operational_summary_format import render_wb_daily_operational_summary_markdown
 from src.mcp_server.wb_daily_operational_summary_rules import WbDailyOperationalSummaryRules, get_default_rules
 from src.mcp_server.wb_daily_operational_summary_sql import (
     fetch_assortment_changes,
@@ -127,6 +128,14 @@ def _row_by_key(rows: Iterable[dict[str, Any]], key: str) -> dict[Any, dict[str,
     return result
 
 
+def _stage_elapsed_ms(started_at: float) -> int:
+    return int((perf_counter() - started_at) * 1000)
+
+
+def _query_ms(query_counter: dict[str, Any], *query_names: str) -> int:
+    names = set(query_names)
+    return sum(int(item.get("ms") or 0) for item in query_counter.get("timings", []) if item.get("query") in names)
+
 
 def _limited_distinct_ints(values: Iterable[Any], limit: int) -> list[int]:
     result: list[int] = []
@@ -182,6 +191,28 @@ def append_context_summaries(
             sales.summary.append(
                 f"Логистические расходы по finance-слою изменились по артикулу {biggest_logistics.get('nm_id')} на {_format_currency(biggest_logistics.get('total_logistics_delta_day'))}; блок остается PARTIAL по дате rr_dt."
             )
+
+
+def append_analysis_narratives(
+    sections: list[WbDailyOperationalSectionResponse],
+    *,
+    analysis_summary: dict[str, Any],
+) -> None:
+    section_narratives = analysis_summary.get("section_narratives") or {}
+    for section in sections:
+        payload = section_narratives.get(section.key)
+        if not isinstance(payload, dict):
+            continue
+        comment = str(payload.get("comment") or "").strip()
+        action = str(payload.get("action") or "").strip()
+        if comment:
+            line = f"\u041c\u043d\u0435\u043d\u0438\u0435 \u0418\u0418: {comment}"
+            if line not in section.summary:
+                section.summary.append(line)
+        if action:
+            line = f"\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435: {action}"
+            if line not in section.summary:
+                section.summary.append(line)
 
 
 def get_current_moscow_date() -> date:
@@ -443,6 +474,7 @@ def build_sales_section(current: dict[str, Any], previous: dict[str, Any], curre
 
 def build_stock_section(stock_rows: list[dict[str, Any]], top_n: int, rules: WbDailyOperationalSummaryRules) -> WbDailyOperationalSectionResponse | None:
     risk_rows: list[dict[str, Any]] = []
+    risk_order = {"Нулевой остаток": 0, "Низкий запас": 1, "Избыточный запас": 2}
     for row in stock_rows:
         stock_qty = _to_decimal(row.get("stock_qty")) or Decimal("0")
         avg_orders = _to_decimal(row.get("avg_orders_7d")) or Decimal("0")
@@ -464,18 +496,24 @@ def build_stock_section(stock_rows: list[dict[str, Any]], top_n: int, rules: WbD
                 "Склад": row.get("warehouse_name") or "н/д",
                 "Остаток": _format_decimal(stock_qty),
                 "Средние заказы 7д": _format_decimal(avg_orders, 1),
-                "Дней запаса": _format_decimal(days_of_supply, 1) if days_of_supply is not None else "н/д",
+                "Оценка запаса": (_format_decimal(days_of_supply, 0) + " дн.") if days_of_supply is not None else "н/д",
                 "Риск": risk_type,
+                "risk_order": risk_order.get(risk_type, 99),
+                "days_sort": days_of_supply if days_of_supply is not None else Decimal("999999"),
             })
-    risk_rows = sorted(risk_rows, key=lambda item: (item["Риск"], item["Дней запаса"]))[:top_n]
+    risk_rows = sorted(risk_rows, key=lambda item: (item["risk_order"], item["days_sort"], item["Артикул"]))[:top_n]
+    for item in risk_rows:
+        item.pop("risk_order", None)
+        item.pop("days_sort", None)
     if not risk_rows:
         return None
     return WbDailyOperationalSectionResponse(
         key="stock",
         title=SECTION_TITLES["stock"],
         status="OK",
-        summary=["Есть позиции с риском нулевого остатка, низкого или избыточного запаса относительно 7-дневной скорости продаж."],
-        tables=[WbDailyOperationalTableResponse(title="Складские риски", columns=["Артикул", "Артикул продавца", "Товар", "Склад", "Остаток", "Средние заказы 7д", "Дней запаса", "Риск"], rows=risk_rows)],
+        summary=["Показана оценка запаса по общей скорости артикула, а не точный warehouse-level DOS."],
+        tables=[WbDailyOperationalTableResponse(title="Складские риски", columns=["Артикул", "Артикул продавца", "Товар", "Склад", "Остаток", "Средние заказы 7д", "Оценка запаса", "Риск"], rows=risk_rows)],
+        notes=["Оценка запаса основана на общей скорости заказов артикула, а не на фактических продажах конкретного склада."],
     )
 
 
@@ -637,40 +675,75 @@ def collect_highlights(sections: list[WbDailyOperationalSectionResponse], top_n:
     return WbDailyOperationalHighlightsResponse(worse=worse[:top_n], better=better[:top_n], priority_checks=priority_checks[:top_n])
 
 
-def build_priority_section(highlights: WbDailyOperationalHighlightsResponse) -> WbDailyOperationalSectionResponse | None:
+def build_priority_section(
+    highlights: WbDailyOperationalHighlightsResponse,
+    analysis_summary: dict[str, Any] | None = None,
+) -> WbDailyOperationalSectionResponse | None:
+    priority_narratives = (analysis_summary or {}).get("priority_narratives") or []
+    if priority_narratives:
+        summary = [str(item.get("text")) for item in priority_narratives if item.get("text")][:5]
+        if summary:
+            return WbDailyOperationalSectionResponse(
+                key="priority",
+                title=SECTION_TITLES["priority"],
+                status="OK",
+                summary=summary,
+            )
     if not highlights.priority_checks:
         return None
     return WbDailyOperationalSectionResponse(key="priority", title=SECTION_TITLES["priority"], status="OK", summary=highlights.priority_checks[:3])
 
 
-def build_scenario_section(highlights: WbDailyOperationalHighlightsResponse) -> WbDailyOperationalSectionResponse:
+def build_scenario_section(
+    highlights: WbDailyOperationalHighlightsResponse,
+    analysis_summary: dict[str, Any] | None = None,
+) -> WbDailyOperationalSectionResponse:
     summary: list[str] = []
-    if highlights.better:
-        summary.append(f"Главная точка роста дня: {highlights.better[0]}")
-    if highlights.worse:
-        summary.append(f"Главный риск дня: {highlights.worse[0]}")
-    if highlights.priority_checks:
-        summary.append(f"Ближайшая проверка: {highlights.priority_checks[0]}")
+    scenario_narrative = str(((analysis_summary or {}).get("scenario_narrative") or "")).strip()
+    if scenario_narrative:
+        summary.append(scenario_narrative)
+    else:
+        if highlights.better:
+            summary.append(f"\u0413\u043b\u0430\u0432\u043d\u0430\u044f \u0442\u043e\u0447\u043a\u0430 \u0440\u043e\u0441\u0442\u0430 \u0434\u043d\u044f: {highlights.better[0]}")
+        if highlights.worse:
+            summary.append(f"\u0413\u043b\u0430\u0432\u043d\u044b\u0439 \u0440\u0438\u0441\u043a \u0434\u043d\u044f: {highlights.worse[0]}")
+        if highlights.priority_checks:
+            summary.append(f"\u0411\u043b\u0438\u0436\u0430\u0439\u0448\u0430\u044f \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430: {highlights.priority_checks[0]}")
     if not summary:
-        summary.append("Сценарный итог не сформирован: по доступным данным нет выраженных сигналов для приоритетной проверки.")
-    return WbDailyOperationalSectionResponse(key="scenario", title=SECTION_TITLES["scenario"], status="OK", summary=summary, notes=["Раздел не содержит прогноза оборота или прибыли и опирается только на подтвержденные сигналы."])
+        summary.append("\u0421\u0446\u0435\u043d\u0430\u0440\u043d\u044b\u0439 \u0438\u0442\u043e\u0433 \u043d\u0435 \u0441\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d: \u043f\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u043c \u0434\u0430\u043d\u043d\u044b\u043c \u043d\u0435\u0442 \u0432\u044b\u0440\u0430\u0436\u0435\u043d\u043d\u044b\u0445 \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432 \u0434\u043b\u044f \u043f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442\u043d\u043e\u0439 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438.")
+    return WbDailyOperationalSectionResponse(key="scenario", title=SECTION_TITLES["scenario"], status="OK", summary=summary, notes=["\u0420\u0430\u0437\u0434\u0435\u043b \u043d\u0435 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430 \u043e\u0431\u043e\u0440\u043e\u0442\u0430 \u0438\u043b\u0438 \u043f\u0440\u0438\u0431\u044b\u043b\u0438 \u0438 \u043e\u043f\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043d\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b."])
 
 
 def build_operational_summary(session: Session, payload: WbDailyOperationalSummaryRequest, *, rules: WbDailyOperationalSummaryRules | None = None, now_date: date | None = None) -> WbDailyOperationalSummaryResponse:
     resolved_rules = rules or get_default_rules()
     started_at = perf_counter()
     query_counter = {"count": 0, "timings": []}
+    stage_timings: list[dict[str, Any]] = []
 
+    stage_started = perf_counter()
     freshness_rows = fetch_core_source_freshness(session, query_counter)
+    stage_timings.append({"stage": "core_source_freshness", "ms": _stage_elapsed_ms(stage_started)})
     report_date, report_date_source = resolve_report_date(payload.report_date, freshness_rows, now_date=now_date)
     window = build_report_window(report_date, report_date_source)
 
+    stage_started = perf_counter()
     daily_rows = fetch_mart_daily_overview(session, window.report_date, window.compare_date, query_counter)
+    stage_timings.append({"stage": "mart_daily_overview", "ms": _stage_elapsed_ms(stage_started)})
+    stage_started = perf_counter()
     window_rows = fetch_mart_window_overview(session, window.trend_current_from, window.trend_current_to, window.trend_previous_from, window.trend_previous_to, query_counter)
+    stage_timings.append({"stage": "mart_window_overview", "ms": _stage_elapsed_ms(stage_started)})
+    stage_started = perf_counter()
     assortment_rows = fetch_assortment_changes(session, window.report_date, window.compare_date, query_counter)
+    stage_timings.append({"stage": "assortment_changes", "ms": _stage_elapsed_ms(stage_started)})
+    stage_started = perf_counter()
     campaign_rows = fetch_problem_campaigns(session, window.report_date, window.compare_date, query_counter)
+    stage_timings.append({"stage": "problem_campaigns", "ms": _stage_elapsed_ms(stage_started)})
+    stage_started = perf_counter()
     stock_rows = fetch_stock_risks(session, window.report_date, window.trend_current_from, query_counter)
+    stage_timings.append({"stage": "stock_risks", "ms": _stage_elapsed_ms(stage_started)})
+    stage_started = perf_counter()
     search_rows = fetch_search_movers(session, window.report_date, window.compare_date, query_counter)
+    stage_timings.append({"stage": "search_movers", "ms": _stage_elapsed_ms(stage_started)})
 
     candidate_nm_ids = collect_context_candidate_nm_ids(assortment_rows, stock_rows, search_rows, top_n=payload.top_n)
     extended_context = build_extended_context(
@@ -715,6 +788,7 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
     )
 
     combined_data_gaps = list(extended_context.get("data_gaps", []))
+    stage_started = perf_counter()
     analysis_payload = build_internal_analysis(
         report_date=window.report_date,
         daily_rows=daily_rows,
@@ -729,7 +803,9 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         rules=resolved_rules,
         top_n=payload.top_n,
     )
+    stage_timings.append({"stage": "analysis_layer", "ms": _stage_elapsed_ms(stage_started)})
     combined_data_gaps.extend(analysis_payload.get("data_gaps", []))
+    append_analysis_narratives(sections, analysis_summary=analysis_payload.get("analysis_summary", {}))
 
     if payload.include_profit and payload.include_partial_sections:
         profit_payload = fetch_profit_overview(session, window.report_date, window.compare_date, window.trend_current_from, window.trend_current_to, window.trend_previous_from, window.trend_previous_to, query_counter)
@@ -743,14 +819,23 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
 
     analysis_highlights = build_highlights_from_analysis(analysis_payload, top_n=payload.top_n)
     highlights = analysis_highlights if (analysis_highlights.worse or analysis_highlights.better or analysis_highlights.priority_checks) else collect_highlights(sections, payload.top_n)
-    priority = build_priority_section(highlights)
+    priority = build_priority_section(highlights, analysis_payload.get("analysis_summary", {}))
     if priority is None:
         excluded_sections.append(_empty_section("priority", "Нет сигналов для приоритетных проверок."))
     else:
         sections.append(priority)
-    sections.append(build_scenario_section(highlights))
+    sections.append(build_scenario_section(highlights, analysis_payload.get("analysis_summary", {})))
 
-    execution_ms = int((perf_counter() - started_at) * 1000)
+    execution_ms = _stage_elapsed_ms(started_at)
+    stage_entries = stage_timings + [
+        {"stage": "article_context", "ms": _query_ms(query_counter, "article_context")},
+        {"stage": "warehouse_context", "ms": _query_ms(query_counter, "warehouse_context")},
+        {"stage": "campaign_context", "ms": _query_ms(query_counter, "campaign_context")},
+        {"stage": "search_query_context", "ms": _query_ms(query_counter, "search_query_context")},
+        {"stage": "entry_point_context", "ms": _query_ms(query_counter, "entry_point_context", "entry_point_context_freshness")},
+        {"stage": "price_context", "ms": _query_ms(query_counter, "price_context_site", "price_context_seller_partial")},
+        {"stage": "logistics_context", "ms": _query_ms(query_counter, "logistics_context")},
+    ]
     query_timings = sorted(query_counter.get("timings", []), key=lambda item: int(item.get("ms") or 0), reverse=True)[:10]
     diagnostics = WbDailyOperationalDiagnosticsResponse(
         included_sections=[section.key for section in sections],
@@ -762,7 +847,7 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         formula_version=FORMULA_VERSION,
     )
 
-    return WbDailyOperationalSummaryResponse(
+    response = WbDailyOperationalSummaryResponse(
         formula_version=FORMULA_VERSION,
         report_window=window,
         requested_options={
@@ -786,10 +871,30 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         logistics_context=extended_context.get("logistics_context", []),
         data_gaps=combined_data_gaps,
         article_analysis=analysis_payload.get("article_analysis", []),
+        business_priorities=analysis_payload.get("business_priorities", analysis_payload.get("ranked_signals", [])),
         ranked_signals=analysis_payload.get("ranked_signals", []),
         data_anomalies=analysis_payload.get("data_anomalies", []),
         analysis_summary=analysis_payload.get("analysis_summary", {}),
     )
+    if payload.diagnostic:
+        stage_started = perf_counter()
+        render_wb_daily_operational_summary_markdown(response)
+        markdown_ms = _stage_elapsed_ms(stage_started)
+        stage_started = perf_counter()
+        response.model_dump(mode="json")
+        serialization_ms = _stage_elapsed_ms(stage_started)
+        response.diagnostics.execution_ms = _stage_elapsed_ms(started_at)
+        response.diagnostics.query_timings = (
+            stage_entries
+            + [
+                {"stage": "markdown_formatting", "ms": markdown_ms},
+                {"stage": "serialization", "ms": serialization_ms},
+                {"stage": "total", "ms": int(response.diagnostics.execution_ms or 0)},
+            ]
+            + sorted(query_counter.get("timings", []), key=lambda item: int(item.get("ms") or 0), reverse=True)
+        )
+    return response
+
 
 
 

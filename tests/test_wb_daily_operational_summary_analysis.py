@@ -411,6 +411,8 @@ def test_markdown_omits_internal_score_and_confidence() -> None:
     assert "confidence" not in markdown.lower()
     assert "score" not in markdown.lower()
     assert "severity" not in markdown.lower()
+    assert "cause_status" not in markdown.lower()
+    assert "\u0441 \u0432\u044b\u0441\u043e\u043a\u043e\u0439 \u0443\u0432\u0435\u0440\u0435\u043d\u043d\u043e\u0441\u0442\u044c\u044e" not in markdown.lower()
 
 
 def test_response_contract_keeps_old_and_new_fields() -> None:
@@ -803,3 +805,134 @@ def test_merge_business_priorities_keeps_different_entity_types_separate() -> No
     ])
 
     assert len(merged) == 2
+
+
+def test_merge_business_priorities_keeps_primary_signal_and_recommended_checks() -> None:
+    merged = _merge_business_priorities([
+        {
+            "kind": "traffic",
+            "entity_type": "product",
+            "entity_id": 42,
+            "nm_id": 42,
+            "direction": "negative",
+            "impact_rub": Decimal("-30000"),
+            "cause_status": "confirmed",
+            "score": Decimal("20"),
+            "summary": "traffic summary",
+            "title": "traffic title",
+            "check": {"text": "check traffic"},
+            "supported_factors": ["traffic"],
+            "evidence": ["clicks_down"],
+            "missing_evidence": [],
+            "user_visible": True,
+        },
+        {
+            "kind": "large_turnover_loss",
+            "entity_type": "product",
+            "entity_id": 42,
+            "nm_id": 42,
+            "direction": "negative",
+            "impact_rub": Decimal("-30000"),
+            "cause_status": "unconfirmed",
+            "score": Decimal("10"),
+            "summary": "loss summary",
+            "title": "loss title",
+            "check": {"text": "check loss"},
+            "supported_factors": [],
+            "evidence": [],
+            "missing_evidence": ["confirmed_primary_cause"],
+            "user_visible": True,
+        },
+    ])
+
+    assert merged[0]["primary_signal"]["kind"] == "traffic"
+    assert merged[0]["recommended_checks"] == ["check traffic", "check loss"]
+    assert merged[0]["missing_evidence"] == ["confirmed_primary_cause"]
+
+
+def test_priority_narrative_uses_supporting_signal_language() -> None:
+    article = _article(
+        18,
+        order_sums=[100000, 100000, 100000, 100000, 100000, 100000, 100000, 70000],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 70],
+        carts=[20, 20, 20, 20, 20, 20, 20, 14],
+        orders=[10, 10, 10, 10, 10, 10, 10, 7],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 700],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([200000, 200000, 200000, 200000, 200000, 200000, 200000, 170000]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    narrative = next(item for item in analysis["analysis_summary"]["priority_narratives"] if item.get("nm_id") == 18)
+    assert "\u043f\u0440\u043e\u0441\u0430\u0434\u043a\u043e\u0439 \u0442\u0440\u0430\u0444\u0438\u043a\u0430 \u0438 \u043a\u043b\u0438\u043a\u043e\u0432" in narrative["text"]
+
+
+def test_assortment_narrative_contains_concrete_nm_id_and_impact() -> None:
+    decline = _article(
+        19,
+        order_sums=[100000, 100000, 100000, 100000, 100000, 100000, 100000, 70000],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 100],
+        carts=[20, 20, 20, 20, 20, 20, 20, 20],
+        orders=[10, 10, 10, 10, 10, 10, 10, 10],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+    )
+    growth = _article(
+        20,
+        order_sums=[60000, 60000, 60000, 60000, 60000, 60000, 60000, 85000],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 100],
+        carts=[20, 20, 20, 20, 20, 20, 20, 20],
+        orders=[10, 10, 10, 10, 10, 10, 10, 10],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([300000, 300000, 300000, 300000, 300000, 300000, 300000, 295000]),
+        article_context=[decline, growth],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    comment = analysis["analysis_summary"]["section_narratives"]["assortment"]["comment"]
+    assert "19" in comment
+    assert "20" in comment
+    assert "30 000" in comment or "25 000" in comment
+
+
+def test_highlights_priority_checks_use_short_actions_not_full_narratives() -> None:
+    highlights = build_highlights_from_analysis(
+        {
+            "analysis_summary": {
+                "user_worse": ["????? ???? ???????."],
+                "user_better": ["???? ????? ?????."],
+                "priority_narratives": [
+                    {
+                        "text": "??????? 1 ??? ?????? ??????? -10 000 ?. ???????? ?????????????? ????????.",
+                        "action": "????????? ?????? ???????? 1.",
+                    }
+                ],
+                "action_items": [{"text": "????????? ?????? ???????? 1."}],
+            }
+        },
+        top_n=5,
+    )
+
+    assert highlights.priority_checks == ["????????? ?????? ???????? 1."]
+    assert "??????? 1 ??? ?????? ???????" not in highlights.priority_checks[0]

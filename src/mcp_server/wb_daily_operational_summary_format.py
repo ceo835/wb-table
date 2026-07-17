@@ -208,6 +208,15 @@ def render_wb_daily_operational_summary_markdown(response: WbDailyOperationalSum
             lines.append("Данных для раздела недостаточно.")
         lines.append("")
 
+    quality_items = response.analysis_summary.get("top_anomalies") or response.data_anomalies
+    if quality_items:
+        lines.append("## Проверки качества данных")
+        for item in quality_items[:3]:
+            summary = item.get("summary") if isinstance(item, dict) else None
+            if summary:
+                lines.append(f"- {summary}")
+        lines.append("")
+
     if response.requested_options.get("diagnostic"):
         lines.append("## Техническая информация и свежесть источников")
         freshness_rows = [

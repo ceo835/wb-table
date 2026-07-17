@@ -527,6 +527,323 @@ def _support_phrase(signal: dict[str, Any]) -> str | None:
         "article_growth": "Рост сопровождается устойчивой положительной динамикой.",
     }.get(kind)
 
+def _ensure_sentence(text: str | None) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if value[-1] in ".!?":
+        return value
+    return f"{value}."
+
+
+def _join_sentences(*parts: str | None) -> str:
+    sentences = [_ensure_sentence(part) for part in parts if str(part or "").strip()]
+    return " ".join(sentence for sentence in sentences if sentence)
+
+
+def _dedupe_texts(texts: Iterable[str], *, limit: int | None = None) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        normalized = " ".join(str(text or "").split()).strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(str(text).strip())
+        if limit is not None and len(result) >= limit:
+            break
+    return result
+
+
+def _signal_anchor(signal: dict[str, Any]) -> str:
+    if signal.get("nm_id") is not None:
+        return f"\u0430\u0440\u0442\u0438\u043a\u0443\u043b {signal.get('nm_id')}"
+    if signal.get("advert_id") is not None:
+        return f"\u043a\u0430\u043c\u043f\u0430\u043d\u0438\u044f {signal.get('advert_id')}"
+    if signal.get("search_query"):
+        return f"\u0437\u0430\u043f\u0440\u043e\u0441 \xab{signal.get('search_query')}\xbb"
+    if signal.get("warehouse_name"):
+        return f"\u0441\u043a\u043b\u0430\u0434 {signal.get('warehouse_name')}"
+    return "\u043e\u0431\u044a\u0435\u043a\u0442"
+
+
+def _signal_observation(signal: dict[str, Any]) -> str | None:
+    kind = str(signal.get("kind") or "")
+    if kind == "traffic":
+        return "\u0441\u043d\u0438\u0436\u0435\u043d\u0438\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043f\u0440\u043e\u0441\u0430\u0434\u043a\u043e\u0439 \u0442\u0440\u0430\u0444\u0438\u043a\u0430 \u0438 \u043a\u043b\u0438\u043a\u043e\u0432"
+    if kind == "search":
+        query = signal.get("search_query")
+        if query:
+            return f"\u0443\u0445\u0443\u0434\u0448\u0435\u043d\u0438\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043f\u043e\u0438\u0441\u043a\u043e\u043c \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443 \xab{query}\xbb"
+        return "\u0443\u0445\u0443\u0434\u0448\u0435\u043d\u0438\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043f\u043e\u0438\u0441\u043a\u043e\u0432\u044b\u043c\u0438 \u043c\u0435\u0442\u0440\u0438\u043a\u0430\u043c\u0438"
+    if kind == "ads":
+        advert_id = signal.get("advert_id")
+        if advert_id is not None:
+            return f"\u043a\u0430\u043c\u043f\u0430\u043d\u0438\u044f {advert_id} \u0434\u0430\u0451\u0442 \u043c\u0435\u043d\u044c\u0448\u0435 \u0437\u0430\u043a\u0430\u0437\u043e\u0432 \u043f\u0440\u0438 \u0441\u043e\u043f\u043e\u0441\u0442\u0430\u0432\u0438\u043c\u044b\u0445 \u0440\u0430\u0441\u0445\u043e\u0434\u0430\u0445"
+        return "\u0440\u0435\u043a\u043b\u0430\u043c\u043d\u044b\u0439 \u043a\u0430\u043d\u0430\u043b \u0434\u0430\u0451\u0442 \u043c\u0435\u043d\u044c\u0448\u0435 \u0437\u0430\u043a\u0430\u0437\u043e\u0432"
+    if kind == "stock":
+        return "\u0440\u0438\u0441\u043a \u043f\u043e \u043e\u0441\u0442\u0430\u0442\u043a\u0443 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u0434\u0435\u0444\u0438\u0446\u0438\u0442\u043e\u043c \u0438 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u044f\u043c\u0438 \u043f\u043e \u0441\u043a\u043b\u0430\u0434\u0430\u043c"
+    if kind == "price":
+        return "\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u0432\u0438\u0434\u0438\u043c\u043e\u0439 \u0446\u0435\u043d\u044b \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438"
+    if kind == "article_growth":
+        return "\u0440\u043e\u0441\u0442 \u0434\u0435\u0440\u0436\u0438\u0442\u0441\u044f \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0434\u043d\u0435\u0439 \u0438 \u0447\u0430\u0441\u0442\u0438\u0447\u043d\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u0441\u043f\u0440\u043e\u0441\u043e\u043c"
+    if kind == "large_turnover_loss":
+        return "\u044d\u0442\u043e \u043e\u0434\u0438\u043d \u0438\u0437 \u043a\u0440\u0443\u043f\u043d\u0435\u0439\u0448\u0438\u0445 \u0432\u043a\u043b\u0430\u0434\u043e\u0432 \u0432 \u043e\u0431\u0449\u0435\u0435 \u0441\u043d\u0438\u0436\u0435\u043d\u0438\u0435 \u043e\u0431\u043e\u0440\u043e\u0442\u0430"
+    if kind == "large_turnover_growth":
+        return "\u044d\u0442\u043e \u043e\u0434\u0438\u043d \u0438\u0437 \u043a\u0440\u0443\u043f\u043d\u0435\u0439\u0448\u0438\u0445 \u0432\u043a\u043b\u0430\u0434\u043e\u0432 \u0432 \u043e\u0431\u0449\u0438\u0439 \u0440\u043e\u0441\u0442 \u043e\u0431\u043e\u0440\u043e\u0442\u0430"
+    return None
+
+
+def _signal_effect(signal: dict[str, Any]) -> str:
+    impact = _to_decimal(signal.get("impact_rub"))
+    direction = str(signal.get("direction") or "")
+    anchor = _signal_anchor(signal)
+    if impact is None or impact == 0:
+        return str(signal.get("summary") or signal.get("title") or anchor)
+    if direction == "negative":
+        return f"{anchor} \u0434\u0430\u043b \u043f\u043e\u0442\u0435\u0440\u044e \u043e\u0431\u043e\u0440\u043e\u0442\u0430 {_format_currency(impact)}"
+    if direction == "positive":
+        return f"{anchor} \u0434\u0430\u043b \u043f\u0440\u0438\u0440\u043e\u0441\u0442 \u043e\u0431\u043e\u0440\u043e\u0442\u0430 {_format_currency(impact)}"
+    return str(signal.get("summary") or signal.get("title") or anchor)
+
+
+def _signal_recommended_action(signal: dict[str, Any]) -> str | None:
+    check = signal.get("check") if isinstance(signal.get("check"), dict) else {}
+    text = check.get("text") if isinstance(check, dict) else None
+    return str(text or signal.get("recommended_check") or "").strip() or None
+
+
+def _supporting_observations(signal: dict[str, Any]) -> list[str]:
+    observations: list[str] = []
+    primary = _signal_observation(signal)
+    if primary:
+        observations.append(primary)
+    for item in signal.get("supporting_signals") or []:
+        if not isinstance(item, dict):
+            continue
+        observation = _signal_observation(item)
+        if observation:
+            observations.append(observation)
+    return _dedupe_texts(observations, limit=3)
+
+
+def _build_priority_narrative(signal: dict[str, Any]) -> dict[str, Any]:
+    observations = _supporting_observations(signal)
+    sentences = [_signal_effect(signal)]
+    if observations:
+        sentences.append(", ".join(observations[:2]).capitalize())
+    elif signal.get("cause_status") != "confirmed":
+        sentences.append("\u041f\u0440\u0438\u0447\u0438\u043d\u0430 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u043f\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u043c \u0441\u043b\u043e\u044f\u043c")
+    action = _signal_recommended_action(signal)
+    if action:
+        sentences.append(action)
+    return {
+        "entity_type": signal.get("entity_type"),
+        "entity_id": signal.get("entity_id"),
+        "nm_id": signal.get("nm_id"),
+        "advert_id": signal.get("advert_id"),
+        "search_query": signal.get("search_query"),
+        "warehouse_name": signal.get("warehouse_name"),
+        "kind": signal.get("kind"),
+        "impact_rub": signal.get("impact_rub"),
+        "text": _join_sentences(*sentences),
+        "action": action,
+        "supporting_signals": list(signal.get("supporting_signals") or []),
+        "supported_factors": list(signal.get("supported_factors") or []),
+        "evidence": list(signal.get("evidence") or []),
+    }
+
+
+def _pick_first_signal(
+    signals: Sequence[dict[str, Any]],
+    *,
+    kinds: set[str] | None = None,
+    supported_factors: set[str] | None = None,
+    direction: str | None = None,
+) -> dict[str, Any] | None:
+    for signal in signals:
+        if direction and signal.get("direction") != direction:
+            continue
+        if kinds and str(signal.get("kind") or "") in kinds:
+            return signal
+        if supported_factors and any(str(item) in supported_factors for item in (signal.get("supported_factors") or [])):
+            return signal
+        if supported_factors:
+            for item in signal.get("supporting_signals") or []:
+                if isinstance(item, dict) and str(item.get("kind") or "") in supported_factors:
+                    return signal
+    return None
+
+
+def _build_section_narratives(
+    business_priorities: Sequence[dict[str, Any]],
+    article_analysis: Sequence[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    narratives: dict[str, dict[str, str]] = {}
+    article_by_nm = {int(item.get("nm_id")): item for item in article_analysis if item.get("nm_id") is not None}
+    visible_signals = [signal for signal in business_priorities if signal.get("user_visible")]
+    main_negative = next((signal for signal in visible_signals if signal.get("direction") == "negative"), None)
+    main_positive = next((signal for signal in visible_signals if signal.get("direction") == "positive"), None)
+
+    traffic_signal = _pick_first_signal(visible_signals, kinds={"traffic"}, direction="negative")
+    if traffic_signal:
+        narratives["traffic"] = {
+            "comment": _join_sentences(
+                _signal_effect(traffic_signal),
+                "\u041f\u0430\u0434\u0435\u043d\u0438\u0435 \u0432\u0438\u0434\u043d\u043e \u043f\u0440\u0435\u0436\u0434\u0435 \u0432\u0441\u0435\u0433\u043e \u0432 \u0441\u043e\u043a\u0440\u0430\u0449\u0435\u043d\u0438\u0438 \u043a\u0430\u0440\u0442\u043e\u0447\u043d\u044b\u0445 \u043a\u043b\u0438\u043a\u043e\u0432 \u0438 \u043f\u043e\u043a\u0430\u0437\u043e\u0432",
+            ),
+            "action": _signal_recommended_action(traffic_signal) or "",
+        }
+        narratives["funnel"] = {
+            "comment": _join_sentences(
+                f"\u041f\u043e {_signal_anchor(traffic_signal)} \u0441\u043d\u0438\u0436\u0430\u0435\u0442\u0441\u044f \u0432\u0445\u043e\u0434\u044f\u0449\u0438\u0439 \u043f\u043e\u0442\u043e\u043a \u0432 \u0432\u043e\u0440\u043e\u043d\u043a\u0443",
+                "\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u043f\u0430\u0434\u0430\u0435\u0442 \u0442\u0440\u0430\u0444\u0438\u043a \u0432 \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0443, \u0430 \u043a\u043e\u043d\u0432\u0435\u0440\u0441\u0438\u044f \u0432 \u043a\u043e\u0440\u0437\u0438\u043d\u0443 \u0443\u0436\u0435 \u043d\u0435 \u043a\u043e\u043c\u043f\u0435\u043d\u0441\u0438\u0440\u0443\u0435\u0442 \u0441\u043d\u0438\u0436\u0435\u043d\u0438\u0435",
+            ),
+            "action": _signal_recommended_action(traffic_signal) or "",
+        }
+
+    ads_signal = _pick_first_signal(visible_signals, kinds={"ads"}, direction="negative")
+    if ads_signal:
+        advert_id = ads_signal.get("advert_id")
+        narratives["ads"] = {
+            "comment": _join_sentences(
+                _signal_effect(ads_signal),
+                f"\u0421\u043b\u0430\u0431\u043e\u0435 \u043c\u0435\u0441\u0442\u043e \u0444\u0438\u043a\u0441\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432 \u043a\u0430\u043c\u043f\u0430\u043d\u0438\u0438 {advert_id}" if advert_id is not None else "\u0421\u043d\u0438\u0436\u0435\u043d\u0438\u0435 \u0441\u0432\u044f\u0437\u0430\u043d\u043e \u0441 \u0443\u0445\u0443\u0434\u0448\u0435\u043d\u0438\u0435\u043c \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0439 \u044d\u0444\u0444\u0435\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u0438",
+            ),
+            "action": _signal_recommended_action(ads_signal) or "",
+        }
+
+    stock_signal = _pick_first_signal(visible_signals, kinds={"stock"})
+    if stock_signal and stock_signal.get("nm_id") is not None:
+        article = article_by_nm.get(int(stock_signal.get("nm_id")))
+        stock = (article or {}).get("stock") or {}
+        stock_qty = stock.get("stock_qty_same_day")
+        with_stock = stock.get("warehouses_with_stock")
+        zero_stock = stock.get("warehouses_zero_stock")
+        narratives["stock"] = {
+            "comment": _join_sentences(
+                f"\u041f\u043e \u0430\u0440\u0442\u0438\u043a\u0443\u043b\u0443 {stock_signal.get('nm_id')} \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u0440\u0438\u0441\u043a \u043f\u043e \u043e\u0441\u0442\u0430\u0442\u043a\u0443: \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e {_format_decimal(stock_qty)}",
+                f"\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e\u0441\u0442\u044c \u043f\u043e \u0441\u043a\u043b\u0430\u0434\u0430\u043c \u0442\u043e\u0436\u0435 \u0432\u0438\u0434\u043d\u0430: \u0432 \u043d\u0430\u043b\u0438\u0447\u0438\u0438 {with_stock}, \u0431\u0435\u0437 \u043e\u0441\u0442\u0430\u0442\u043a\u043e\u0432 {zero_stock}",
+            ),
+            "action": _signal_recommended_action(stock_signal) or "",
+        }
+
+    search_signal = _pick_first_signal(visible_signals, kinds={"search"}, direction="negative")
+    if search_signal:
+        query = search_signal.get("search_query")
+        narratives["search"] = {
+            "comment": _join_sentences(
+                _signal_effect(search_signal),
+                f"\u0412 \u043f\u043e\u0438\u0441\u043a\u0435 \u0442\u043e\u0432\u0430\u0440 \u0447\u0430\u0449\u0435 \u0442\u0435\u0440\u044f\u0435\u0442 \u0432\u0438\u0434\u0438\u043c\u043e\u0441\u0442\u044c \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443 \xab{query}\xbb" if query else None,
+            ),
+            "action": _signal_recommended_action(search_signal) or "",
+        }
+
+    price_signal = _pick_first_signal(visible_signals, kinds={"price"}, direction="negative")
+    if price_signal:
+        narratives["sales"] = {
+            "comment": _join_sentences(
+                _signal_effect(price_signal),
+                "\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043a\u043b\u0438\u0435\u043d\u0442\u0441\u043a\u043e\u0439 \u0446\u0435\u043d\u044b \u0441\u0442\u043e\u0438\u0442 \u0441\u043e\u043f\u043e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0441 \u044d\u043b\u0430\u0441\u0442\u0438\u0447\u043d\u043e\u0441\u0442\u044c\u044e \u0441\u043f\u0440\u043e\u0441\u0430 \u0438 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 \u0433\u043b\u0443\u0431\u0438\u043d\u043e\u0439 \u0441\u043a\u0438\u0434\u043a\u0438",
+            ),
+            "action": _signal_recommended_action(price_signal) or "",
+        }
+    elif main_negative or main_positive:
+        comments: list[str] = []
+        if main_negative:
+            comments.append(_signal_effect(main_negative))
+        if main_positive and main_positive is not main_negative:
+            comments.append(f"\u041f\u043e\u043b\u043e\u0436\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 \u0432\u043a\u043b\u0430\u0434 \u0434\u0430\u043b {_signal_anchor(main_positive)} \u0441 \u043f\u0440\u0438\u0440\u043e\u0441\u0442\u043e\u043c {_format_currency(main_positive.get('impact_rub'))}")
+        narratives["sales"] = {
+            "comment": _join_sentences(*comments),
+            "action": _signal_recommended_action(main_negative or main_positive or {}) or "",
+        }
+
+    assortment_negative = next(
+        (
+            signal
+            for signal in visible_signals
+            if signal.get("direction") == "negative" and signal.get("nm_id") is not None
+        ),
+        None,
+    )
+    assortment_positive = next(
+        (
+            signal
+            for signal in visible_signals
+            if signal.get("direction") == "positive" and signal.get("nm_id") is not None
+        ),
+        None,
+    )
+    if assortment_negative or assortment_positive:
+        comment_parts: list[str] = []
+        if assortment_negative:
+            comment_parts.append(_signal_effect(assortment_negative))
+        if assortment_positive and assortment_positive is not assortment_negative:
+            comment_parts.append(
+                f"\u041f\u0440\u0438 \u044d\u0442\u043e\u043c \u0430\u0440\u0442\u0438\u043a\u0443\u043b {assortment_positive.get('nm_id')} \u043d\u0430 {_format_currency(assortment_positive.get('impact_rub'))} \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442 \u043e\u0431\u0449\u0438\u0439 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442"
+            )
+        narratives["assortment"] = {
+            "comment": _join_sentences(*comment_parts),
+            "action": _signal_recommended_action(assortment_negative or assortment_positive or {}) or "",
+        }
+
+    if main_negative and "sales" not in narratives:
+        narratives["sales"] = {
+            "comment": _ensure_sentence(str(main_negative.get("summary") or main_negative.get("title") or "")),
+            "action": _signal_recommended_action(main_negative) or "",
+        }
+
+    return {key: value for key, value in narratives.items() if value.get("comment")}
+
+
+def _build_scenario_narrative(
+    business_priorities: Sequence[dict[str, Any]],
+    priority_narratives: Sequence[dict[str, Any]],
+) -> str:
+    visible_signals = [signal for signal in business_priorities if signal.get("user_visible")]
+    negative = [signal for signal in visible_signals if signal.get("direction") == "negative"]
+    positive = [signal for signal in visible_signals if signal.get("direction") == "positive"]
+    losses = [str(signal.get("nm_id")) for signal in negative if signal.get("nm_id") is not None][:3]
+    parts: list[str] = []
+    if losses:
+        parts.append(f"\u041f\u043e\u0434 \u043e\u0441\u043d\u043e\u0432\u043d\u044b\u043c \u0440\u0438\u0441\u043a\u043e\u043c \u0434\u043d\u044f \u043d\u0430\u0445\u043e\u0434\u044f\u0442\u0441\u044f \u0442\u043e\u0432\u0430\u0440\u044b, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u0441\u0438\u043b\u044c\u043d\u0435\u0435 \u0432\u0441\u0435\u0433\u043e \u0442\u044f\u043d\u0443\u0442 \u043e\u0431\u043e\u0440\u043e\u0442 \u0432\u043d\u0438\u0437: {', '.join(losses)}")
+    elif negative:
+        parts.append(f"\u0413\u043b\u0430\u0432\u043d\u044b\u0439 \u0440\u0438\u0441\u043a \u0434\u043d\u044f \u0441\u0435\u0439\u0447\u0430\u0441 \u0441\u0432\u044f\u0437\u0430\u043d \u0441 {_signal_anchor(negative[0])}")
+    if positive:
+        parts.append(f"\u041f\u043e\u043b\u043e\u0436\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 \u0438\u043c\u043f\u0443\u043b\u044c\u0441 \u0434\u0430\u0451\u0442 {_signal_anchor(positive[0])}, \u043d\u043e \u043e\u043d \u043f\u043e\u043a\u0430 \u043d\u0435 \u043a\u043e\u043c\u043f\u0435\u043d\u0441\u0438\u0440\u0443\u0435\u0442 \u0432\u0441\u0435 \u0442\u043e\u0447\u043a\u0438 \u0441\u043d\u0438\u0436\u0435\u043d\u0438\u044f")
+    first_action = next((item.get("action") for item in priority_narratives if item.get("action")), None)
+    if first_action:
+        parts.append(f"\u041f\u0435\u0440\u0432\u044b\u043c \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u043c \u0441\u0442\u043e\u0438\u0442 {str(first_action).rstrip('.')}")
+    return _join_sentences(*parts)
+
+
+def _build_action_items(priority_narratives: Sequence[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in priority_narratives:
+        action = str(item.get("action") or "").strip()
+        if not action:
+            continue
+        normalized = " ".join(action.split()).lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append(
+            {
+                "text": action,
+                "entity_type": item.get("entity_type"),
+                "entity_id": item.get("entity_id"),
+                "nm_id": item.get("nm_id"),
+                "advert_id": item.get("advert_id"),
+                "search_query": item.get("search_query"),
+                "warehouse_name": item.get("warehouse_name"),
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
 
 def _merge_business_priorities(ranked_signals: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, Any], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
@@ -613,26 +930,60 @@ def _merge_business_priorities(ranked_signals: Sequence[dict[str, Any]]) -> list
             merged_signal["check"] = dict(merged_signal.get("check") or {})
             merged_signal["check"]["text"] = check_texts[0]
             merged_signal["recommended_check"] = check_texts[0]
+        merged_signal["recommended_checks"] = list(check_texts)
+        missing_evidence: list[str] = []
+        for signal in [main_signal, *supporting]:
+            for value in signal.get("missing_evidence") or []:
+                if value and value not in missing_evidence:
+                    missing_evidence.append(str(value))
+        merged_signal["missing_evidence"] = missing_evidence
+        merged_signal["primary_signal"] = {
+            "kind": main_signal.get("kind"),
+            "title": main_signal.get("title"),
+            "summary": main_signal.get("summary"),
+            "cause_status": main_signal.get("cause_status"),
+            "impact_rub": main_signal.get("impact_rub"),
+            "recommended_check": _signal_recommended_action(main_signal),
+        }
         merged_rows.append((min(index for index, _ in group_rows), merged_signal))
 
     merged_rows.sort(key=lambda item: item[0])
     return [row for _, row in merged_rows]
 
 
-def _build_analysis_summary(business_priorities: Sequence[dict[str, Any]], anomalies: Sequence[dict[str, Any]], top_n: int) -> dict[str, Any]:
+def _build_analysis_summary(
+    business_priorities: Sequence[dict[str, Any]],
+    anomalies: Sequence[dict[str, Any]],
+    article_analysis: Sequence[dict[str, Any]],
+    top_n: int,
+) -> dict[str, Any]:
     negative_signals = [signal for signal in business_priorities if signal.get("direction") == "negative" and signal.get("user_visible")]
     positive_signals = [signal for signal in business_priorities if signal.get("direction") == "positive" and signal.get("user_visible")]
     main_problem = next((signal for signal in negative_signals if signal.get("kind") != "anomaly"), negative_signals[0] if negative_signals else None)
     main_growth = positive_signals[0] if positive_signals else None
     priority_checks = [signal.get("check") for signal in negative_signals[:top_n] if signal.get("check")]
-    user_worse = [str(main_problem.get("summary"))] if main_problem else []
-    user_better = [str(main_growth.get("summary"))] if main_growth else []
+    preferred_priority_signals = [
+        signal
+        for signal in business_priorities
+        if signal.get("user_visible") and signal.get("entity_type") in {"product", "campaign", "query"}
+    ]
+    if len(preferred_priority_signals) < min(top_n, 3):
+        preferred_priority_signals = [signal for signal in business_priorities if signal.get("user_visible")]
+    priority_narratives = [_build_priority_narrative(signal) for signal in preferred_priority_signals[:top_n]]
+    section_narratives = _build_section_narratives(business_priorities, article_analysis)
+    scenario_narrative = _build_scenario_narrative(business_priorities, priority_narratives)
+    user_worse = _dedupe_texts([str(main_problem.get("summary"))] if main_problem else [], limit=top_n)
+    user_better = _dedupe_texts([str(main_growth.get("summary"))] if main_growth else [], limit=top_n)
     return {
         "main_problem": main_problem,
         "main_growth": main_growth,
         "priority_checks": priority_checks,
         "user_worse": user_worse,
         "user_better": user_better,
+        "section_narratives": section_narratives,
+        "priority_narratives": priority_narratives,
+        "scenario_narrative": scenario_narrative,
+        "action_items": _build_action_items(priority_narratives, limit=top_n),
         "top_anomalies": list(anomalies[:top_n]),
         "data_quality_checks": [str(item.get("summary")) for item in anomalies[:top_n]],
     }
@@ -640,11 +991,17 @@ def _build_analysis_summary(business_priorities: Sequence[dict[str, Any]], anoma
 
 def build_highlights_from_analysis(analysis_payload: dict[str, Any], *, top_n: int) -> WbDailyOperationalHighlightsResponse:
     summary = analysis_payload.get("analysis_summary") or {}
-    priority_checks = [str(item.get("text")) for item in (summary.get("priority_checks") or []) if item and item.get("text")]
+    action_items = summary.get("action_items") or []
+    legacy_checks = summary.get("priority_checks") or []
+    priority_checks = _dedupe_texts(
+        [str(item.get("text")) for item in action_items if item and item.get("text")]
+        or [str(item.get("text")) for item in legacy_checks if item and item.get("text")],
+        limit=top_n,
+    )
     return WbDailyOperationalHighlightsResponse(
-        worse=list((summary.get("user_worse") or [])[:top_n]),
-        better=list((summary.get("user_better") or [])[:top_n]),
-        priority_checks=priority_checks[:top_n],
+        worse=_dedupe_texts(summary.get("user_worse") or [], limit=top_n),
+        better=_dedupe_texts(summary.get("user_better") or [], limit=top_n),
+        priority_checks=priority_checks,
     )
 
 
@@ -668,7 +1025,7 @@ def build_internal_analysis(*, report_date: date, daily_rows: Sequence[dict[str,
     anomalies = _build_data_anomalies(report_date=report_date, article_analysis=article_analysis, top_n=top_n)
     ranked_signals = _build_ranked_signals(report_date=report_date, daily_rows=daily_rows, article_analysis=article_analysis, anomalies=anomalies, rules=rules, top_n=top_n)
     business_priorities = _merge_business_priorities(ranked_signals)
-    analysis_summary = _build_analysis_summary(business_priorities, anomalies, top_n)
+    analysis_summary = _build_analysis_summary(business_priorities, anomalies, article_analysis, top_n)
     return {
         "article_analysis": article_analysis,
         "business_priorities": business_priorities,
