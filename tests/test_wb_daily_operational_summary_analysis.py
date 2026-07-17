@@ -11,6 +11,7 @@ from src.mcp_server.schemas import (
     WbDailyOperationalSummaryResponse,
 )
 from src.mcp_server.wb_daily_operational_summary_analysis import (
+    _merge_business_priorities,
     build_highlights_from_analysis,
     build_internal_analysis,
     build_metric_history,
@@ -106,6 +107,7 @@ def _response_with_analysis(analysis_payload: dict[str, object]) -> WbDailyOpera
         highlights=highlights,
         diagnostics=WbDailyOperationalDiagnosticsResponse(included_sections=[], partial_sections=[], excluded_sections=[], query_count=0, formula_version="v1"),
         article_analysis=analysis_payload.get("article_analysis", []),
+        business_priorities=analysis_payload.get("business_priorities", analysis_payload.get("ranked_signals", [])),
         ranked_signals=analysis_payload.get("ranked_signals", []),
         data_anomalies=analysis_payload.get("data_anomalies", []),
         analysis_summary=analysis_payload.get("analysis_summary", {}),
@@ -250,6 +252,7 @@ def test_low_traffic_position_jump_goes_to_anomalies() -> None:
     )
 
     assert any(anomaly["kind"] == "search_low_traffic_position_jump" for anomaly in analysis["data_anomalies"])
+    assert all(signal["kind"] != "search" for signal in analysis["ranked_signals"])
 
 
 def test_logistics_is_not_used_as_causal_signal() -> None:
@@ -348,6 +351,7 @@ def test_stock_priority_text_contains_exact_values() -> None:
     assert "8.0" in text
     assert "1" in text
     assert "3" in text
+    assert "Оценка запаса по общей скорости артикула" in text
 
 def test_priority_action_contains_concrete_object_fields() -> None:
     article = _article(
@@ -406,11 +410,13 @@ def test_markdown_omits_internal_score_and_confidence() -> None:
     markdown = render_wb_daily_operational_summary_markdown(_response_with_analysis(analysis))
     assert "confidence" not in markdown.lower()
     assert "score" not in markdown.lower()
+    assert "severity" not in markdown.lower()
 
 
 def test_response_contract_keeps_old_and_new_fields() -> None:
     response = _response_with_analysis({
         "article_analysis": [],
+        "business_priorities": [],
         "ranked_signals": [],
         "data_anomalies": [],
         "analysis_summary": {},
@@ -423,8 +429,377 @@ def test_response_contract_keeps_old_and_new_fields() -> None:
     assert "article_context" in payload
     assert "warehouse_context" in payload
     assert "article_analysis" in payload
+    assert "business_priorities" in payload
     assert "ranked_signals" in payload
     assert "data_anomalies" in payload
     assert "analysis_summary" in payload
 
 
+
+
+def test_baseline_ignores_current_day_and_counts_available_days() -> None:
+    rows = _daily_rows([100, 100, 100, 100, 100, 100, 100, 300])
+
+    history = build_metric_history(rows, report_date=REPORT_DATE, date_key="report_date", metric_key="order_sum")
+
+    assert history["avg_prev_7"] == Decimal("100")
+    assert history["median_prev_7"] == Decimal("100")
+    assert history["history_days_available"] == 7
+
+
+def test_business_priorities_are_separated_from_data_anomalies() -> None:
+    article = _article(
+        10,
+        order_sums=[200, 200, 200, 200, 200, 200, 200, 190],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 95],
+        carts=[20, 20, 20, 20, 20, 20, 20, 19],
+        orders=[10, 10, 10, 10, 10, 10, 10, 9],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+    )
+    search_context = [{
+        "nm_id": 10,
+        "search_query": "rare query",
+        "avg_position": Decimal("250"),
+        "previous_avg_position": Decimal("3"),
+        "position_delta_day": Decimal("247"),
+        "search_clicks": Decimal("1"),
+        "search_orders": Decimal("0"),
+        "clicks_delta_day": Decimal("0"),
+        "orders_delta_day": Decimal("0"),
+        "visibility": Decimal("0"),
+        "previous_visibility": Decimal("4"),
+        "trend_7d": [
+            {"date": REPORT_DATE - timedelta(days=1), "search_clicks": Decimal("1")},
+            {"date": REPORT_DATE, "search_clicks": Decimal("1")},
+        ],
+    }]
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([500, 500, 500, 500, 500, 500, 500, 480]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=search_context,
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    assert len(analysis["business_priorities"]) <= len(analysis["ranked_signals"])
+    assert all(signal["kind"] != "anomaly" for signal in analysis["business_priorities"])
+    assert analysis["data_anomalies"]
+
+
+def test_response_contains_no_mojibake() -> None:
+    article = _article(
+        11,
+        order_sums=[200, 200, 200, 200, 200, 190, 170, 150],
+        clicks=[100, 100, 100, 100, 100, 90, 70, 60],
+        carts=[20, 20, 20, 20, 20, 18, 14, 12],
+        orders=[10, 10, 10, 10, 10, 9, 8, 7],
+        impressions=[1000, 1000, 1000, 1000, 1000, 900, 800, 700],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([500, 500, 500, 500, 500, 450, 380, 320]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+    response = _response_with_analysis(analysis)
+    markdown = render_wb_daily_operational_summary_markdown(response)
+
+    bad_markers = ("Р ", "СЃ", "вЂ", "РџС")
+    serialized = str(response.model_dump()) + markdown
+    assert not any(marker in serialized for marker in bad_markers)
+
+
+def test_article_analysis_baseline_is_filled_with_sufficient_history() -> None:
+    article = _article(
+        12,
+        order_sums=[100, 100, 100, 100, 100, 100, 100, 120],
+        clicks=[50, 50, 50, 50, 50, 50, 50, 55],
+        carts=[10, 10, 10, 10, 10, 10, 10, 11],
+        orders=[5, 5, 5, 5, 5, 5, 5, 6],
+        impressions=[500, 500, 500, 500, 500, 500, 500, 550],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([500, 500, 500, 500, 500, 500, 500, 520]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    baseline = analysis["article_analysis"][0]["sales"]["baseline"]
+    assert baseline["history_days_available"] == 7
+    assert baseline["avg_prev_7"] == Decimal("100")
+    assert baseline["median_prev_7"] == Decimal("100")
+    assert baseline["avg_prev_14"] is None
+    assert baseline["delta_vs_previous_day"] == Decimal("20")
+    assert baseline["trend_status"] != "insufficient_history"
+
+
+def test_large_turnover_loss_is_created_without_confirmed_cause() -> None:
+    article = _article(
+        13,
+        order_sums=[100000, 100000, 100000, 100000, 100000, 100000, 100000, 70000],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 100],
+        carts=[20, 20, 20, 20, 20, 20, 20, 20],
+        orders=[10, 10, 10, 10, 10, 10, 10, 10],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([200000, 200000, 200000, 200000, 200000, 200000, 200000, 170000]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    signal = next(signal for signal in analysis["business_priorities"] if signal["kind"] == "large_turnover_loss")
+    assert signal["nm_id"] == 13
+    assert signal["cause_status"] == "unconfirmed"
+    assert signal["impact_rub"] == Decimal("-30000")
+    assert signal["supported_factors"] == []
+    assert signal["missing_evidence"] == ["confirmed_primary_cause"]
+
+
+def test_large_turnover_growth_is_created_without_confirmed_cause() -> None:
+    article = _article(
+        14,
+        order_sums=[60000, 60000, 60000, 60000, 60000, 60000, 60000, 85000],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 100],
+        carts=[20, 20, 20, 20, 20, 20, 20, 20],
+        orders=[10, 10, 10, 10, 10, 10, 10, 10],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([300000, 300000, 300000, 300000, 300000, 300000, 300000, 325000]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    assert any(signal["kind"] == "large_turnover_growth" for signal in analysis["ranked_signals"])
+    signal = next(signal for signal in analysis["business_priorities"] if signal["nm_id"] == 14)
+    assert signal["kind"] == "article_growth"
+    assert signal["cause_status"] == "confirmed"
+    assert signal["impact_rub"] == Decimal("25000")
+    assert any(item["kind"] == "large_turnover_growth" for item in signal["supporting_signals"])
+
+
+def test_generic_turnover_signal_does_not_assert_unconfirmed_cause() -> None:
+    article = _article(
+        15,
+        order_sums=[100000, 100000, 100000, 100000, 100000, 100000, 100000, 70000],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 100],
+        carts=[20, 20, 20, 20, 20, 20, 20, 20],
+        orders=[10, 10, 10, 10, 10, 10, 10, 10],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([200000, 200000, 200000, 200000, 200000, 200000, 200000, 170000]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    signal = next(signal for signal in analysis["business_priorities"] if signal["kind"] == "large_turnover_loss")
+    combined_text = f"{signal['title']} {signal['summary']} {signal['check']['text']}".lower()
+    assert "из-за" not in combined_text
+    assert "причина пока не подтверждена" in combined_text
+
+
+def test_business_priorities_include_large_monetary_effect() -> None:
+    article = _article(
+        16,
+        order_sums=[100000, 100000, 100000, 100000, 100000, 100000, 100000, 70000],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 100],
+        carts=[20, 20, 20, 20, 20, 20, 20, 20],
+        orders=[10, 10, 10, 10, 10, 10, 10, 10],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([200000, 200000, 200000, 200000, 200000, 200000, 200000, 170000]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    assert any(signal["kind"] == "large_turnover_loss" for signal in analysis["business_priorities"])
+
+
+def test_stock_signal_can_enter_business_priorities_for_confirmed_growth_risk() -> None:
+    article = _article(
+        577510563,
+        order_sums=[10000, 10000, 10000, 10000, 10000, 12000, 14000, 18000],
+        clicks=[100, 100, 100, 100, 100, 110, 120, 130],
+        carts=[20, 20, 20, 20, 20, 22, 24, 26],
+        orders=[10, 10, 10, 10, 10, 12, 14, 16],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1100, 1200, 1300],
+        stock_qty=4,
+        with_stock=1,
+        zero_stock=3,
+        stock_status="OK",
+    )
+    warehouse_context = [{"nm_id": 577510563, "avg_orders_7d_article": Decimal("8"), "risk_type": "LOW_STOCK", "warehouse_name": "WH-1"}]
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([100000, 100000, 100000, 100000, 100000, 105000, 110000, 118000]),
+        article_context=[article],
+        warehouse_context=warehouse_context,
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    stock_signal = next(signal for signal in analysis["business_priorities"] if signal["kind"] == "stock")
+    assert stock_signal["nm_id"] == 577510563
+    assert stock_signal["cause_status"] == "confirmed"
+
+
+def test_previous_day_spike_refers_to_previous_day_vs_baseline() -> None:
+    rows = _daily_rows([100, 100, 100, 100, 100, 100, 100, 220, 150])
+
+    history = build_metric_history(rows, report_date=REPORT_DATE, date_key="report_date", metric_key="order_sum")
+
+    assert history["previous_day"] == Decimal("220")
+    assert history["previous_day_pct_vs_avg_prev_7"] == Decimal("120")
+    assert history["trend_status"] == "previous_day_spike"
+
+
+def test_previous_day_drop_refers_to_previous_day_vs_baseline() -> None:
+    rows = _daily_rows([100, 100, 100, 100, 100, 100, 100, 40, 80])
+
+    history = build_metric_history(rows, report_date=REPORT_DATE, date_key="report_date", metric_key="order_sum")
+
+    assert history["previous_day"] == Decimal("40")
+    assert history["previous_day_pct_vs_avg_prev_7"] == Decimal("-60")
+    assert history["trend_status"] == "previous_day_drop"
+
+
+def test_business_priorities_deduplicate_same_nm_id_and_preserve_ranked_signals() -> None:
+    article = _article(
+        17,
+        order_sums=[100000, 100000, 100000, 100000, 100000, 100000, 100000, 70000],
+        clicks=[100, 100, 100, 100, 100, 100, 100, 70],
+        carts=[20, 20, 20, 20, 20, 20, 20, 14],
+        orders=[10, 10, 10, 10, 10, 10, 10, 7],
+        impressions=[1000, 1000, 1000, 1000, 1000, 1000, 1000, 700],
+    )
+    analysis = build_internal_analysis(
+        report_date=REPORT_DATE,
+        daily_rows=_daily_rows([200000, 200000, 200000, 200000, 200000, 200000, 200000, 170000]),
+        article_context=[article],
+        warehouse_context=[],
+        campaign_context=[],
+        search_query_context=[],
+        entry_point_context=[],
+        price_context=[],
+        logistics_context=[],
+        data_gaps=[],
+        rules=get_default_rules(),
+        top_n=5,
+    )
+
+    ranked_same_nm = [signal for signal in analysis["ranked_signals"] if signal.get("nm_id") == 17]
+    priority_same_nm = [signal for signal in analysis["business_priorities"] if signal.get("nm_id") == 17]
+    assert len(ranked_same_nm) >= 2
+    assert {signal["kind"] for signal in ranked_same_nm} >= {"traffic", "large_turnover_loss"}
+    assert len(priority_same_nm) == 1
+    merged = priority_same_nm[0]
+    assert merged["kind"] == "traffic"
+    assert merged["impact_rub"] == Decimal("-30000")
+    assert any(item["kind"] == "large_turnover_loss" for item in merged["supporting_signals"])
+    assert "clicks_down" in merged["evidence"]
+
+
+def test_merge_business_priorities_keeps_different_entity_types_separate() -> None:
+    merged = _merge_business_priorities([
+        {
+            "kind": "traffic",
+            "entity_type": "product",
+            "entity_id": 42,
+            "nm_id": 42,
+            "direction": "negative",
+            "impact_rub": Decimal("-1000"),
+            "cause_status": "confirmed",
+            "score": Decimal("10"),
+            "summary": "product",
+            "check": {"text": "check product"},
+            "supported_factors": ["traffic"],
+            "evidence": ["clicks_down"],
+            "user_visible": True,
+        },
+        {
+            "kind": "ads",
+            "entity_type": "campaign",
+            "entity_id": 42,
+            "advert_id": 42,
+            "direction": "negative",
+            "impact_rub": Decimal("-800"),
+            "cause_status": "confirmed",
+            "score": Decimal("9"),
+            "summary": "campaign",
+            "check": {"text": "check campaign"},
+            "supported_factors": ["ads"],
+            "evidence": ["ad_spend"],
+            "user_visible": True,
+        },
+    ])
+
+    assert len(merged) == 2

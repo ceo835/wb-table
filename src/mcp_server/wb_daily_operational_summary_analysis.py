@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
@@ -12,6 +12,9 @@ PRICE_CHANGE_THRESHOLD_PCT = Decimal("10")
 LOW_TRAFFIC_QUERY_CLICKS = Decimal("5")
 POSITION_JUMP_ANOMALY = Decimal("50")
 CONVERSION_STABLE_PP = Decimal("1.5")
+LARGE_TURNOVER_LOSS_RUB = Decimal("25000")
+LARGE_TURNOVER_GROWTH_RUB = Decimal("20000")
+LARGE_TURNOVER_SHARE_PCT = Decimal("30")
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -62,19 +65,19 @@ def _safe_ratio(numerator: Decimal | None, denominator: Decimal | None) -> Decim
 def _format_decimal(value: Any, decimals: int = 0) -> str:
     decimal_value = _to_decimal(value)
     if decimal_value is None:
-        return "РЅ/Рґ"
+        return "н/д"
     quant = Decimal("1") if decimals == 0 else Decimal("1." + ("0" * decimals))
     return f"{decimal_value.quantize(quant):,.{decimals}f}".replace(",", " ")
 
 
 def _format_currency(value: Any) -> str:
-    return f"{_format_decimal(value, 0)} в‚Ѕ"
+    return f"{_format_decimal(value, 0)} ₽"
 
 
 def _format_percent(value: Any, decimals: int = 1) -> str:
     decimal_value = _to_decimal(value)
     if decimal_value is None:
-        return "РЅ/Рґ"
+        return "н/д"
     prefix = "+" if decimal_value > 0 else ""
     return f"{prefix}{_format_decimal(decimal_value, decimals)}%"
 
@@ -82,9 +85,9 @@ def _format_percent(value: Any, decimals: int = 1) -> str:
 def _format_pp(value: Any, decimals: int = 1) -> str:
     decimal_value = _to_decimal(value)
     if decimal_value is None:
-        return "РЅ/Рґ"
+        return "н/д"
     prefix = "+" if decimal_value > 0 else ""
-    return f"{prefix}{_format_decimal(decimal_value, decimals)} Рї.Рї."
+    return f"{prefix}{_format_decimal(decimal_value, decimals)} п.п."
 
 
 def _series(rows: Iterable[dict[str, Any]], *, report_date: date, date_key: str, metric_key: str) -> list[tuple[date, Decimal]]:
@@ -187,7 +190,7 @@ def _history_gap(metric_name: str, scope: str, nm_id: int | None = None) -> dict
         "status": "PARTIAL",
         "scope": scope,
         "metric": metric_name,
-        "message": "РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РїСЂРµРґС‹РґСѓС‰РёС… РїРѕР»РЅС‹С… РґРЅРµР№ РґР»СЏ СѓСЃС‚РѕР№С‡РёРІРѕРіРѕ baseline 7/14.",
+        "message": "Недостаточно предыдущих полных дней для устойчивого baseline 7/14.",
     }
     if nm_id is not None:
         payload["nm_id"] = nm_id
@@ -213,6 +216,17 @@ def _trend_weight(trend_status: str) -> Decimal:
 def _quality_penalty(partial_primary: bool) -> Decimal:
     return Decimal("-25") if partial_primary else Decimal("0")
 
+
+def _search_query_is_significant(query_row: dict[str, Any], report_date: date, rules: WbDailyOperationalSummaryRules) -> bool:
+    history = build_metric_history(query_row.get("trend_7d") or [], report_date=report_date, date_key="date", metric_key="search_clicks")
+    baseline_clicks = _to_decimal(history.get("avg_prev_7")) or Decimal("0")
+    current_carts = _to_decimal(query_row.get("search_cart")) or Decimal("0")
+    current_orders = _to_decimal(query_row.get("search_orders")) or Decimal("0")
+    clicks_delta = abs(_to_decimal(query_row.get("clicks_delta_day")) or Decimal("0"))
+    orders_delta = abs(_to_decimal(query_row.get("orders_delta_day")) or Decimal("0"))
+    ever_orders = any((_to_decimal(row.get("search_orders")) or Decimal("0")) > 0 for row in (query_row.get("trend_7d") or []))
+    persistent_change = abs(_to_decimal(history.get("pct_vs_previous_day")) or Decimal("0")) >= rules.significant_pct_change
+    return any((baseline_clicks >= LOW_TRAFFIC_QUERY_CLICKS, current_carts > 0, current_orders > 0, ever_orders, clicks_delta >= Decimal("5"), orders_delta > 0, persistent_change))
 
 
 def build_article_analysis(*, report_date: date, article_context: Sequence[dict[str, Any]], warehouse_context: Sequence[dict[str, Any]], campaign_context: Sequence[dict[str, Any]], search_query_context: Sequence[dict[str, Any]], entry_point_context: Sequence[dict[str, Any]], price_context: Sequence[dict[str, Any]], logistics_context: Sequence[dict[str, Any]], data_gaps: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -289,14 +303,17 @@ def build_article_analysis(*, report_date: date, article_context: Sequence[dict[
     return rows, gaps
 
 
-def _build_signal(*, kind: str, direction: str, title: str, summary: str, check_text: str, metric: str, trend_status: str, confirmations: int, confidence: str, partial_primary: bool, order_sum_delta: Decimal | None = None, share_of_total_delta: Decimal | None = None, nm_id: int | None = None, advert_id: int | None = None, search_query: str | None = None, warehouse_name: str | None = None, evidence: list[str] | None = None, operational_weight: Decimal = Decimal("10")) -> dict[str, Any]:
+def _build_signal(*, kind: str, direction: str, title: str, summary: str, check_text: str, metric: str, trend_status: str, confirmations: int, confidence: str, partial_primary: bool, order_sum_delta: Decimal | None = None, share_of_total_delta: Decimal | None = None, nm_id: int | None = None, advert_id: int | None = None, search_query: str | None = None, warehouse_name: str | None = None, evidence: list[str] | None = None, operational_weight: Decimal = Decimal("10"), cause_status: str = "confirmed", supported_factors: list[str] | None = None, missing_evidence: list[str] | None = None, recommended_check: str | None = None) -> dict[str, Any]:
     delta_component = min(abs(order_sum_delta or Decimal("0")) / Decimal("1000"), Decimal("35"))
     share_component = min(abs(share_of_total_delta or Decimal("0")), Decimal("100")) / Decimal("4")
     score = delta_component + share_component + _trend_weight(trend_status) + Decimal(confirmations * 4) + operational_weight + _quality_penalty(partial_primary)
     return {
         "kind": kind,
+        "signal_key": kind,
         "direction": direction,
         "nm_id": nm_id,
+        "entity_type": "product" if nm_id is not None else ("campaign" if advert_id is not None else "query" if search_query else "aggregate"),
+        "entity_id": nm_id if nm_id is not None else advert_id,
         "advert_id": advert_id,
         "search_query": search_query,
         "warehouse_name": warehouse_name,
@@ -305,12 +322,17 @@ def _build_signal(*, kind: str, direction: str, title: str, summary: str, check_
         "summary": summary,
         "check": {"text": check_text, "nm_id": nm_id, "advert_id": advert_id, "search_query": search_query, "warehouse": warehouse_name, "metric": metric},
         "order_sum_delta": order_sum_delta,
+        "impact_rub": order_sum_delta,
         "share_of_total_delta": share_of_total_delta,
         "trend_status": trend_status,
         "confirmations": confirmations,
         "confidence": confidence,
         "score": score,
         "partial_primary": partial_primary,
+        "cause_status": cause_status,
+        "supported_factors": supported_factors if supported_factors is not None else list(evidence or []),
+        "missing_evidence": missing_evidence or [],
+        "recommended_check": recommended_check or check_text,
         "evidence": evidence or [],
         "user_visible": not partial_primary,
     }
@@ -328,24 +350,24 @@ def _build_data_anomalies(*, report_date: date, article_analysis: Sequence[dict[
             trend_rows = query_row.get("trend_7d") or []
             baseline_clicks = build_metric_history(trend_rows, report_date=report_date, date_key="date", metric_key="search_clicks").get("avg_prev_7")
             if position_delta is not None and position_delta >= POSITION_JUMP_ANOMALY and (baseline_clicks or Decimal("0")) < LOW_TRAFFIC_QUERY_CLICKS:
-                anomalies.append({"kind": "search_low_traffic_position_jump", "nm_id": nm_id, "search_query": query_row.get("search_query"), "severity": "medium", "summary": f"Р РµР·РєРёР№ СЃРєР°С‡РѕРє РїРѕР·РёС†РёРё РїРѕ Р·Р°РїСЂРѕСЃСѓ В«{query_row.get('search_query')}В» РїСЂРё РјР°Р»РѕРј Р±Р°Р·РѕРІРѕРј С‚СЂР°С„РёРєРµ. РќСѓР¶РЅР° РїСЂРѕРІРµСЂРєР° РґР°РЅРЅС‹С…."})
+                anomalies.append({"kind": "search_low_traffic_position_jump", "nm_id": nm_id, "search_query": query_row.get("search_query"), "severity": "medium", "summary": f"Резкий скачок позиции по запросу «{query_row.get('search_query')}» при малом базовом трафике. Нужна проверка данных."})
             if position_delta is not None and position_delta >= POSITION_JUMP_ANOMALY and (_to_decimal(query_row.get("clicks_delta_day")) or Decimal("0")) >= 0 and (_to_decimal(query_row.get("orders_delta_day")) or Decimal("0")) >= 0:
-                anomalies.append({"kind": "search_position_without_traffic_drop", "nm_id": nm_id, "search_query": query_row.get("search_query"), "severity": "medium", "summary": f"РџРѕР·РёС†РёСЏ РїРѕ Р·Р°РїСЂРѕСЃСѓ В«{query_row.get('search_query')}В» СЂРµР·РєРѕ СѓС…СѓРґС€РёР»Р°СЃСЊ, РЅРѕ С‚СЂР°С„РёРє РЅРµ РїРѕРґС‚РІРµСЂРґРёР» РїР°РґРµРЅРёРµ."})
+                anomalies.append({"kind": "search_position_without_traffic_drop", "nm_id": nm_id, "search_query": query_row.get("search_query"), "severity": "medium", "summary": f"Позиция по запросу «{query_row.get('search_query')}» резко ухудшилась, но трафик не подтвердил падение."})
             if current_visibility == Decimal("0") and current_clicks > 0:
-                anomalies.append({"kind": "search_zero_visibility_with_clicks", "nm_id": nm_id, "search_query": query_row.get("search_query"), "severity": "high", "summary": f"РќСѓР»РµРІР°СЏ РІРёРґРёРјРѕСЃС‚СЊ РїРѕ Р·Р°РїСЂРѕСЃСѓ В«{query_row.get('search_query')}В» РЅРµ СЃРѕРІРїР°РґР°РµС‚ СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹РјРё РєР»РёРєР°РјРё."})
+                anomalies.append({"kind": "search_zero_visibility_with_clicks", "nm_id": nm_id, "search_query": query_row.get("search_query"), "severity": "high", "summary": f"Нулевая видимость по запросу «{query_row.get('search_query')}» не совпадает с положительными кликами."})
         if (article["traffic"].get("cart_count") or Decimal("0")) == 0 and (article["sales"].get("order_count") or Decimal("0")) > 0:
-            anomalies.append({"kind": "orders_without_carts", "nm_id": nm_id, "severity": "high", "summary": f"РЈ Р°СЂС‚РёРєСѓР»Р° {nm_id} РµСЃС‚СЊ Р·Р°РєР°Р·С‹ РїСЂРё РЅСѓР»РµРІС‹С… РєРѕСЂР·РёРЅР°С…."})
+            anomalies.append({"kind": "orders_without_carts", "nm_id": nm_id, "severity": "high", "summary": f"У артикула {nm_id} есть заказы при нулевых корзинах."})
         for campaign in article["ads"]["campaigns"]:
             if (_to_decimal(campaign.get("ad_spend")) or Decimal("0")) > 0 and (_to_decimal(campaign.get("ad_views")) or Decimal("0")) == 0 and (_to_decimal(campaign.get("ad_clicks")) or Decimal("0")) == 0:
-                anomalies.append({"kind": "ad_spend_without_reach", "nm_id": nm_id, "advert_id": campaign.get("advert_id"), "severity": "high", "summary": f"РџРѕ РєР°РјРїР°РЅРёРё {campaign.get('advert_id')} РµСЃС‚СЊ СЂР°СЃС…РѕРґ Р±РµР· РїРѕРєР°Р·РѕРІ Рё РєР»РёРєРѕРІ."})
+                anomalies.append({"kind": "ad_spend_without_reach", "nm_id": nm_id, "advert_id": campaign.get("advert_id"), "severity": "high", "summary": f"По кампании {campaign.get('advert_id')} есть расход без показов и кликов."})
         if (article["stock"].get("stock_qty_same_day") or Decimal("0")) == 0 and (article["sales"].get("order_count") or Decimal("0")) > 0:
-            anomalies.append({"kind": "zero_stock_with_orders", "nm_id": nm_id, "severity": "high", "summary": f"РЈ Р°СЂС‚РёРєСѓР»Р° {nm_id} РЅСѓР»РµРІРѕР№ РѕСЃС‚Р°С‚РѕРє РїСЂРё РїСЂРѕРґРѕР»Р¶Р°СЋС‰РёС…СЃСЏ Р·Р°РєР°Р·Р°С…."})
+            anomalies.append({"kind": "zero_stock_with_orders", "nm_id": nm_id, "severity": "high", "summary": f"У артикула {nm_id} нулевой остаток при продолжающихся заказах."})
         price = article.get("price") or {}
         previous_price = _to_decimal(price.get("previous_buyer_visible_price"))
         current_price = _to_decimal(price.get("buyer_visible_price"))
         price_delta_pct = _safe_pct_delta(current_price, previous_price)
         if price_delta_pct is not None and abs(price_delta_pct) >= PRICE_CHANGE_THRESHOLD_PCT:
-            anomalies.append({"kind": "sharp_price_change", "nm_id": nm_id, "severity": "medium", "summary": f"РЈ Р°СЂС‚РёРєСѓР»Р° {nm_id} С†РµРЅР° РёР·РјРµРЅРёР»Р°СЃСЊ РЅР° {_format_percent(price_delta_pct)} Р·Р° РґРµРЅСЊ."})
+            anomalies.append({"kind": "sharp_price_change", "nm_id": nm_id, "severity": "medium", "summary": f"У артикула {nm_id} цена изменилась на {_format_percent(price_delta_pct)} за день."})
     anomalies.sort(key=lambda item: {"high": 0, "medium": 1, "low": 2}.get(str(item.get("severity")), 3))
     return anomalies[: max(top_n * 2, top_n)]
 
@@ -357,9 +379,9 @@ def _build_ranked_signals(*, report_date: date, daily_rows: Sequence[dict[str, A
     aggregate_sales = build_metric_history(daily_rows, report_date=report_date, date_key="report_date", metric_key="order_sum")
     delta = _to_decimal(aggregate_sales.get("delta_vs_previous_day")) or Decimal("0")
     if delta < 0 and aggregate_sales.get("trend_status") not in {"return_to_baseline", "previous_day_spike"}:
-        signals.append(_build_signal(kind="aggregate_sales", direction="negative", title="РћР±С‰РёР№ СЃРїР°Рґ РѕР±РѕСЂРѕС‚Р°", summary=f"РћР±РѕСЂРѕС‚ Р·Р°РєР°Р·РѕРІ СЃРЅРёР¶Р°РµС‚СЃСЏ СѓСЃС‚РѕР№С‡РёРІРµРµ РѕР±С‹С‡РЅРѕРіРѕ: {_format_currency(aggregate_sales.get('current'))} РїСЂРѕС‚РёРІ {_format_currency(aggregate_sales.get('previous_day'))}.", check_text="РџСЂРѕРІРµСЂРёС‚СЊ СЃРѕРІРѕРєСѓРїРЅС‹Р№ РІРєР»Р°Рґ С‚СЂР°С„РёРєР°, РїРѕРёСЃРєР° Рё СЂРµРєР»Р°РјС‹ РІ СЃРїР°Рґ РѕР±РѕСЂРѕС‚Р°.", metric="order_sum", trend_status=str(aggregate_sales.get("trend_status")), confirmations=2, confidence="high", partial_primary=False, order_sum_delta=delta, share_of_total_delta=Decimal("100"), operational_weight=Decimal("8")))
+        signals.append(_build_signal(kind="aggregate_sales", direction="negative", title="Общий спад оборота", summary=f"Оборот заказов снижается устойчивее обычного: {_format_currency(aggregate_sales.get('current'))} против {_format_currency(aggregate_sales.get('previous_day'))}.", check_text="Проверить совокупный вклад трафика, поиска и рекламы в спад оборота.", metric="order_sum", trend_status=str(aggregate_sales.get("trend_status")), confirmations=2, confidence="high", partial_primary=False, order_sum_delta=delta, share_of_total_delta=Decimal("100"), operational_weight=Decimal("8")))
     elif delta > 0 and aggregate_sales.get("trend_status") in {"growth_2_days", "growth_3_plus_days", "first_growth"}:
-        signals.append(_build_signal(kind="aggregate_sales", direction="positive", title="РћР±С‰РёР№ СЂРѕСЃС‚ РѕР±РѕСЂРѕС‚Р°", summary=f"РћР±РѕСЂРѕС‚ Р·Р°РєР°Р·РѕРІ РІС‹СЂРѕСЃ РґРѕ {_format_currency(aggregate_sales.get('current'))}.", check_text="РџСЂРѕРІРµСЂРёС‚СЊ, РєР°РєРёРµ Р°СЂС‚РёРєСѓР»С‹ РґР°Р»Рё РѕСЃРЅРѕРІРЅРѕР№ РІРєР»Р°Рґ РІ СЂРѕСЃС‚ РѕР±РѕСЂРѕС‚Р°.", metric="order_sum", trend_status=str(aggregate_sales.get("trend_status")), confirmations=2, confidence="high", partial_primary=False, order_sum_delta=delta, share_of_total_delta=Decimal("100"), operational_weight=Decimal("8")))
+        signals.append(_build_signal(kind="aggregate_sales", direction="positive", title="Общий рост оборота", summary=f"Оборот заказов вырос до {_format_currency(aggregate_sales.get('current'))}.", check_text="Проверить, какие артикулы дали основной вклад в рост оборота.", metric="order_sum", trend_status=str(aggregate_sales.get("trend_status")), confirmations=2, confidence="high", partial_primary=False, order_sum_delta=delta, share_of_total_delta=Decimal("100"), operational_weight=Decimal("8")))
 
     for article in article_analysis:
         nm_id = int(article["nm_id"])
@@ -381,16 +403,20 @@ def _build_ranked_signals(*, report_date: date, daily_rows: Sequence[dict[str, A
         stock_qty = _to_decimal(article["stock"].get("stock_qty_same_day")) or Decimal("0")
         conversion_stable = atc_delta_pp is None or abs(atc_delta_pp) <= CONVERSION_STABLE_PP
         avg_check_stable = avg_check_delta_pct is None or abs(avg_check_delta_pct) <= rules.significant_pct_change
+        has_negative_cause_signal = False
+        has_positive_cause_signal = False
         if order_sum_delta < 0 and (clicks_drop or impressions_drop) and carts_drop and conversion_stable and avg_check_stable and stock_qty > 0:
             confidence = "high" if impressions_drop else "medium"
-            signals.append(_build_signal(kind="traffic", direction="negative", title=f"РўСЂР°С„РёРє РїСЂРѕСЃРµР» РїРѕ Р°СЂС‚РёРєСѓР»Сѓ {nm_id}", summary=f"РћСЃРЅРѕРІРЅРѕРµ СЃРЅРёР¶РµРЅРёРµ РїРѕ Р°СЂС‚РёРєСѓР»Сѓ {nm_id} РїРѕС…РѕР¶Рµ РЅР° РїСЂРѕСЃР°РґРєСѓ С‚СЂР°С„РёРєР°: РєР»РёРєРё Рё РєРѕСЂР·РёРЅС‹ СЃРЅРёР·РёР»РёСЃСЊ, Р° РєРѕРЅРІРµСЂСЃРёРё Рё СЃСЂРµРґРЅРёР№ С‡РµРє Р·Р°РјРµС‚РЅРѕ РЅРµ СѓС…СѓРґС€РёР»РёСЃСЊ.", check_text=f"РџСЂРѕРІРµСЂРёС‚СЊ С‚СЂР°С„РёРє Р°СЂС‚РёРєСѓР»Р° {nm_id}: РѕСЃС‚Р°С‚РѕРє {_format_decimal(stock_qty)}, РєР»РёРєРё {_format_decimal(traffic['baseline_clicks'].get('delta_vs_previous_day'))}, РєРѕСЂР·РёРЅС‹ {_format_decimal(traffic['baseline_carts'].get('delta_vs_previous_day'))}.", metric="traffic", trend_status=trend_status, confirmations=4 if impressions_drop else 3, confidence=confidence, partial_primary=confidence != "high", order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, evidence=["clicks_down", "carts_down"], operational_weight=Decimal("16")))
+            signals.append(_build_signal(kind="traffic", direction="negative", title=f"Трафик просел по артикулу {nm_id}", summary=f"Основное снижение по артикулу {nm_id} похоже на просадку трафика: клики и корзины снизились, а конверсии и средний чек заметно не ухудшились.", check_text=f"Проверить трафик артикула {nm_id}: остаток {_format_decimal(stock_qty)}, клики {_format_decimal(traffic['baseline_clicks'].get('delta_vs_previous_day'))}, корзины {_format_decimal(traffic['baseline_carts'].get('delta_vs_previous_day'))}.", metric="traffic", trend_status=trend_status, confirmations=4 if impressions_drop else 3, confidence=confidence, partial_primary=confidence != "high", order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, evidence=["clicks_down", "carts_down"], operational_weight=Decimal("16")))
+            has_negative_cause_signal = True
         for query_row in article["search"]["queries"]:
             position_delta = _to_decimal(query_row.get("position_delta_day"))
             clicks_delta = _to_decimal(query_row.get("clicks_delta_day")) or Decimal("0")
             orders_delta = _to_decimal(query_row.get("orders_delta_day")) or Decimal("0")
             baseline_clicks = build_metric_history(query_row.get("trend_7d") or [], report_date=report_date, date_key="date", metric_key="search_clicks").get("avg_prev_7")
-            if position_delta is not None and position_delta >= rules.search_position_change_threshold and clicks_delta < 0 and orders_delta < 0 and (baseline_clicks or Decimal("0")) >= LOW_TRAFFIC_QUERY_CLICKS:
-                signals.append(_build_signal(kind="search", direction="negative", title=f"РџРѕРёСЃРє СѓС…СѓРґС€РёР»СЃСЏ РїРѕ Р°СЂС‚РёРєСѓР»Сѓ {nm_id}", summary=f"РџРѕРёСЃРє РјРѕРі РІРЅРµСЃС‚Рё РІРєР»Р°Рґ РІ СЃРїР°Рґ Р°СЂС‚РёРєСѓР»Р° {nm_id}: РїРѕ Р·Р°РїСЂРѕСЃСѓ В«{query_row.get('search_query')}В» СѓС…СѓРґС€РёР»РёСЃСЊ РїРѕР·РёС†РёСЏ Рё РїРѕРёСЃРєРѕРІС‹Рµ РєР»РёРєРё.", check_text=f"РџСЂРѕРІРµСЂРёС‚СЊ РёРЅРґРµРєСЃР°С†РёСЋ Р°СЂС‚РёРєСѓР»Р° {nm_id} РїРѕ Р·Р°РїСЂРѕСЃСѓ В«{query_row.get('search_query')}В»: РїРѕР·РёС†РёСЏ РёР·РјРµРЅРёР»Р°СЃСЊ СЃ {_format_decimal(query_row.get('previous_avg_position'), 1)} РґРѕ {_format_decimal(query_row.get('avg_position'), 1)}, РїРѕРёСЃРєРѕРІС‹Рµ РєР»РёРєРё СЃРЅРёР·РёР»РёСЃСЊ РЅР° {_format_decimal(clicks_delta)}.", metric="search", trend_status=trend_status, confirmations=4, confidence="medium", partial_primary=False, order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, search_query=str(query_row.get("search_query")), evidence=["position_down", "search_clicks_down"], operational_weight=Decimal("14")))
+            if _search_query_is_significant(query_row, report_date, rules) and position_delta is not None and position_delta >= rules.search_position_change_threshold and clicks_delta < 0 and (orders_delta < 0 or (_to_decimal(query_row.get("search_orders")) or Decimal("0")) > 0):
+                signals.append(_build_signal(kind="search", direction="negative", title=f"Поиск ухудшился по артикулу {nm_id}", summary=f"Поиск мог внести вклад в спад артикула {nm_id}: по запросу «{query_row.get('search_query')}» ухудшились позиция и поисковые клики.", check_text=f"Проверить индексацию артикула {nm_id} по запросу «{query_row.get('search_query')}»: позиция изменилась с {_format_decimal(query_row.get('previous_avg_position'), 1)} до {_format_decimal(query_row.get('avg_position'), 1)}, поисковые клики снизились на {_format_decimal(clicks_delta)}.", metric="search", trend_status=trend_status, confirmations=4, confidence="medium", partial_primary=False, order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, search_query=str(query_row.get("search_query")), evidence=["position_down", "search_clicks_down"], operational_weight=Decimal("14")))
+                has_negative_cause_signal = True
                 break
         best_campaign = None
         for campaign in sorted(article["ads"]["campaigns"], key=lambda row: _to_decimal(row.get("ad_spend")) or Decimal("0"), reverse=True):
@@ -400,14 +426,16 @@ def _build_ranked_signals(*, report_date: date, daily_rows: Sequence[dict[str, A
                 best_campaign = campaign
                 break
         if best_campaign is not None:
-            signals.append(_build_signal(kind="ads", direction="negative", title=f"Р РµРєР»Р°РјР° РїРѕ Р°СЂС‚РёРєСѓР»Сѓ {nm_id} С‚СЂРµР±СѓРµС‚ РїСЂРѕРІРµСЂРєРё", summary=f"РџРѕ РєР°РјРїР°РЅРёРё {best_campaign.get('advert_id')} РµСЃС‚СЊ СЂР°СЃС…РѕРґ Р±РµР· РґРѕСЃС‚Р°С‚РѕС‡РЅРѕРіРѕ СЂРµР·СѓР»СЊС‚Р°С‚Р° РїРѕ Р°СЂС‚РёРєСѓР»Сѓ {nm_id}.", check_text=f"РџСЂРѕРІРµСЂРёС‚СЊ РєР°РјРїР°РЅРёСЋ {best_campaign.get('advert_id')} РїРѕ Р°СЂС‚РёРєСѓР»Сѓ {nm_id}: СЂР°СЃС…РѕРґ {_format_currency(best_campaign.get('ad_spend'))}, Р·Р°РєР°Р·С‹ {_format_decimal(best_campaign.get('ad_orders'))}, Р”Р Р  {_format_percent(best_campaign.get('drr'))}.", metric="ad_spend", trend_status=trend_status, confirmations=3, confidence="high", partial_primary=False, order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, advert_id=int(best_campaign.get("advert_id")), evidence=["ad_spend", "ad_orders"], operational_weight=Decimal("13")))
+            signals.append(_build_signal(kind="ads", direction="negative", title=f"Реклама по артикулу {nm_id} требует проверки", summary=f"По кампании {best_campaign.get('advert_id')} есть расход без достаточного результата по артикулу {nm_id}.", check_text=f"Проверить кампанию {best_campaign.get('advert_id')} по артикулу {nm_id}: расход {_format_currency(best_campaign.get('ad_spend'))}, заказы {_format_decimal(best_campaign.get('ad_orders'))}, ДРР {_format_percent(best_campaign.get('drr'))}.", metric="ad_spend", trend_status=trend_status, confirmations=3, confidence="high", partial_primary=False, order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, advert_id=int(best_campaign.get("advert_id")), evidence=["ad_spend", "ad_orders"], operational_weight=Decimal("13")))
+            has_negative_cause_signal = True
         warehouse_rows = article["stock"]["warehouse_rows"]
         avg_orders = max((_to_decimal(row.get("avg_orders_7d_article")) or Decimal("0")) for row in warehouse_rows) if warehouse_rows else (_to_decimal(article["funnel"]["order_count_baseline"].get("avg_prev_7")) or Decimal("0"))
         warehouses_with_stock = int(article["stock"].get("warehouses_with_stock") or 0)
         warehouses_zero_stock = int(article["stock"].get("warehouses_zero_stock") or 0)
         days_of_supply = (stock_qty / avg_orders) if avg_orders > 0 else None
-        if order_sum_delta < 0 and avg_orders > 0 and (stock_qty <= 0 or (days_of_supply is not None and days_of_supply <= rules.low_stock_days)):
-            signals.append(_build_signal(kind="stock", direction="negative", title=f"РћСЃС‚Р°С‚РѕРє РѕРіСЂР°РЅРёС‡РёРІР°РµС‚ Р°СЂС‚РёРєСѓР» {nm_id}", summary=f"РџРѕ Р°СЂС‚РёРєСѓР»Сѓ {nm_id} РµСЃС‚СЊ СЂРёСЃРє РґРµС„РёС†РёС‚Р°: РѕСЃС‚Р°С‚РѕРє {_format_decimal(stock_qty)}, СЃСЂРµРґРЅРёР№ СЃРїСЂРѕСЃ {_format_decimal(avg_orders, 1)} Р·Р°РєР°Р·Р° РІ РґРµРЅСЊ.", check_text=f"РџСЂРѕРІРµСЂРёС‚СЊ РѕСЃС‚Р°С‚РєРё Р°СЂС‚РёРєСѓР»Р° {nm_id}: РѕР±С‰РёР№ РѕСЃС‚Р°С‚РѕРє {_format_decimal(stock_qty)}, СЃСЂРµРґРЅРёР№ СЃРїСЂРѕСЃ {_format_decimal(avg_orders, 1)}, СЃРєР»Р°РґРѕРІ СЃ РЅР°Р»РёС‡РёРµРј {warehouses_with_stock}, СЃРєР»Р°РґРѕРІ СЃ РЅСѓР»С‘Рј {warehouses_zero_stock}.", metric="stock_qty", trend_status=trend_status, confirmations=4, confidence="high", partial_primary=article["data_quality"].get("stock_partial") is True, order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, evidence=[_format_decimal(stock_qty), _format_decimal(avg_orders, 1)], operational_weight=Decimal("18")))
+        if avg_orders > 0 and (stock_qty <= 0 or (days_of_supply is not None and days_of_supply <= rules.low_stock_days)) and (order_sum_delta < 0 or trend_status in {"growth_2_days", "growth_3_plus_days", "first_growth"}):
+            signals.append(_build_signal(kind="stock", direction="negative", title=f"Остаток ограничивает артикул {nm_id}", summary=f"По артикулу {nm_id} есть риск дефицита: остаток {_format_decimal(stock_qty)}, средний спрос {_format_decimal(avg_orders, 1)} заказа в день.", check_text=f"Проверить остатки артикула {nm_id}: общий остаток {_format_decimal(stock_qty)}, средний спрос {_format_decimal(avg_orders, 1)}, складов с наличием {warehouses_with_stock}, складов с нулём {warehouses_zero_stock}. Оценка запаса по общей скорости артикула: {_format_decimal(days_of_supply, 0) if days_of_supply is not None else "н/д"} дней.", metric="stock_qty", trend_status=trend_status, confirmations=4, confidence="high", partial_primary=article["data_quality"].get("stock_partial") is True, order_sum_delta=order_sum_delta, share_of_total_delta=(share_negative if order_sum_delta < 0 else share_positive), nm_id=nm_id, evidence=[_format_decimal(stock_qty), _format_decimal(avg_orders, 1)], operational_weight=Decimal("18")))
+            has_negative_cause_signal = True
         price = article.get("price") or {}
         current_price = _to_decimal(price.get("buyer_visible_price"))
         previous_price = _to_decimal(price.get("previous_buyer_visible_price"))
@@ -415,24 +443,189 @@ def _build_ranked_signals(*, report_date: date, daily_rows: Sequence[dict[str, A
         if price.get("source_status") == "OK" and price_delta_pct is not None and abs(price_delta_pct) >= PRICE_CHANGE_THRESHOLD_PCT and not clicks_drop and stock_qty > 0:
             order_delta_pct = _to_decimal(article["funnel"]["order_count_baseline"].get("pct_vs_previous_day"))
             if order_delta_pct is not None and order_delta_pct < 0:
-                signals.append(_build_signal(kind="price", direction="negative", title=f"Р¦РµРЅР° РјРѕРіР»Р° РїРѕРІР»РёСЏС‚СЊ РЅР° Р°СЂС‚РёРєСѓР» {nm_id}", summary=f"РџРѕСЃР»Рµ Р·Р°РјРµС‚РЅРѕРіРѕ РёР·РјРµРЅРµРЅРёСЏ РєР»РёРµРЅС‚СЃРєРѕР№ С†РµРЅС‹ РїРѕ Р°СЂС‚РёРєСѓР»Сѓ {nm_id} РїСЂРѕСЃРµР»Рё Р·Р°РєР°Р·С‹, РїСЂРё СЌС‚РѕРј С‚СЂР°С„РёРє Рё РѕСЃС‚Р°С‚РєРё РЅРµ РѕР±СЉСЏСЃРЅСЏСЋС‚ РІСЃС‘ РёР·РјРµРЅРµРЅРёРµ.", check_text=f"РџСЂРѕРІРµСЂРёС‚СЊ С†РµРЅСѓ Р°СЂС‚РёРєСѓР»Р° {nm_id}: РєР»РёРµРЅС‚СЃРєР°СЏ С†РµРЅР° РёР·РјРµРЅРёР»Р°СЃСЊ СЃ {_format_currency(previous_price)} РґРѕ {_format_currency(current_price)}, Р·Р°РєР°Р·С‹ РёР·РјРµРЅРёР»РёСЃСЊ РЅР° {_format_percent(order_delta_pct)}.", metric="buyer_visible_price", trend_status=trend_status, confirmations=3, confidence="medium", partial_primary=False, order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, evidence=[_format_percent(price_delta_pct)], operational_weight=Decimal("11")))
+                signals.append(_build_signal(kind="price", direction="negative", title=f"Цена могла повлиять на артикул {nm_id}", summary=f"После заметного изменения клиентской цены по артикулу {nm_id} просели заказы, при этом трафик и остатки не объясняют всё изменение.", check_text=f"Проверить цену артикула {nm_id}: клиентская цена изменилась с {_format_currency(previous_price)} до {_format_currency(current_price)}, заказы изменились на {_format_percent(order_delta_pct)}.", metric="buyer_visible_price", trend_status=trend_status, confirmations=3, confidence="medium", partial_primary=False, order_sum_delta=order_sum_delta, share_of_total_delta=share_negative, nm_id=nm_id, evidence=[_format_percent(price_delta_pct)], operational_weight=Decimal("11")))
+                has_negative_cause_signal = True
         if order_sum_delta > 0 and trend_status in {"growth_2_days", "growth_3_plus_days", "first_growth"}:
             confirmations = 1 + (1 if (_to_decimal(traffic["baseline_clicks"].get("pct_vs_previous_day")) or Decimal("0")) > 0 else 0)
-            signals.append(_build_signal(kind="article_growth", direction="positive", title=f"РђСЂС‚РёРєСѓР» {nm_id} СЂР°СЃС‚С‘С‚", summary=f"РђСЂС‚РёРєСѓР» {nm_id} РґР°Р» Р·Р°РјРµС‚РЅС‹Р№ РІРєР»Р°Рґ РІ СЂРѕСЃС‚ РѕР±РѕСЂРѕС‚Р° Р·Р° РґРµРЅСЊ.", check_text=f"РџСЂРѕРІРµСЂРёС‚СЊ, Р·Р° СЃС‡С‘С‚ С‡РµРіРѕ Р°СЂС‚РёРєСѓР» {nm_id} СЂР°СЃС‚С‘С‚ Р±С‹СЃС‚СЂРµРµ Р±Р°Р·С‹: РѕР±РѕСЂРѕС‚ РёР·РјРµРЅРёР»СЃСЏ РЅР° {_format_currency(order_sum_delta)}.", metric="order_sum", trend_status=trend_status, confirmations=confirmations, confidence="high", partial_primary=False, order_sum_delta=order_sum_delta, share_of_total_delta=share_positive, nm_id=nm_id, evidence=[trend_status], operational_weight=Decimal("10")))
-    for anomaly in anomalies:
-        signals.append(_build_signal(kind="anomaly", direction="negative", title="РўСЂРµР±СѓРµС‚СЃСЏ РїСЂРѕРІРµСЂРєР° РґР°РЅРЅС‹С…", summary=str(anomaly.get("summary")), check_text=str(anomaly.get("summary")), metric=str(anomaly.get("kind")), trend_status="stable", confirmations=1, confidence="medium", partial_primary=False, order_sum_delta=Decimal("0"), share_of_total_delta=Decimal("0"), nm_id=anomaly.get("nm_id"), advert_id=anomaly.get("advert_id"), search_query=anomaly.get("search_query"), evidence=[str(anomaly.get("kind"))], operational_weight=Decimal("7")))
+            signals.append(_build_signal(kind="article_growth", direction="positive", title=f"Артикул {nm_id} растёт", summary=f"Артикул {nm_id} дал заметный вклад в рост оборота за день.", check_text=f"Проверить, за счёт чего артикул {nm_id} растёт быстрее базы: оборот изменился на {_format_currency(order_sum_delta)}.", metric="order_sum", trend_status=trend_status, confirmations=confirmations, confidence="high", partial_primary=False, order_sum_delta=order_sum_delta, share_of_total_delta=share_positive, nm_id=nm_id, evidence=[trend_status], operational_weight=Decimal("10")))
+            has_positive_cause_signal = True
+        if order_sum_delta < 0 and (
+            abs(order_sum_delta) >= LARGE_TURNOVER_LOSS_RUB
+            or (share_negative is not None and share_negative >= LARGE_TURNOVER_SHARE_PCT)
+        ):
+            signals.append(_build_signal(
+                kind="large_turnover_loss",
+                direction="negative",
+                title=f"Артикул {nm_id} дал крупную потерю оборота",
+                summary=f"Артикул {nm_id} дал крупную потерю оборота на {_format_currency(order_sum_delta)}. Основная причина пока не подтверждена и требует отдельного разбора.",
+                check_text=f"Разобрать артикул {nm_id}: падение оборота {_format_currency(order_sum_delta)}, вклад в общее снижение {(_format_percent(share_negative) if share_negative is not None else 'н/д')}.",
+                metric="order_sum",
+                trend_status=trend_status,
+                confirmations=1,
+                confidence="medium",
+                partial_primary=False,
+                order_sum_delta=order_sum_delta,
+                share_of_total_delta=share_negative,
+                nm_id=nm_id,
+                evidence=[],
+                operational_weight=Decimal("12"),
+                cause_status="unconfirmed",
+                supported_factors=[],
+                missing_evidence=["confirmed_primary_cause"],
+                recommended_check="Проверить трафик, рекламу, цену и остатки по артикулу отдельно.",
+            ))
+        if order_sum_delta > 0 and (
+            abs(order_sum_delta) >= LARGE_TURNOVER_GROWTH_RUB
+            or (share_positive is not None and share_positive >= LARGE_TURNOVER_SHARE_PCT)
+        ):
+            signals.append(_build_signal(
+                kind="large_turnover_growth",
+                direction="positive",
+                title=f"Артикул {nm_id} дал заметный рост оборота",
+                summary=f"Артикул {nm_id} дал заметный рост оборота на {_format_currency(order_sum_delta)}. Фактор роста требует проверки для оценки возможности масштабирования.",
+                check_text=f"Разобрать артикул {nm_id}: рост оборота {_format_currency(order_sum_delta)}, вклад в общий рост {(_format_percent(share_positive) if share_positive is not None else 'н/д')}.",
+                metric="order_sum",
+                trend_status=trend_status,
+                confirmations=1,
+                confidence="medium",
+                partial_primary=False,
+                order_sum_delta=order_sum_delta,
+                share_of_total_delta=share_positive,
+                nm_id=nm_id,
+                evidence=[],
+                operational_weight=Decimal("9"),
+                cause_status="unconfirmed",
+                supported_factors=[],
+                missing_evidence=["confirmed_growth_driver"],
+                recommended_check="Проверить, какой фактор дал рост: трафик, цена, поиск или доступность товара.",
+            ))
     signals.sort(key=lambda item: (0 if item.get("direction") == "negative" else 1, -(item.get("score") or Decimal("0")), -(abs(item.get("order_sum_delta") or Decimal("0"))), str(item.get("kind"))))
     return signals[: max(top_n * 4, 12)]
 
 
 
-def _build_analysis_summary(ranked_signals: Sequence[dict[str, Any]], anomalies: Sequence[dict[str, Any]], top_n: int) -> dict[str, Any]:
-    negative_signals = [signal for signal in ranked_signals if signal.get("direction") == "negative" and signal.get("user_visible")]
-    positive_signals = [signal for signal in ranked_signals if signal.get("direction") == "positive" and signal.get("user_visible")]
+def _signal_entity_key(signal: dict[str, Any]) -> tuple[str, Any]:
+    entity_type = str(signal.get("entity_type") or "unknown")
+    entity_id = signal.get("entity_id")
+    if entity_id is None:
+        entity_id = signal.get("nm_id")
+    if entity_id is None:
+        entity_id = signal.get("advert_id")
+    if entity_id is None:
+        entity_id = signal.get("search_query")
+    return entity_type, entity_id
+
+
+def _support_phrase(signal: dict[str, Any]) -> str | None:
+    kind = str(signal.get("kind") or "")
+    return {
+        "traffic": "Снижение сопровождается падением трафика.",
+        "search": "Есть подтверждённое ухудшение поиска.",
+        "ads": "Есть признаки ухудшения рекламного результата.",
+        "stock": "Есть подтверждённый риск дефицита.",
+        "price": "Есть изменение клиентской цены, требующее проверки.",
+        "article_growth": "Рост сопровождается устойчивой положительной динамикой.",
+    }.get(kind)
+
+
+def _merge_business_priorities(ranked_signals: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, Any], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    for index, signal in enumerate(ranked_signals):
+        grouped[_signal_entity_key(signal)].append((index, signal))
+
+    merged_rows: list[tuple[int, dict[str, Any]]] = []
+    for group_rows in grouped.values():
+        signals = [signal for _, signal in group_rows]
+        if not any(signal.get("user_visible") for signal in signals):
+            continue
+        confirmed_causal = [
+            signal
+            for signal in signals
+            if signal.get("cause_status") == "confirmed" and not signal.get("partial_primary") and signal.get("kind") not in {"large_turnover_loss", "large_turnover_growth"}
+        ]
+        if confirmed_causal:
+            main_signal = max(
+                confirmed_causal,
+                key=lambda item: (item.get("score") or Decimal("0"), abs(item.get("impact_rub") or Decimal("0"))),
+            )
+        else:
+            main_signal = max(
+                signals,
+                key=lambda item: (abs(item.get("impact_rub") or Decimal("0")), item.get("score") or Decimal("0")),
+            )
+        impact_signal = max(
+            signals,
+            key=lambda item: (abs(item.get("impact_rub") or Decimal("0")), item.get("score") or Decimal("0")),
+        )
+        merged_signal = dict(main_signal)
+        merged_signal["user_visible"] = any(signal.get("user_visible") for signal in signals)
+        supporting = [signal for signal in signals if signal is not main_signal]
+        merged_signal["impact_rub"] = impact_signal.get("impact_rub")
+        merged_signal["order_sum_delta"] = impact_signal.get("impact_rub")
+        merged_signal["supporting_signals"] = [
+            {
+                "kind": signal.get("kind"),
+                "title": signal.get("title"),
+                "summary": signal.get("summary"),
+                "cause_status": signal.get("cause_status"),
+                "impact_rub": signal.get("impact_rub"),
+                "confidence": signal.get("confidence"),
+            }
+            for signal in supporting
+        ]
+        supported_factors: list[str] = []
+        evidence: list[str] = []
+        for signal in [main_signal, *supporting]:
+            for value in signal.get("supported_factors") or []:
+                if value and value not in supported_factors:
+                    supported_factors.append(str(value))
+            if signal is not main_signal and signal.get("cause_status") == "confirmed":
+                kind = str(signal.get("kind") or "")
+                if kind and kind not in supported_factors:
+                    supported_factors.append(kind)
+            for value in signal.get("evidence") or []:
+                if value and value not in evidence:
+                    evidence.append(str(value))
+        merged_signal["supported_factors"] = supported_factors
+        merged_signal["evidence"] = evidence
+        summary_parts: list[str] = []
+        impact_summary = impact_signal.get("summary")
+        if impact_summary:
+            summary_parts.append(str(impact_summary))
+        if main_signal is not impact_signal and main_signal.get("cause_status") == "confirmed":
+            phrase = _support_phrase(main_signal)
+            if phrase and phrase not in summary_parts:
+                summary_parts.append(phrase)
+        for signal in supporting:
+            if signal.get("cause_status") != "confirmed":
+                continue
+            phrase = _support_phrase(signal)
+            if phrase and phrase not in summary_parts:
+                summary_parts.append(phrase)
+        if summary_parts:
+            merged_signal["summary"] = " ".join(summary_parts)
+        check_texts: list[str] = []
+        for signal in [main_signal, *supporting]:
+            text = ((signal.get("check") or {}).get("text") if isinstance(signal.get("check"), dict) else None) or signal.get("recommended_check")
+            if text and text not in check_texts:
+                check_texts.append(str(text))
+        if check_texts:
+            merged_signal["check"] = dict(merged_signal.get("check") or {})
+            merged_signal["check"]["text"] = check_texts[0]
+            merged_signal["recommended_check"] = check_texts[0]
+        merged_rows.append((min(index for index, _ in group_rows), merged_signal))
+
+    merged_rows.sort(key=lambda item: item[0])
+    return [row for _, row in merged_rows]
+
+
+def _build_analysis_summary(business_priorities: Sequence[dict[str, Any]], anomalies: Sequence[dict[str, Any]], top_n: int) -> dict[str, Any]:
+    negative_signals = [signal for signal in business_priorities if signal.get("direction") == "negative" and signal.get("user_visible")]
+    positive_signals = [signal for signal in business_priorities if signal.get("direction") == "positive" and signal.get("user_visible")]
     main_problem = next((signal for signal in negative_signals if signal.get("kind") != "anomaly"), negative_signals[0] if negative_signals else None)
     main_growth = positive_signals[0] if positive_signals else None
     priority_checks = [signal.get("check") for signal in negative_signals[:top_n] if signal.get("check")]
-    user_worse = [str(main_problem.get("summary"))] if main_problem else ([str(anomalies[0].get("summary"))] if anomalies else [])
+    user_worse = [str(main_problem.get("summary"))] if main_problem else []
     user_better = [str(main_growth.get("summary"))] if main_growth else []
     return {
         "main_problem": main_problem,
@@ -441,6 +634,7 @@ def _build_analysis_summary(ranked_signals: Sequence[dict[str, Any]], anomalies:
         "user_worse": user_worse,
         "user_better": user_better,
         "top_anomalies": list(anomalies[:top_n]),
+        "data_quality_checks": [str(item.get("summary")) for item in anomalies[:top_n]],
     }
 
 
@@ -473,9 +667,11 @@ def build_internal_analysis(*, report_date: date, daily_rows: Sequence[dict[str,
             aggregate_gaps.append(_history_gap(metric_name, "aggregate"))
     anomalies = _build_data_anomalies(report_date=report_date, article_analysis=article_analysis, top_n=top_n)
     ranked_signals = _build_ranked_signals(report_date=report_date, daily_rows=daily_rows, article_analysis=article_analysis, anomalies=anomalies, rules=rules, top_n=top_n)
-    analysis_summary = _build_analysis_summary(ranked_signals, anomalies, top_n)
+    business_priorities = _merge_business_priorities(ranked_signals)
+    analysis_summary = _build_analysis_summary(business_priorities, anomalies, top_n)
     return {
         "article_analysis": article_analysis,
+        "business_priorities": business_priorities,
         "ranked_signals": ranked_signals,
         "data_anomalies": list(anomalies),
         "analysis_summary": analysis_summary,
