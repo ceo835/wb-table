@@ -110,10 +110,12 @@ def build_mcp_tools_catalog() -> list[dict]:
         {
             "name": "get_wb_daily_operational_summary",
             "description": (
-                "Returns a complete, final, user-facing Wildberries operational report. "
-                "The value in content[0].text is already fully formatted and must be shown to the user in full. "
-                "Do not summarize, paraphrase, merge sections, omit tables, or replace it with a shorter analysis. "
-                "Use structuredContent only for machine-readable access. For the user-facing response, preserve the complete Markdown report."
+                "Use structuredContent as the primary source for the user-facing analysis. "
+                "Generate a coherent operational summary in Russian using only facts available in structuredContent. "
+                "Do not mechanically copy content[0].text when structuredContent is available. "
+                "Use content[0].text only as a fallback when structuredContent is unavailable. "
+                "Do not claim causality unless it is confirmed by the provided evidence. "
+                "You may describe simultaneous changes and possible factors, clearly marking them as observations or hypotheses."
             ),
             "inputSchema": _tool_schema(WbDailyOperationalSummaryRequest),
         },
