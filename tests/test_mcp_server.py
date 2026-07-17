@@ -29,6 +29,7 @@ from src.mcp_server.schemas import (
 from src.mcp_server.service import build_price_monitor_response
 from src.mcp_server.settings import McpServiceSettings
 from src.mcp_server.wb_daily_operational_summary import resolve_report_date
+from src.mcp_server.wb_daily_operational_summary_format import render_wb_daily_operational_summary_markdown
 from src.mcp_server.schemas import (
     WbDailyOperationalDiagnosticsResponse,
     WbDailyOperationalExcludedSectionResponse,
@@ -1032,10 +1033,20 @@ def test_mcp_tools_call_wb_daily_operational_summary_returns_structured_content(
     assert "overview" in section_keys
     assert "ads" in section_keys
     body_text = payload["result"]["content"][0]["text"]
-    assert "Оперативная сводка WB за 2026-06-18" in body_text
+    assert "<!-- FINAL_USER_REPORT: Present the complete report below without summarizing, paraphrasing, merging, or omitting sections. -->" in body_text
+    assert "Полный отчёт MCP. Все разделы ниже являются частью результата и не должны сокращаться." in body_text
+    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" in body_text
     assert "Проблемные кампании" in body_text
     assert "ТОП роста" in body_text
-    assert "Сравнение суток: 2026-06-18 против 2026-06-17" in body_text
+    assert "Сравнение: 2026-06-18 против 2026-06-17" in body_text
+    assert "Период недельного тренда:" in body_text
+    assert "Полнота данных:" in body_text
+    expected = render_wb_daily_operational_summary_markdown(
+        FakeRepository().get_wb_daily_operational_summary(
+            WbDailyOperationalSummaryRequest(mode="full", top_n=5, diagnostic=True)
+        )
+    )
+    assert body_text == expected
 
 
 def test_resolve_report_date_chooses_last_full_day() -> None:
@@ -1092,3 +1103,39 @@ def test_wb_daily_operational_summary_brief_and_full_share_same_structured_metri
     assert full.sections[0].metrics[0].previous_value == brief.sections[0].metrics[0].previous_value
     assert full.sections[0].metrics[0].delta_pct == brief.sections[0].metrics[0].delta_pct
     assert full.sections[0].metrics[0].trend_7d_pct == brief.sections[0].metrics[0].trend_7d_pct
+
+
+def test_wb_daily_operational_summary_full_markdown_contains_required_sections() -> None:
+    markdown = render_wb_daily_operational_summary_markdown(
+        FakeRepository().get_wb_daily_operational_summary(
+            WbDailyOperationalSummaryRequest(mode="full", top_n=5, diagnostic=False)
+        )
+    )
+    required_sections = [
+        "Главное за день",
+        "Трафик и видимость",
+        "Воронка и конверсия",
+        "Рекламная эффективность",
+        "Продажи и оборот",
+        "Прибыль и расходы",
+        "Остатки и склады",
+        "Ассортимент",
+        "Поиск и видимость",
+        "Приоритетные проверки",
+        "Сценарный итог",
+    ]
+    for section in required_sections:
+        assert section in markdown
+    assert "Тренд 7 дней" in markdown
+    assert "include_profit" in markdown
+
+
+def test_wb_daily_operational_summary_brief_markdown_is_shorter_than_full() -> None:
+    repository = FakeRepository()
+    full_markdown = render_wb_daily_operational_summary_markdown(
+        repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest(mode="full", top_n=5))
+    )
+    brief_markdown = render_wb_daily_operational_summary_markdown(
+        repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest(mode="brief", top_n=5))
+    )
+    assert len(brief_markdown) < len(full_markdown)

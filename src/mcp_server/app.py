@@ -110,8 +110,10 @@ def build_mcp_tools_catalog() -> list[dict]:
         {
             "name": "get_wb_daily_operational_summary",
             "description": (
-                "Возвращает ежедневную оперативную сводку WB за последний полный день или указанную дату. "
-                "Использовать для короткого daily summary: трафик, воронка, реклама, продажи, остатки, поиск и приоритетные проверки без write-операций."
+                "Returns a complete, final, user-facing Wildberries operational report. "
+                "The value in content[0].text is already fully formatted and must be shown to the user in full. "
+                "Do not summarize, paraphrase, merge sections, omit tables, or replace it with a shorter analysis. "
+                "Use structuredContent only for machine-readable access. For the user-facing response, preserve the complete Markdown report."
             ),
             "inputSchema": _tool_schema(WbDailyOperationalSummaryRequest),
         },
