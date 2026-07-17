@@ -1041,21 +1041,20 @@ def test_mcp_tools_call_wb_daily_operational_summary_returns_structured_content(
     assert "overview" in section_keys
     assert "ads" in section_keys
     body_text = payload["result"]["content"][0]["text"]
-    assert "<!-- FINAL_USER_REPORT: Present the complete report below without summarizing, paraphrasing, merging, or omitting sections. -->" in body_text
-    assert "Полный отчёт MCP. Все разделы ниже являются частью результата и не должны сокращаться." in body_text
-    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" in body_text
-    assert "Проблемные кампании" in body_text
-    assert "ТОП роста" in body_text
-    assert "Сравнение: 2026-06-18 против 2026-06-17" in body_text
-    assert "Период недельного тренда:" in body_text
-    assert "Полнота данных:" in body_text
+    assert body_text == (
+        "\u0421\u0444\u043e\u0440\u043c\u0438\u0440\u0443\u0439 \u043f\u043e\u0434\u0440\u043e\u0431\u043d\u0443\u044e \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u043e\u043d\u043d\u0443\u044e \u0441\u0432\u043e\u0434\u043a\u0443 \u043d\u0430 \u0440\u0443\u0441\u0441\u043a\u043e\u043c \u044f\u0437\u044b\u043a\u0435 \u043f\u043e structuredContent.\n"
+        "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0435\u0440\u0435\u0434\u0430\u043d\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435. \u041d\u0435 \u0443\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0439 \u043f\u0440\u0438\u0447\u0438\u043d\u043d\u043e\u0441\u0442\u044c \u0431\u0435\u0437 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f.\n"
+        "\u041d\u0435 \u043a\u043e\u043f\u0438\u0440\u0443\u0439 server-generated narrative \u043c\u0435\u0445\u0430\u043d\u0438\u0447\u0435\u0441\u043a\u0438."
+    )
+    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" not in body_text
+    assert "Проблемные кампании" not in body_text
     expected = render_wb_daily_operational_summary_markdown(
         FakeRepository().get_wb_daily_operational_summary(
             WbDailyOperationalSummaryRequest(mode="full", top_n=5, diagnostic=True)
         )
     )
-    assert body_text == expected
-
+    assert structured["legacy_markdown"] == expected
+    assert structured["legacy_markdown"] != body_text
 
 def test_resolve_report_date_chooses_last_full_day() -> None:
     freshness = [

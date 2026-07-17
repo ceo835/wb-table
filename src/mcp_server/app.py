@@ -40,6 +40,11 @@ MCP_SERVER_NAME = "wb-dashboard-mcp"
 MCP_SERVER_VERSION = "0.1.0"
 MAX_PRODUCT_DAILY_LINES = 15
 MAX_PRICE_MONITOR_LINES = 10
+WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT = (
+    "\u0421\u0444\u043e\u0440\u043c\u0438\u0440\u0443\u0439 \u043f\u043e\u0434\u0440\u043e\u0431\u043d\u0443\u044e \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u043e\u043d\u043d\u0443\u044e \u0441\u0432\u043e\u0434\u043a\u0443 \u043d\u0430 \u0440\u0443\u0441\u0441\u043a\u043e\u043c \u044f\u0437\u044b\u043a\u0435 \u043f\u043e structuredContent.\n"
+    "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0435\u0440\u0435\u0434\u0430\u043d\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435. \u041d\u0435 \u0443\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0439 \u043f\u0440\u0438\u0447\u0438\u043d\u043d\u043e\u0441\u0442\u044c \u0431\u0435\u0437 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f.\n"
+    "\u041d\u0435 \u043a\u043e\u043f\u0438\u0440\u0443\u0439 server-generated narrative \u043c\u0435\u0445\u0430\u043d\u0438\u0447\u0435\u0441\u043a\u0438."
+)
 
 
 def _tool_schema(model) -> dict:
@@ -452,7 +457,11 @@ def _format_tool_content(tool_result) -> str:
 def _build_tool_result_payload(tool_result) -> dict:
     structured = tool_result.model_dump(mode="json")
     try:
-        text_content = _format_tool_content(tool_result)
+        if isinstance(tool_result, WbDailyOperationalSummaryResponse):
+            structured["legacy_markdown"] = render_wb_daily_operational_summary_markdown(tool_result)
+            text_content = WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+        else:
+            text_content = _format_tool_content(tool_result)
     except Exception:
         logger.exception("Failed to build human-readable MCP content")
         text_content = json.dumps(structured, ensure_ascii=False)
