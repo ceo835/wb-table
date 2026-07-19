@@ -136,10 +136,11 @@ def _prune_wb_daily_operational_signal_payload(payload: Any) -> Any:
 
 def _build_wb_daily_operational_summary_structured_content(
     tool_result: WbDailyOperationalSummaryResponse,
+    rendered_markdown: str | None = None,
 ) -> dict[str, Any]:
     structured = tool_result.model_dump(mode="json")
     if _is_wb_daily_operational_summary_diagnostic(tool_result):
-        structured["legacy_markdown"] = render_wb_daily_operational_summary_markdown(tool_result)
+        structured["legacy_markdown"] = rendered_markdown
         return structured
 
     structured.pop("analysis_summary", None)
@@ -573,8 +574,73 @@ def _format_tool_content(tool_result) -> str:
 def _build_tool_result_payload(tool_result) -> dict:
     try:
         if isinstance(tool_result, WbDailyOperationalSummaryResponse):
-            structured = _build_wb_daily_operational_summary_structured_content(tool_result)
-            text_content = WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+            rendered_markdown = None
+            rendering_error_dict = None
+            try:
+                rendered_markdown = render_wb_daily_operational_summary_markdown(tool_result)
+                if not rendered_markdown or not rendered_markdown.strip():
+                    raise ValueError("Empty markdown output")
+            except Exception as exc:
+                logger.exception("Failed to render markdown summary")
+                rendering_error_dict = {
+                    "error_code": "RENDERER_ERROR",
+                    "error_message": str(exc),
+                }
+                
+                # Build fallback text safely from verified structured data
+                turnover = None
+                orders = None
+                profit = None
+                
+                # Try finding in sections
+                for s in (tool_result.sections or []):
+                    if s.key == "overview":
+                        for m in (s.metrics or []):
+                            if m.metric and "оборот" in m.metric.lower():
+                                turnover = m.value
+                            elif m.metric and "заказ" in m.metric.lower():
+                                orders = m.value
+                            elif m.metric and "прибыль" in m.metric.lower():
+                                profit = m.value
+                                
+                # Try finding profit in operating_profit_context
+                if profit is None:
+                    overall = (tool_result.operating_profit_context or {}).get("overall") or {}
+                    profit = overall.get("operating_profit")
+                
+                def _fmt(val) -> str | None:
+                    if val is None:
+                        return None
+                    try:
+                        d = Decimal(str(val))
+                        return f"{d:,.0f}".replace(",", " ")
+                    except Exception:
+                        return str(val)
+                
+                t_str = _fmt(turnover)
+                o_str = _fmt(orders)
+                p_str = _fmt(profit)
+                
+                if t_str is None:
+                    t_str = "..."
+                if o_str is None:
+                    o_str = "..."
+                
+                if p_str is not None:
+                    fallback_text = f"Сводка рассчитана. Оборот: {t_str} ₽, заказы: {o_str}, операционная прибыль: {p_str} ₽."
+                else:
+                    fallback_text = f"Сводка рассчитана. Оборот: {t_str} ₽, заказы: {o_str}. Данные по операционной прибыли недоступны."
+                
+                rendered_markdown = fallback_text
+
+            structured = _build_wb_daily_operational_summary_structured_content(tool_result, rendered_markdown)
+            structured["content_hint"] = WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+            if rendering_error_dict:
+                if "diagnostics" not in structured or not isinstance(structured["diagnostics"], dict):
+                    structured["diagnostics"] = {}
+                structured["diagnostics"]["rendering_error"] = rendering_error_dict
+            
+            text_content = rendered_markdown
         else:
             structured = tool_result.model_dump(mode="json")
             text_content = _format_tool_content(tool_result)

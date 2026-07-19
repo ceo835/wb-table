@@ -1188,23 +1188,23 @@ def test_mcp_tools_call_wb_daily_operational_summary_returns_structured_content(
     assert "overview" in section_keys
     assert "ads" in section_keys
     body_text = payload["result"]["content"][0]["text"]
-    assert body_text == WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
-    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" not in body_text
-    assert "Проблемные кампании" not in body_text
+    assert body_text != WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" in body_text
     expected = render_wb_daily_operational_summary_markdown(
         FakeRepository().get_wb_daily_operational_summary(
             WbDailyOperationalSummaryRequest(mode="full", top_n=5, diagnostic=True)
         )
     )
     assert structured["legacy_markdown"] == expected
-    assert structured["legacy_markdown"] != body_text
+    assert structured["legacy_markdown"] == body_text
 
 def test_wb_daily_operational_summary_normal_payload_removes_server_generated_narratives() -> None:
     response = _build_transport_summary_response(diagnostic=False)
     payload = _build_tool_result_payload(response)
     structured = payload["structuredContent"]
 
-    assert payload["content"][0]["text"] == WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    assert payload["content"][0]["text"] != WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" in payload["content"][0]["text"]
     assert "legacy_markdown" not in structured
     forbidden_keys = {
         "analysis_summary",
@@ -1236,7 +1236,8 @@ def test_wb_daily_operational_summary_diagnostic_payload_keeps_legacy_markdown_a
     payload = _build_tool_result_payload(response)
     structured = payload["structuredContent"]
 
-    assert payload["content"][0]["text"] == WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    assert payload["content"][0]["text"] != WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" in payload["content"][0]["text"]
     assert "legacy_markdown" in structured
     assert "analysis_summary" in structured
     assert "highlights" in structured
@@ -1423,4 +1424,180 @@ def test_mcp_tools_call_wb_daily_operational_summary_defaults() -> None:
     assert response.status_code == 200
     assert called_payloads[0].include_profit is False
     assert called_payloads[0].include_partial_sections is False
+
+
+def test_wb_daily_operational_summary_contract_audit_compliance() -> None:
+    # 1. Normal tools/call returns non-empty content[0].text which contains ready summary
+    client = build_test_client()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_wb_daily_operational_summary",
+                "arguments": {
+                    "mode": "full",
+                    "top_n": 5,
+                    "diagnostic": False,
+                },
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    res = payload["result"]
+    assert res["content"][0]["type"] == "text"
+    text = res["content"][0]["text"]
+    assert text
+    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" in text
+    assert text != WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    
+    # 2. structuredContent remains available, content_hint exists, Decimal/date serialized to strings
+    sc = res["structuredContent"]
+    assert sc is not None
+    assert sc["content_hint"] == WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    
+    # Assert JSON-serializability (no Decimal objects in Python dict, FastAPI JSONResponse handles this)
+    # The client response has already been serialized, meaning the endpoint output is fully serializable
+    
+    # 3. Two identical calls return same response contract
+    response2 = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "get_wb_daily_operational_summary",
+                "arguments": {
+                    "mode": "full",
+                    "top_n": 5,
+                    "diagnostic": False,
+                },
+            },
+        },
+    )
+    payload2 = response2.json()
+    assert payload2["result"]["content"][0]["text"] == text
+    assert payload2["result"]["structuredContent"] == sc
+    
+    # 4. Diagnostic mode: content[0].text is markdown, legacy_markdown equals content[0].text
+    diag_response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "get_wb_daily_operational_summary",
+                "arguments": {
+                    "mode": "full",
+                    "top_n": 5,
+                    "diagnostic": True,
+                },
+            },
+        },
+    )
+    diag_payload = diag_response.json()
+    diag_text = diag_payload["result"]["content"][0]["text"]
+    diag_sc = diag_payload["result"]["structuredContent"]
+    assert diag_text
+    assert diag_sc["legacy_markdown"] == diag_text
+    
+    # 5. Brief mode is supported
+    brief_response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "get_wb_daily_operational_summary",
+                "arguments": {
+                    "mode": "brief",
+                    "top_n": 5,
+                    "diagnostic": False,
+                },
+            },
+        },
+    )
+    brief_payload = brief_response.json()
+    brief_text = brief_payload["result"]["content"][0]["text"]
+    assert brief_text
+    assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА" in brief_text
+    assert len(brief_text) < len(text)
+    
+    # 6. Upper limit of size (e.g. within 2 MB)
+    assert len(response.content) < 2 * 1024 * 1024
+
+
+def test_wb_daily_operational_summary_renderer_fallback(monkeypatch) -> None:
+    # 7. Renderer exception returns fallback text, public response does not contain traceback, and diagnostics.rendering_error is present
+    def faulty_render(*args, **kwargs):
+        raise RuntimeError("Mock rendering database failure")
+        
+    monkeypatch.setattr(
+        "src.mcp_server.app.render_wb_daily_operational_summary_markdown",
+        faulty_render
+    )
+    
+    # Build a response mock using FakeRepository
+    from src.mcp_server.app import _build_tool_result_payload
+    summary_resp = FakeRepository().get_wb_daily_operational_summary(
+        WbDailyOperationalSummaryRequest(mode="full", top_n=5)
+    )
+    
+    payload = _build_tool_result_payload(summary_resp)
+    text = payload["content"][0]["text"]
+    sc = payload["structuredContent"]
+    
+    # Fallback text matches pattern
+    assert "Сводка рассчитана." in text
+    assert "Оборот:" in text
+    assert "заказы:" in text
+    assert "операционная прибыль:" in text
+    assert "Mock rendering database failure" not in text
+    
+    # Rendering error logged in diagnostics
+    assert "rendering_error" in sc.get("diagnostics", {})
+    err = sc["diagnostics"]["rendering_error"]
+    assert err["error_code"] == "RENDERER_ERROR"
+    assert err["error_message"] == "Mock rendering database failure"
+    # No traceback in public diagnostics
+    assert "traceback" not in err
+
+
+def test_wb_daily_operational_summary_renderer_fallback_no_profit(monkeypatch) -> None:
+    # 8. Renderer exception with no profit info returns fallback without None ₽
+    def faulty_render(*args, **kwargs):
+        raise RuntimeError("Mock rendering database failure")
+        
+    monkeypatch.setattr(
+        "src.mcp_server.app.render_wb_daily_operational_summary_markdown",
+        faulty_render
+    )
+    
+    summary_resp = FakeRepository().get_wb_daily_operational_summary(
+        WbDailyOperationalSummaryRequest(mode="full", top_n=5)
+    )
+    # Clear profit context to simulate lack of profit
+    summary_resp.operating_profit_context = {}
+    for s in summary_resp.sections:
+        if s.key == "overview":
+            s.metrics = [m for m in s.metrics if "прибыль" not in m.metric.lower()]
+            
+    payload = _build_tool_result_payload(summary_resp)
+    text = payload["content"][0]["text"]
+    
+    assert "Сводка рассчитана." in text
+    assert "Оборот:" in text
+    assert "заказы:" in text
+    assert "Данные по операционной прибыли недоступны" in text
+    assert "None" not in text
 
