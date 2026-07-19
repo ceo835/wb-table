@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 import json
 import logging
 import secrets
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -164,6 +164,88 @@ def _build_wb_daily_operational_summary_structured_content(
     return structured
 
 
+
+def _build_wb_daily_operational_summary_minimal_structured_content(
+    tool_result: WbDailyOperationalSummaryResponse,
+) -> dict[str, Any]:
+    report_window = tool_result.report_window or {}
+    diagnostics = tool_result.diagnostics or {}
+    source_freshness = tool_result.source_freshness or []
+    has_non_ok_source = any(
+        (
+            (item.get("status") if isinstance(item, dict) else getattr(item, "status", None))
+            not in (None, "OK")
+        )
+        for item in source_freshness
+    )
+    partial_sections = (
+        diagnostics.get("partial_sections")
+        if isinstance(diagnostics, dict)
+        else getattr(diagnostics, "partial_sections", None)
+    )
+    report_date = (
+        report_window.get("report_date")
+        if isinstance(report_window, dict)
+        else getattr(report_window, "report_date", None)
+    )
+    if hasattr(report_date, "isoformat"):
+        report_date = report_date.isoformat()
+    status_value = "PARTIAL" if has_non_ok_source or partial_sections else "OK"
+    return {
+        "report_date": report_date,
+        "status": status_value,
+        "formula_version": tool_result.formula_version,
+    }
+
+
+def _build_wb_daily_operational_summary_compact_text(
+    tool_result: WbDailyOperationalSummaryResponse,
+) -> str:
+    turnover = None
+    orders = None
+    profit = None
+
+    for section in (tool_result.sections or []):
+        if section.key != "overview":
+            continue
+        for metric in (section.metrics or []):
+            if metric.metric and "оборот" in metric.metric.lower():
+                turnover = metric.value
+            elif metric.metric and "заказ" in metric.metric.lower():
+                orders = metric.value
+            elif metric.metric and "прибыль" in metric.metric.lower():
+                profit = metric.value
+
+    if profit is None:
+        operating_profit_context = tool_result.operating_profit_context or {}
+        overall = (
+            operating_profit_context.get("overall")
+            if isinstance(operating_profit_context, dict)
+            else getattr(operating_profit_context, "overall", None)
+        )
+        overall = overall or {}
+        profit = (
+            overall.get("operating_profit")
+            if isinstance(overall, dict)
+            else getattr(overall, "operating_profit", None)
+        )
+
+    def _fmt(val) -> str | None:
+        if val is None:
+            return None
+        try:
+            d = Decimal(str(val))
+            return f"{d:,.0f}".replace(",", " ")
+        except Exception:
+            return str(val)
+
+    t_str = _fmt(turnover) or "..."
+    o_str = _fmt(orders) or "..."
+    p_str = _fmt(profit)
+    if p_str is not None:
+        return f"Сводка рассчитана. Оборот: {t_str} ₽, заказы: {o_str}, операционная прибыль: {p_str} ₽."
+    return f"Сводка рассчитана. Оборот: {t_str} ₽, заказы: {o_str}. Данные по операционной прибыли недоступны."
+
 def _tool_schema(model) -> dict:
     schema = model.model_json_schema()
     schema.pop("$defs", None)
@@ -232,12 +314,18 @@ def build_mcp_tools_catalog() -> list[dict]:
         {
             "name": "get_wb_daily_operational_summary",
             "description": (
-                "Use structuredContent as the primary source for the user-facing analysis. "
-                "Generate a coherent operational summary in Russian using only facts available in structuredContent. "
-                "Do not mechanically copy content[0].text when structuredContent is available. "
-                "Use content[0].text only as a fallback when structuredContent is unavailable. "
-                "Do not claim causality unless it is confirmed by the provided evidence. "
-                "You may describe simultaneous changes and possible factors, clearly marking them as observations or hypotheses."
+                "Returns the ready user-facing Markdown report in content[0].text. "
+                "In normal mode structuredContent is intentionally minimal and contains only report_date, status, and formula_version. "
+                "Use diagnostic=true only for technical inspection of the extended payload."
+            ),
+            "inputSchema": _tool_schema(WbDailyOperationalSummaryRequest),
+        },
+        {
+            "name": "get_wb_daily_operational_summary_data",
+            "description": (
+                "Returns the full machine-readable structured payload for the WB daily operational summary. "
+                "Use this tool for diagnostics, machine analysis, and payload inspection. "
+                "content[0].text may contain only a short service message."
             ),
             "inputSchema": _tool_schema(WbDailyOperationalSummaryRequest),
         },
@@ -571,79 +659,58 @@ def _format_tool_content(tool_result) -> str:
     return json.dumps(tool_result.model_dump(mode="json"), ensure_ascii=False)
 
 
-def _build_tool_result_payload(tool_result) -> dict:
+def _build_wb_daily_operational_summary_tool_payload(
+    tool_result: WbDailyOperationalSummaryResponse,
+    *,
+    tool_name: str,
+) -> dict:
+    is_data_tool = tool_name == "get_wb_daily_operational_summary_data"
+    is_diagnostic = _is_wb_daily_operational_summary_diagnostic(tool_result)
+    rendered_markdown = None
+    rendering_error_dict = None
+    try:
+        rendered_markdown = render_wb_daily_operational_summary_markdown(tool_result)
+        if not rendered_markdown or not rendered_markdown.strip():
+            raise ValueError("Empty markdown output")
+    except Exception as exc:
+        logger.exception("Failed to render markdown summary")
+        rendering_error_dict = {
+            "error_code": "RENDERER_ERROR",
+            "error_message": str(exc),
+        }
+        rendered_markdown = _build_wb_daily_operational_summary_compact_text(tool_result)
+
+    if is_data_tool or is_diagnostic:
+        structured = _build_wb_daily_operational_summary_structured_content(tool_result, rendered_markdown)
+        structured["content_hint"] = WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+        if rendering_error_dict:
+            if "diagnostics" not in structured or not isinstance(structured["diagnostics"], dict):
+                structured["diagnostics"] = {}
+            structured["diagnostics"]["rendering_error"] = rendering_error_dict
+    else:
+        structured = _build_wb_daily_operational_summary_minimal_structured_content(tool_result)
+
+    text_content = _build_wb_daily_operational_summary_compact_text(tool_result) if is_data_tool else rendered_markdown
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": text_content,
+            }
+        ],
+        "structuredContent": structured,
+        "isError": False,
+    }
+
+
+def _build_tool_result_payload(tool_result, *, tool_name: str | None = None) -> dict:
     try:
         if isinstance(tool_result, WbDailyOperationalSummaryResponse):
-            rendered_markdown = None
-            rendering_error_dict = None
-            try:
-                rendered_markdown = render_wb_daily_operational_summary_markdown(tool_result)
-                if not rendered_markdown or not rendered_markdown.strip():
-                    raise ValueError("Empty markdown output")
-            except Exception as exc:
-                logger.exception("Failed to render markdown summary")
-                rendering_error_dict = {
-                    "error_code": "RENDERER_ERROR",
-                    "error_message": str(exc),
-                }
-                
-                # Build fallback text safely from verified structured data
-                turnover = None
-                orders = None
-                profit = None
-                
-                # Try finding in sections
-                for s in (tool_result.sections or []):
-                    if s.key == "overview":
-                        for m in (s.metrics or []):
-                            if m.metric and "оборот" in m.metric.lower():
-                                turnover = m.value
-                            elif m.metric and "заказ" in m.metric.lower():
-                                orders = m.value
-                            elif m.metric and "прибыль" in m.metric.lower():
-                                profit = m.value
-                                
-                # Try finding profit in operating_profit_context
-                if profit is None:
-                    overall = (tool_result.operating_profit_context or {}).get("overall") or {}
-                    profit = overall.get("operating_profit")
-                
-                def _fmt(val) -> str | None:
-                    if val is None:
-                        return None
-                    try:
-                        d = Decimal(str(val))
-                        return f"{d:,.0f}".replace(",", " ")
-                    except Exception:
-                        return str(val)
-                
-                t_str = _fmt(turnover)
-                o_str = _fmt(orders)
-                p_str = _fmt(profit)
-                
-                if t_str is None:
-                    t_str = "..."
-                if o_str is None:
-                    o_str = "..."
-                
-                if p_str is not None:
-                    fallback_text = f"Сводка рассчитана. Оборот: {t_str} ₽, заказы: {o_str}, операционная прибыль: {p_str} ₽."
-                else:
-                    fallback_text = f"Сводка рассчитана. Оборот: {t_str} ₽, заказы: {o_str}. Данные по операционной прибыли недоступны."
-                
-                rendered_markdown = fallback_text
+            resolved_name = tool_name or "get_wb_daily_operational_summary"
+            return _build_wb_daily_operational_summary_tool_payload(tool_result, tool_name=resolved_name)
 
-            structured = _build_wb_daily_operational_summary_structured_content(tool_result, rendered_markdown)
-            structured["content_hint"] = WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
-            if rendering_error_dict:
-                if "diagnostics" not in structured or not isinstance(structured["diagnostics"], dict):
-                    structured["diagnostics"] = {}
-                structured["diagnostics"]["rendering_error"] = rendering_error_dict
-            
-            text_content = rendered_markdown
-        else:
-            structured = tool_result.model_dump(mode="json")
-            text_content = _format_tool_content(tool_result)
+        structured = tool_result.model_dump(mode="json")
+        text_content = _format_tool_content(tool_result)
     except Exception:
         logger.exception("Failed to build human-readable MCP content")
         structured = tool_result.model_dump(mode="json")
@@ -660,6 +727,15 @@ def _build_tool_result_payload(tool_result) -> dict:
     }
 
 
+def _build_wb_daily_operational_summary_request(arguments: dict) -> WbDailyOperationalSummaryRequest:
+    req_args = dict(arguments or {})
+    if "include_profit" not in req_args:
+        req_args["include_profit"] = True
+    if "include_partial_sections" not in req_args:
+        req_args["include_partial_sections"] = True
+    return WbDailyOperationalSummaryRequest.model_validate(req_args)
+
+
 def _execute_mcp_tool(name: str, arguments: dict, repository: McpRepository) -> dict:
     if name == "db_health":
         result = repository.get_db_health()
@@ -673,16 +749,11 @@ def _execute_mcp_tool(name: str, arguments: dict, repository: McpRepository) -> 
         result = repository.get_price_monitor(PriceMonitorRequest.model_validate(arguments))
     elif name == "get_active_products":
         result = repository.get_active_products(ActiveProductsRequest.model_validate(arguments))
-    elif name == "get_wb_daily_operational_summary":
-        req_args = dict(arguments or {})
-        if "include_profit" not in req_args:
-            req_args["include_profit"] = True
-        if "include_partial_sections" not in req_args:
-            req_args["include_partial_sections"] = True
-        result = repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest.model_validate(req_args))
+    elif name in {"get_wb_daily_operational_summary", "get_wb_daily_operational_summary_data"}:
+        result = repository.get_wb_daily_operational_summary(_build_wb_daily_operational_summary_request(arguments))
     else:
         raise KeyError(name)
-    return _build_tool_result_payload(result)
+    return _build_tool_result_payload(result, tool_name=name)
 
 
 def create_auth_dependency(settings: McpServiceSettings):
