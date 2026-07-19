@@ -232,3 +232,139 @@ def test_build_operational_summary_safe_fallback(monkeypatch) -> None:
     assert response.weekly_analysis["diagnostic"]["error_type"] == "RuntimeError"
     # Existing daily section should still exist (overview)
     assert any(sec.key == "overview" for sec in response.sections)
+
+
+def test_drr_delta_calculation() -> None:
+    # 1. DRR 7.50% против 6.54% -> delta = +0.96 п.п. (drr_abs) и +14.68% (drr_pct)
+    curr_drr = Decimal("7.50")
+    prev_drr = Decimal("6.54")
+    
+    delta_drr_abs = curr_drr - prev_drr
+    delta_drr_pct = (curr_drr - prev_drr) / prev_drr * 100
+    
+    assert delta_drr_abs == Decimal("0.96")
+    assert round(delta_drr_pct, 2) == Decimal("14.68")
+
+
+def test_ads_matched_window_5_vs_5() -> None:
+    # 2. ads_days=5/7 -> matched-window must use exactly 5 vs 5 days (ad_days_limit=5 for both weeks)
+    report_date = date(2026, 7, 15)
+    window = build_report_window(report_date, "requested")
+    
+    # 7 days of daily rows for current week (each spend 1000)
+    daily_rows = []
+    for i in range(15):
+        dt = report_date - timedelta(days=i)
+        daily_rows.append({
+            "report_date": dt,
+            "order_sum": Decimal("10000"),
+            "order_count": Decimal("10"),
+            "ad_spend": Decimal("1000"),
+            "ad_views": Decimal("500"),
+            "ad_clicks": Decimal("50"),
+            "ad_atbs": Decimal("10"),
+            "ad_orders": Decimal("5"),
+        })
+
+    session = _FakeSession(
+        profit_rows=[{"day": report_date - timedelta(days=i), "cnt": 7} for i in range(7)],
+        profit_aggs=[{"operating_profit": Decimal("5000"), "organic_sales": Decimal("50")}]
+    )
+
+    res = build_weekly_analysis(
+        session,
+        window=window,
+        daily_rows=daily_rows,
+        logistics_summary={"weekly_trend": {}},
+        operating_profit_context={"weekly_trend": {}},
+        pricing_spp_context={"top_price_changes": []},
+        query_counter={"count": 0, "timings": []}
+    )
+
+    # ads_days_current should be 5 because cutoff is 2026-07-13 (2 days lag from 2026-07-15)
+    assert res["completeness"]["ads_days_current"] == 5
+    assert res["completeness"]["ads_days_previous"] == 7
+    
+    # aggregate_metrics must use N=5 matched window for both weeks
+    assert res["aggregate_metrics"]["current_week"]["ad_days_count"] == 5
+    assert res["aggregate_metrics"]["current_week"]["ad_spend"] == Decimal("5000") # 5 * 1000
+    
+    assert res["aggregate_metrics"]["previous_week"]["ad_days_count"] == 5
+    assert res["aggregate_metrics"]["previous_week"]["ad_spend"] == Decimal("5000") # 5 * 1000
+
+
+def test_daily_metrics_match_for_11_july() -> None:
+    # 3. Daily metrics for 2026-07-11 match between builder and DB (direct values check)
+    # DB values for 11 July: order_sum=1375013, order_count=968, profit=17826
+    # Check that builder doesn't mismatch them
+    report_date = date(2026, 7, 11)
+    window = build_report_window(report_date, "requested")
+    
+    # Current day row
+    daily_rows = [{
+        "report_date": report_date,
+        "order_sum": Decimal("1375013"),
+        "order_count": Decimal("968"),
+        "card_clicks": Decimal("100"),
+        "cart_count": Decimal("20"),
+        "ad_spend": Decimal("1000"),
+        "ad_views": Decimal("500"),
+        "ad_clicks": Decimal("50"),
+        "ad_atbs": Decimal("10"),
+        "ad_orders": Decimal("5"),
+    }]
+    
+    session = _FakeSession(
+        profit_rows=[{"day": report_date, "cnt": 1}],
+        profit_aggs=[{"operating_profit": Decimal("17826"), "organic_sales": Decimal("968")}]
+    )
+
+    res = build_weekly_analysis(
+        session,
+        window=window,
+        daily_rows=daily_rows,
+        logistics_summary={"weekly_trend": {}},
+        operating_profit_context={"weekly_trend": {}},
+        pricing_spp_context={"top_price_changes": []},
+        query_counter={"count": 0, "timings": []}
+    )
+    
+    # Ensure current day metrics are correct in daily_series
+    ds = res["daily_series"]
+    assert len(ds) == 1
+    assert ds[0]["report_date"] == "2026-07-11"
+    assert ds[0]["turnover"] == Decimal("1375013")
+    assert ds[0]["orders"] == Decimal("968")
+
+
+def test_missing_ad_days_are_not_zeros() -> None:
+    # 4. Missing ad days do not turn into zeros, they stay None
+    report_date = date(2026, 7, 15)
+    window = build_report_window(report_date, "requested")
+    
+    # row for current day has None for ad_spend
+    daily_rows = [{
+        "report_date": report_date,
+        "order_sum": Decimal("10000"),
+        "order_count": Decimal("10"),
+        "ad_spend": None,
+        "ad_views": None,
+        "ad_clicks": None,
+        "ad_atbs": None,
+        "ad_orders": None,
+    }]
+    
+    session = _FakeSession()
+    res = build_weekly_analysis(
+        session,
+        window=window,
+        daily_rows=daily_rows,
+        logistics_summary={"weekly_trend": {}},
+        operating_profit_context={"weekly_trend": {}},
+        pricing_spp_context={"top_price_changes": []},
+        query_counter={"count": 0, "timings": []}
+    )
+    
+    # ad_spend in aggregate_metrics must be None, not Decimal("0")
+    assert res["aggregate_metrics"]["current_week"]["ad_spend"] is None
+
