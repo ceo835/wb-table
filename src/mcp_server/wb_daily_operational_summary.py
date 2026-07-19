@@ -336,16 +336,16 @@ def _empty_section(key: str, reason: str) -> WbDailyOperationalExcludedSectionRe
 
 def build_overview_section(current: dict[str, Any], previous: dict[str, Any], current_7d: dict[str, Any], previous_7d: dict[str, Any]) -> WbDailyOperationalSectionResponse:
     order_sum_delta = _safe_pct_delta(current.get("order_sum"), previous.get("order_sum"))
-    ad_spend_delta = _safe_pct_delta(current.get("ad_spend"), previous.get("ad_spend"))
+    ad_spend_delta = _safe_pct_delta(current.get("ad_writeoff_total"), previous.get("ad_writeoff_total"))
     summary: list[str] = []
     if _is_positive(order_sum_delta):
         summary.append(f"Оборот заказов вырос до {_format_currency(current.get('order_sum'))} ({_format_percent(order_sum_delta)} к предыдущему дню).")
     elif _is_negative(order_sum_delta):
         summary.append(f"Оборот заказов снизился до {_format_currency(current.get('order_sum'))} ({_format_percent(order_sum_delta)} к предыдущему дню).")
     if _is_positive(ad_spend_delta):
-        summary.append(f"Рекламный расход вырос до {_format_currency(current.get('ad_spend'))}.")
+        summary.append(f"Фактические рекламные списания выросли до {_format_currency(current.get('ad_writeoff_total'))}.")
     elif _is_negative(ad_spend_delta):
-        summary.append(f"Рекламный расход снизился до {_format_currency(current.get('ad_spend'))}.")
+        summary.append(f"Фактические рекламные списания снизились до {_format_currency(current.get('ad_writeoff_total'))}.")
     if not summary:
         summary.append("Суточные изменения по ключевым метрикам не вышли за заметный диапазон.")
     return WbDailyOperationalSectionResponse(
@@ -356,7 +356,7 @@ def build_overview_section(current: dict[str, Any], previous: dict[str, Any], cu
         metrics=[
             _metric_row("Оборот заказов", current.get("order_sum"), previous.get("order_sum"), current_7d.get("order_sum"), previous_7d.get("order_sum")),
             _metric_row("Заказы", current.get("order_count"), previous.get("order_count"), current_7d.get("order_count"), previous_7d.get("order_count")),
-            _metric_row("Рекламный расход", current.get("ad_spend"), previous.get("ad_spend"), current_7d.get("ad_spend"), previous_7d.get("ad_spend")),
+            _metric_row("Фактические рекламные списания", current.get("ad_writeoff_total"), previous.get("ad_writeoff_total"), current_7d.get("ad_writeoff_total"), previous_7d.get("ad_writeoff_total")),
         ],
     )
 
@@ -458,14 +458,38 @@ def build_ads_section(current: dict[str, Any], previous: dict[str, Any], current
     summary = ["Рекламный блок собран по дневным данным кампаний и сравнен с предыдущим полным днем."]
     if problematic_rows:
         summary.append("Есть кампании, где расход растет быстрее заказов или расход остается без заказов.")
+    curr_rev = current.get("ad_revenue_total")
+    prev_rev = previous.get("ad_revenue_total")
+    c7d_rev = current_7d.get("ad_revenue_total")
+    p7d_rev = previous_7d.get("ad_revenue_total")
+
+    def _calc_campaign_drr(spend, revenue, turnover):
+        if spend is None:
+            return None
+        s = _to_decimal(spend)
+        r = _to_decimal(revenue)
+        t = _to_decimal(turnover)
+        if r and r > 0:
+            return s / r * Decimal("100")
+        if t and t > 0:
+            return s / t * Decimal("100")
+        return None
+
+    curr_drr = _calc_campaign_drr(current.get("ad_campaign_spend_total"), curr_rev, current.get("order_sum"))
+    prev_drr = _calc_campaign_drr(previous.get("ad_campaign_spend_total"), prev_rev, previous.get("order_sum"))
+    c7d_drr = _calc_campaign_drr(current_7d.get("ad_campaign_spend_total"), c7d_rev, current_7d.get("order_sum"))
+    p7d_drr = _calc_campaign_drr(previous_7d.get("ad_campaign_spend_total"), p7d_rev, previous_7d.get("order_sum"))
+
+    drr_label = "ДРР (по кампаниям)" if (curr_rev and curr_rev > 0) else "Доля расходов по кампаниям от оборота"
+
     return WbDailyOperationalSectionResponse(
         key="ads",
         title=SECTION_TITLES["ads"],
         status="OK",
         summary=summary,
         metrics=[
-            _metric_row("Расход", current.get("ad_spend"), previous.get("ad_spend"), current_7d.get("ad_spend"), previous_7d.get("ad_spend")),
-            _metric_row("ДРР", current.get("drr"), previous.get("drr"), current_7d.get("drr"), previous_7d.get("drr"), use_percentage_points=True),
+            _metric_row("Расход по статистике кампаний", current.get("ad_campaign_spend_total"), previous.get("ad_campaign_spend_total"), current_7d.get("ad_campaign_spend_total"), previous_7d.get("ad_campaign_spend_total")),
+            _metric_row(drr_label, curr_drr, prev_drr, c7d_drr, p7d_drr, use_percentage_points=True),
             _metric_row("CPC", current.get("cpc"), previous.get("cpc"), current_7d.get("cpc"), previous_7d.get("cpc")),
             _metric_row("CPM", current.get("cpm"), previous.get("cpm"), current_7d.get("cpm"), previous_7d.get("cpm")),
             _metric_row("CPO", current.get("cpo"), previous.get("cpo"), current_7d.get("cpo"), previous_7d.get("cpo")),

@@ -290,23 +290,51 @@ def build_weekly_analysis(
         ad_rows = sorted_rows[:ad_days_limit]
         
         ad_spend = safe_sum("ad_spend", ad_rows)
+        ad_writeoff_total = safe_sum("ad_writeoff_total", ad_rows)
+        if ad_writeoff_total is None:
+            ad_writeoff_total = ad_spend
+            
+        ad_campaign_spend_total = safe_sum("ad_campaign_spend_total", ad_rows)
+        if ad_campaign_spend_total is None:
+            ad_campaign_spend_total = ad_spend
+            
+        ad_revenue_total = safe_sum("ad_revenue_total", ad_rows)
+        ad_turnover = safe_sum("order_sum", ad_rows)
+        
         ad_impressions = safe_sum("ad_views", ad_rows)
         ad_clicks = safe_sum("ad_clicks", ad_rows)
         ad_carts = safe_sum("ad_atbs", ad_rows)
         ad_orders = safe_sum("ad_orders", ad_rows)
-        ad_turnover = safe_sum("order_sum", ad_rows)
-
+        
         res["ad_spend"] = ad_spend
+        res["ad_writeoff_total"] = ad_writeoff_total
+        res["ad_campaign_spend_total"] = ad_campaign_spend_total
+        res["ad_revenue_total"] = ad_revenue_total
+        res["ad_turnover"] = ad_turnover
+        
         res["ad_impressions"] = ad_impressions
         res["ad_clicks"] = ad_clicks
         res["ad_carts"] = ad_carts
         res["ad_orders"] = ad_orders
-        res["ad_turnover"] = ad_turnover
         res["ad_days_count"] = len(ad_rows)
-        res["drr"] = _safe_div(ad_spend, ad_turnover) * 100 if ad_turnover else None
-        res["cpc"] = _safe_div(ad_spend, ad_clicks)
-        res["cpo"] = _safe_div(ad_spend, ad_orders)
-        res["cost_per_ad_cart"] = _safe_div(ad_spend, ad_carts)
+        
+        # Calculate campaign conversions based on campaign statistics spend
+        res["cpc"] = _safe_div(ad_campaign_spend_total, ad_clicks)
+        res["cpo"] = _safe_div(ad_campaign_spend_total, ad_orders)
+        res["cost_per_ad_cart"] = _safe_div(ad_campaign_spend_total, ad_carts)
+        
+        cpm_val = _safe_div(ad_campaign_spend_total, ad_impressions)
+        res["cpm"] = cpm_val * 1000 if cpm_val is not None else None
+        
+        # Campaign DRR only if attributed revenue is available
+        if ad_revenue_total and ad_revenue_total > 0:
+            drr_val = _safe_div(ad_campaign_spend_total, ad_revenue_total)
+            res["drr"] = drr_val * 100 if drr_val is not None else None
+            res["campaign_spend_share"] = None
+        else:
+            res["drr"] = None
+            share_val = _safe_div(ad_campaign_spend_total, turnover)
+            res["campaign_spend_share"] = share_val * 100 if share_val is not None else None
 
         # Search metrics
         res["search_clicks"] = safe_sum("search_clicks", rows)

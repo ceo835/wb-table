@@ -608,7 +608,12 @@ def _execute_mcp_tool(name: str, arguments: dict, repository: McpRepository) -> 
     elif name == "get_active_products":
         result = repository.get_active_products(ActiveProductsRequest.model_validate(arguments))
     elif name == "get_wb_daily_operational_summary":
-        result = repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest.model_validate(arguments))
+        req_args = dict(arguments or {})
+        if "include_profit" not in req_args:
+            req_args["include_profit"] = True
+        if "include_partial_sections" not in req_args:
+            req_args["include_partial_sections"] = True
+        result = repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest.model_validate(req_args))
     else:
         raise KeyError(name)
     return _build_tool_result_payload(result)

@@ -1372,5 +1372,55 @@ def test_wb_daily_operational_summary_rules_in_prompt() -> None:
     assert "6-8" in prompt
     assert "3-4" in prompt
     assert "ПРАВИЛА ИСКЛЮЧЕНИЯ ПОВТОРОВ" in prompt
-    assert "снижение совпало с" in prompt
+    assert "снижение операционной прибыли совпало с" in prompt
+
+
+def test_mcp_tools_call_wb_daily_operational_summary_defaults() -> None:
+    called_payloads = []
+    class CaptureRepository(FakeRepository):
+        def get_wb_daily_operational_summary(self, payload: WbDailyOperationalSummaryRequest) -> WbDailyOperationalSummaryResponse:
+            called_payloads.append(payload)
+            return super().get_wb_daily_operational_summary(payload)
+            
+    client = build_test_client(repository=CaptureRepository())
+    
+    # 1. Omitted case (should resolve to True)
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "get_wb_daily_operational_summary",
+                "arguments": {},
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert called_payloads[0].include_profit is True
+    assert called_payloads[0].include_partial_sections is True
+
+    # 2. Explicit False case (should resolve to False)
+    called_payloads.clear()
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "tools/call",
+            "params": {
+                "name": "get_wb_daily_operational_summary",
+                "arguments": {
+                    "include_profit": False,
+                    "include_partial_sections": False,
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert called_payloads[0].include_profit is False
+    assert called_payloads[0].include_partial_sections is False
 

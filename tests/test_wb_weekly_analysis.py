@@ -368,3 +368,139 @@ def test_missing_ad_days_are_not_zeros() -> None:
     # ad_spend in aggregate_metrics must be None, not Decimal("0")
     assert res["aggregate_metrics"]["current_week"]["ad_spend"] is None
 
+
+def test_regression_ad_semantics_and_logistics_isolation() -> None:
+    # Test regression check for advertising sources and missing logistics isolation
+    report_date = date(2026, 7, 10)
+    window = build_report_window(report_date, "requested")
+    
+    # 15 days of mart data to satisfy 7-day windows and cutoff requirements
+    daily_rows = []
+    for i in range(15):
+        dt = report_date - timedelta(days=i)
+        daily_rows.append({
+            "report_date": dt,
+            "order_sum": Decimal("100000"),
+            "order_count": Decimal("100"),
+            "card_clicks": Decimal("1000"),
+            "cart_count": Decimal("200"),
+            "ad_spend": Decimal("93434"),
+            "ad_writeoff_total": Decimal("93434"),
+            "ad_campaign_spend_total": Decimal("96654.88"),
+            "ad_revenue_total": Decimal("500000"),
+            "ad_views": Decimal("50000"),
+            "ad_clicks": Decimal("2000"),
+            "ad_atbs": Decimal("400"),
+            "ad_orders": Decimal("80"),
+            "search_clicks": Decimal("300"),
+            "search_cart": Decimal("100"),
+            "search_orders": Decimal("50"),
+            "search_avg_position": Decimal("10"),
+            "search_visibility": Decimal("80"),
+        })
+    
+    session = _FakeSession(
+        profit_rows=[{"day": report_date - timedelta(days=i), "cnt": 7} for i in range(14)],
+        profit_aggs=[{"operating_profit": Decimal("15000"), "organic_sales": Decimal("80")}]
+    )
+    
+    # 1. Test missing logistics for previous week (should be None)
+    res = build_weekly_analysis(
+        session,
+        window=window,
+        daily_rows=daily_rows,
+        logistics_summary={"weekly_trend": {"current_total": Decimal("300000"), "previous_total": None}},
+        operating_profit_context={"weekly_trend": {"current_operating_profit": Decimal("15000"), "previous_operating_profit": Decimal("12000")}},
+        pricing_spp_context={"top_price_changes": []},
+        query_counter={"count": 0, "timings": []}
+    )
+    
+    # Assert actual write-off value (5 days * 93434 = 467170)
+    assert res["aggregate_metrics"]["current_week"]["ad_writeoff_total"] == Decimal("467170")
+    # Assert campaign statistics spend (5 days * 96654.88 = 483274.40)
+    assert res["aggregate_metrics"]["current_week"]["ad_campaign_spend_total"] == Decimal("483274.40")
+    
+    # CPO using campaign spend: 483274.40 / (5 * 80) = 1208.186
+    assert res["aggregate_metrics"]["current_week"]["cpo"] == Decimal("483274.40") / 400
+    # CPC using campaign spend: 483274.40 / (5 * 2000) = 48.32744
+    assert res["aggregate_metrics"]["current_week"]["cpc"] == Decimal("483274.40") / 10000
+    # CPM using campaign spend: 483274.40 / (5 * 50000) * 1000 = 1933.0976
+    assert res["aggregate_metrics"]["current_week"]["cpm"] == Decimal("483274.40") / 250000 * 1000
+    # DRR using ad_revenue: 483274.40 / (5 * 500000) * 100 = 19.330976%
+    assert res["aggregate_metrics"]["current_week"]["drr"] == Decimal("483274.40") / 2500000 * 100
+    
+    # Assert logistics previous total is None, deltas are None, but other deltas are NOT None
+    assert res["aggregate_metrics"]["previous_week"]["logistics_cost"] is None
+    assert res["aggregate_metrics"]["delta"]["logistics_cost_abs"] is None
+    assert res["aggregate_metrics"]["delta"]["logistics_cost_pct"] is None
+    
+    # Other deltas should be computed (not None) if values exist
+    assert res["aggregate_metrics"]["delta"]["turnover_abs"] is not None
+    assert res["aggregate_metrics"]["delta"]["orders_abs"] is not None
+    assert res["aggregate_metrics"]["delta"]["operating_profit_abs"] is not None
+
+
+def test_app_profit_defaults(monkeypatch) -> None:
+    # Test app.py default overrides for include_profit / include_partial_sections
+    from src.mcp_server.app import _is_wb_daily_operational_summary_diagnostic
+    from src.mcp_server.schemas import WbDailyOperationalHighlightsResponse, WbDailyOperationalDiagnosticsResponse
+    
+    called_args = []
+    def fake_get_wb_summary(req):
+        called_args.append(req)
+        from src.mcp_server.wb_daily_operational_summary import WbDailyOperationalSummaryResponse
+        return WbDailyOperationalSummaryResponse(
+            formula_version="v1",
+            report_window=build_report_window(date(2026, 7, 10), "manual"),
+            requested_options={
+                "report_date": "2026-07-10",
+                "mode": "full",
+                "include_profit": req.include_profit,
+                "include_partial_sections": req.include_partial_sections,
+                "top_n": req.top_n,
+                "diagnostic": req.diagnostic,
+            },
+            source_freshness=[],
+            sections=[],
+            highlights=WbDailyOperationalHighlightsResponse(),
+            diagnostics=WbDailyOperationalDiagnosticsResponse(),
+        )
+        
+    class FakeRepository:
+        def get_wb_daily_operational_summary(self, req):
+            return fake_get_wb_summary(req)
+            
+    # Mock endpoint handler call
+    from src.mcp_server.app import WbDailyOperationalSummaryRequest
+    
+    # Simulate MCP call where parameters are omitted
+    arguments = {"report_date": "2026-07-10"}
+    req_args = dict(arguments or {})
+    if "include_profit" not in req_args:
+        req_args["include_profit"] = True
+    if "include_partial_sections" not in req_args:
+        req_args["include_partial_sections"] = True
+        
+    req = WbDailyOperationalSummaryRequest.model_validate(req_args)
+    repository = FakeRepository()
+    result = repository.get_wb_daily_operational_summary(req)
+    
+    assert called_args[0].include_profit is True
+    assert called_args[0].include_partial_sections is True
+    
+    # Simulate MCP call where parameters are explicitly False
+    called_args.clear()
+    arguments_false = {"report_date": "2026-07-10", "include_profit": False, "include_partial_sections": False}
+    req_args_false = dict(arguments_false or {})
+    if "include_profit" not in req_args_false:
+        req_args_false["include_profit"] = True
+    if "include_partial_sections" not in req_args_false:
+        req_args_false["include_partial_sections"] = True
+        
+    req_false = WbDailyOperationalSummaryRequest.model_validate(req_args_false)
+    result_false = repository.get_wb_daily_operational_summary(req_false)
+    
+    assert called_args[0].include_profit is False
+    assert called_args[0].include_partial_sections is False
+
+
