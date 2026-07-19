@@ -1188,11 +1188,7 @@ def test_mcp_tools_call_wb_daily_operational_summary_returns_structured_content(
     assert "overview" in section_keys
     assert "ads" in section_keys
     body_text = payload["result"]["content"][0]["text"]
-    assert body_text == (
-        "\u0421\u0444\u043e\u0440\u043c\u0438\u0440\u0443\u0439 \u043f\u043e\u0434\u0440\u043e\u0431\u043d\u0443\u044e \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u043e\u043d\u043d\u0443\u044e \u0441\u0432\u043e\u0434\u043a\u0443 \u043d\u0430 \u0440\u0443\u0441\u0441\u043a\u043e\u043c \u044f\u0437\u044b\u043a\u0435 \u043f\u043e structuredContent.\n"
-        "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0435\u0440\u0435\u0434\u0430\u043d\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435. \u041d\u0435 \u0443\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0439 \u043f\u0440\u0438\u0447\u0438\u043d\u043d\u043e\u0441\u0442\u044c \u0431\u0435\u0437 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f.\n"
-        "\u041d\u0435 \u043a\u043e\u043f\u0438\u0440\u0443\u0439 server-generated narrative \u043c\u0435\u0445\u0430\u043d\u0438\u0447\u0435\u0441\u043a\u0438."
-    )
+    assert body_text == WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
     assert "ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" not in body_text
     assert "Проблемные кампании" not in body_text
     expected = render_wb_daily_operational_summary_markdown(
@@ -1362,3 +1358,19 @@ def test_wb_daily_operational_summary_brief_markdown_is_shorter_than_full() -> N
         repository.get_wb_daily_operational_summary(WbDailyOperationalSummaryRequest(mode="brief", top_n=5))
     )
     assert len(brief_markdown) < len(full_markdown)
+
+
+def test_wb_daily_operational_summary_rules_in_prompt() -> None:
+    prompt = WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
+    assert "Итоги дня и недели" in prompt
+    assert "Трафик и реклама" in prompt
+    assert "Главные товарные отклонения" in prompt
+    assert "Цены, СПП и остатки" in prompt
+    assert "Что требует внимания" in prompt
+    assert "Фокус дня" in prompt
+    assert "1-2 страницы" in prompt
+    assert "6-8" in prompt
+    assert "3-4" in prompt
+    assert "ПРАВИЛА ИСКЛЮЧЕНИЯ ПОВТОРОВ" in prompt
+    assert "снижение совпало с" in prompt
+
