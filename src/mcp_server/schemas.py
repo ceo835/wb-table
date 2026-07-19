@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
@@ -316,6 +316,7 @@ class WbDailyOperationalSummaryResponse(ApiModel):
     ranked_signals: list[dict[str, Any]] = Field(default_factory=list)
     data_anomalies: list[dict[str, Any]] = Field(default_factory=list)
     analysis_summary: dict[str, Any] = Field(default_factory=dict)
+    weekly_analysis: dict[str, Any] | None = Field(default=None)
 
 
 class ErrorResponse(ApiModel):

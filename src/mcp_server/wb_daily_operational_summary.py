@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -971,6 +971,26 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         formula_version=FORMULA_VERSION,
     )
 
+    try:
+        from src.mcp_server.wb_weekly_analysis import build_weekly_analysis
+        weekly_analysis_val = build_weekly_analysis(
+            session,
+            window=window,
+            daily_rows=daily_rows,
+            logistics_summary=logistics_summary,
+            operating_profit_context=operating_profit_context,
+            pricing_spp_context=pricing_spp_context,
+            query_counter=query_counter,
+        )
+    except Exception as err:
+        weekly_analysis_val = {
+            "status": "UNAVAILABLE",
+            "diagnostic": {
+                "error_type": type(err).__name__,
+                "message": str(err),
+            }
+        }
+
     response = WbDailyOperationalSummaryResponse(
         formula_version=FORMULA_VERSION,
         report_window=window,
@@ -1005,6 +1025,7 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         ranked_signals=analysis_payload.get("ranked_signals", []),
         data_anomalies=analysis_payload.get("data_anomalies", []),
         analysis_summary=analysis_payload.get("analysis_summary", {}),
+        weekly_analysis=weekly_analysis_val,
     )
     if payload.diagnostic:
         stage_started = perf_counter()

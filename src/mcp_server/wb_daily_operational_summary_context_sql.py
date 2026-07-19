@@ -60,7 +60,7 @@ def _unique_nm_ids(nm_ids: Sequence[int]) -> list[int]:
 def _trend_points(rows: Iterable[dict[str, Any]], *, date_key: str, metric_keys: Sequence[str]) -> list[dict[str, Any]]:
     points: list[dict[str, Any]] = []
     for row in sorted(rows, key=lambda item: item.get(date_key) or date.min):
-        point = {"date": row.get(date_key)}
+        point = {date_key: row.get(date_key), "date": row.get(date_key)}
         for key in metric_keys:
             point[key] = row.get(key)
         points.append(point)
@@ -480,29 +480,112 @@ def fetch_search_query_context(
         return []
     sql = text(
         """
+        with daily_base as (
+            select
+                date,
+                nm_id,
+                search_query,
+                max(supplier_article) as supplier_article,
+                max(title) as title,
+                avg(avg_position) filter (where avg_position is not null) as avg_position,
+                avg(avg_position_prev) filter (where avg_position_prev is not null) as avg_position_prev,
+                avg(visibility) filter (where visibility is not null) as visibility,
+                avg(visibility_prev) filter (where visibility_prev is not null) as visibility_prev,
+                sum(coalesce(search_clicks, 0)) as search_clicks,
+                sum(coalesce(search_cart, 0)) as search_cart,
+                sum(coalesce(search_orders, 0)) as search_orders,
+                sum(coalesce(search_clicks_prev, 0)) as search_clicks_prev,
+                sum(coalesce(search_cart_prev, 0)) as search_cart_prev,
+                sum(coalesce(search_orders_prev, 0)) as search_orders_prev
+            from fact_search_query_metric
+            where date >= :trend_current_from and date <= :report_date and nm_id in :nm_ids
+            group by date, nm_id, search_query
+        ),
+        current_day as (
+            select *
+            from daily_base
+            where date = :report_date
+        ),
+        previous_day as (
+            select *
+            from daily_base
+            where date = :compare_date
+        ),
+        ranked_candidates as (
+            select
+                ranked.nm_id,
+                ranked.search_query
+            from (
+                select
+                    c.nm_id,
+                    c.search_query,
+                    case
+                        when c.avg_position is not null and coalesce(c.avg_position_prev, p.avg_position) is not null
+                            then c.avg_position - coalesce(c.avg_position_prev, p.avg_position)
+                    end as position_delta_day,
+                    c.search_clicks - coalesce(c.search_clicks_prev, p.search_clicks, 0) as clicks_delta_day,
+                    c.search_orders - coalesce(c.search_orders_prev, p.search_orders, 0) as orders_delta_day,
+                    case
+                        when c.avg_position is not null
+                             and coalesce(c.avg_position_prev, p.avg_position) is not null
+                             and c.avg_position - coalesce(c.avg_position_prev, p.avg_position) <= 0
+                             and (
+                                 c.search_clicks - coalesce(c.search_clicks_prev, p.search_clicks, 0) > 0
+                                 or c.search_orders - coalesce(c.search_orders_prev, p.search_orders, 0) > 0
+                             )
+                            then 1
+                        else 0
+                    end as positive_rank_flag
+                from current_day c
+                left join previous_day p
+                    on p.nm_id = c.nm_id
+                   and p.search_query = c.search_query
+            ) ranked
+            order by
+                positive_rank_flag asc,
+                position_delta_day desc nulls last,
+                abs(orders_delta_day) desc,
+                abs(clicks_delta_day) desc,
+                nm_id asc,
+                search_query asc
+            limit :top_n
+        )
         select
-            date,
-            nm_id,
-            search_query,
-            max(supplier_article) as supplier_article,
-            max(title) as title,
-            avg(avg_position) filter (where avg_position is not null) as avg_position,
-            avg(avg_position_prev) filter (where avg_position_prev is not null) as avg_position_prev,
-            avg(visibility) filter (where visibility is not null) as visibility,
-            avg(visibility_prev) filter (where visibility_prev is not null) as visibility_prev,
-            sum(coalesce(search_clicks, 0)) as search_clicks,
-            sum(coalesce(search_cart, 0)) as search_cart,
-            sum(coalesce(search_orders, 0)) as search_orders,
-            sum(coalesce(search_clicks_prev, 0)) as search_clicks_prev,
-            sum(coalesce(search_cart_prev, 0)) as search_cart_prev,
-            sum(coalesce(search_orders_prev, 0)) as search_orders_prev
-        from fact_search_query_metric
-        where date >= :trend_current_from and date <= :report_date and nm_id in :nm_ids
-        group by date, nm_id, search_query
-        order by nm_id asc, search_query asc, date asc
+            d.date,
+            d.nm_id,
+            d.search_query,
+            d.supplier_article,
+            d.title,
+            d.avg_position,
+            d.avg_position_prev,
+            d.visibility,
+            d.visibility_prev,
+            d.search_clicks,
+            d.search_cart,
+            d.search_orders,
+            d.search_clicks_prev,
+            d.search_cart_prev,
+            d.search_orders_prev
+        from daily_base d
+        join ranked_candidates r
+          on r.nm_id = d.nm_id
+         and r.search_query = d.search_query
+        order by d.nm_id asc, d.search_query asc, d.date asc
         """
     ).bindparams(bindparam("nm_ids", expanding=True))
-    rows = _execute_mappings(session, sql, {"trend_current_from": trend_current_from, "report_date": report_date, "nm_ids": list(nm_ids)}, query_counter, "search_query_context")
+    rows = _execute_mappings(
+        session,
+        sql,
+        {
+            "trend_current_from": trend_current_from,
+            "report_date": report_date,
+            "compare_date": compare_date,
+            "nm_ids": list(nm_ids),
+            "top_n": top_n,
+        },
+        query_counter,
+        "search_query_context",
+    )
     grouped: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[(int(row["nm_id"]), str(row["search_query"]))].append(row)
@@ -692,6 +775,7 @@ def build_extended_context(
             "buyout_count": row.get("buyout_count"),
             "buyout_sum": row.get("buyout_sum"),
             "buyout_status": "PARTIAL",
+            "trend_14d": row.get("trend_14d") or [],
         })
 
     data_gaps: list[dict[str, Any]] = [
