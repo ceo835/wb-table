@@ -165,39 +165,6 @@ def _build_wb_daily_operational_summary_structured_content(
 
 
 
-def _build_wb_daily_operational_summary_minimal_structured_content(
-    tool_result: WbDailyOperationalSummaryResponse,
-) -> dict[str, Any]:
-    report_window = tool_result.report_window or {}
-    diagnostics = tool_result.diagnostics or {}
-    source_freshness = tool_result.source_freshness or []
-    has_non_ok_source = any(
-        (
-            (item.get("status") if isinstance(item, dict) else getattr(item, "status", None))
-            not in (None, "OK")
-        )
-        for item in source_freshness
-    )
-    partial_sections = (
-        diagnostics.get("partial_sections")
-        if isinstance(diagnostics, dict)
-        else getattr(diagnostics, "partial_sections", None)
-    )
-    report_date = (
-        report_window.get("report_date")
-        if isinstance(report_window, dict)
-        else getattr(report_window, "report_date", None)
-    )
-    if hasattr(report_date, "isoformat"):
-        report_date = report_date.isoformat()
-    status_value = "PARTIAL" if has_non_ok_source or partial_sections else "OK"
-    return {
-        "report_date": report_date,
-        "status": status_value,
-        "formula_version": tool_result.formula_version,
-    }
-
-
 def _build_wb_daily_operational_summary_compact_text(
     tool_result: WbDailyOperationalSummaryResponse,
 ) -> str:
@@ -315,8 +282,9 @@ def build_mcp_tools_catalog() -> list[dict]:
             "name": "get_wb_daily_operational_summary",
             "description": (
                 "Returns the ready user-facing Markdown report in content[0].text. "
-                "In normal mode structuredContent is intentionally minimal and contains only report_date, status, and formula_version. "
-                "Use diagnostic=true only for technical inspection of the extended payload."
+                "In normal mode structuredContent is not returned. "
+                "Use diagnostic=true only for technical inspection of the extended payload, "
+                "or use get_wb_daily_operational_summary_data for the full structured payload."
             ),
             "inputSchema": _tool_schema(WbDailyOperationalSummaryRequest),
         },
@@ -680,6 +648,16 @@ def _build_wb_daily_operational_summary_tool_payload(
         }
         rendered_markdown = _build_wb_daily_operational_summary_compact_text(tool_result)
 
+    payload = {
+        "content": [
+            {
+                "type": "text",
+                "text": _build_wb_daily_operational_summary_compact_text(tool_result) if is_data_tool else rendered_markdown,
+            }
+        ],
+        "isError": False,
+    }
+
     if is_data_tool or is_diagnostic:
         structured = _build_wb_daily_operational_summary_structured_content(tool_result, rendered_markdown)
         structured["content_hint"] = WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
@@ -687,20 +665,9 @@ def _build_wb_daily_operational_summary_tool_payload(
             if "diagnostics" not in structured or not isinstance(structured["diagnostics"], dict):
                 structured["diagnostics"] = {}
             structured["diagnostics"]["rendering_error"] = rendering_error_dict
-    else:
-        structured = _build_wb_daily_operational_summary_minimal_structured_content(tool_result)
+        payload["structuredContent"] = structured
 
-    text_content = _build_wb_daily_operational_summary_compact_text(tool_result) if is_data_tool else rendered_markdown
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": text_content,
-            }
-        ],
-        "structuredContent": structured,
-        "isError": False,
-    }
+    return payload
 
 
 def _build_tool_result_payload(tool_result, *, tool_name: str | None = None) -> dict:

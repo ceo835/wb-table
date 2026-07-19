@@ -1239,15 +1239,10 @@ def test_mcp_tools_call_wb_daily_operational_summary_data_returns_full_structure
 def test_wb_daily_operational_summary_normal_payload_removes_server_generated_narratives() -> None:
     response = _build_transport_summary_response(diagnostic=False)
     payload = _build_tool_result_payload(response, tool_name="get_wb_daily_operational_summary")
-    structured = payload["structuredContent"]
 
     assert payload["content"][0]["text"] != WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
     assert "# ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" in payload["content"][0]["text"]
-    assert structured == {
-        "report_date": "2026-06-18",
-        "status": "OK",
-        "formula_version": "v1",
-    }
+    assert "structuredContent" not in payload
 
 def test_wb_daily_operational_summary_diagnostic_payload_keeps_legacy_markdown_and_narratives() -> None:
     response = _build_transport_summary_response(diagnostic=True)
@@ -1476,11 +1471,7 @@ def test_wb_daily_operational_summary_contract_audit_compliance() -> None:
     assert text
     assert "# ЕЖЕДНЕВНАЯ ОПЕРАТИВНАЯ СВОДКА WILDBERRIES" in text
     assert text != WB_DAILY_OPERATIONAL_SUMMARY_CONTENT_HINT
-    assert res["structuredContent"] == {
-        "report_date": "2026-06-18",
-        "status": "OK",
-        "formula_version": "v1",
-    }
+    assert "structuredContent" not in res
 
     response2 = client.post(
         "/mcp",
@@ -1501,7 +1492,7 @@ def test_wb_daily_operational_summary_contract_audit_compliance() -> None:
     )
     payload2 = response2.json()
     assert payload2["result"]["content"][0]["text"] == text
-    assert payload2["result"]["structuredContent"] == res["structuredContent"]
+    assert "structuredContent" not in payload2["result"]
 
     diag_response = client.post(
         "/mcp",
@@ -1595,11 +1586,7 @@ def test_wb_daily_operational_summary_renderer_fallback(monkeypatch) -> None:
         tool_name="get_wb_daily_operational_summary",
     )
     assert "Сводка рассчитана." in summary_payload["content"][0]["text"]
-    assert summary_payload["structuredContent"] == {
-        "report_date": "2026-06-18",
-        "status": "OK",
-        "formula_version": "v1",
-    }
+    assert "structuredContent" not in summary_payload
 
     data_payload = _build_tool_result_payload(
         summary_resp,
