@@ -677,7 +677,7 @@ def render_wb_daily_operational_summary_markdown(response: WbDailyOperationalSum
     lines.append("## Операционная прибыль по VVBromo")
     if profit_section is not None and profit_section.metrics:
         lines.append(_render_metric_table(profit_section.metrics))
-        note = "Источник partial: блок строится только по товарам VVBromo."
+        note = "Partial: только товары VVBromo."
         if profit_section.status == "STALE":
             note = "Источник partial: данные по VVBromo доступны с отставанием и могут быть неполными."
         lines.append("")
@@ -736,7 +736,7 @@ def render_wb_daily_operational_summary_markdown(response: WbDailyOperationalSum
                 )
             )
             lines.append("")
-            lines.append("- Оценка рассчитана по общей скорости заказов артикула, а не по продажам отдельного склада.")
+            lines.append("- Оценка по общей скорости заказов артикула.")
         else:
             lines.append(NO_DATA_TEXT)
         lines.append("")
