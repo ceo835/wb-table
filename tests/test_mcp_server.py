@@ -1341,29 +1341,27 @@ def test_wb_daily_operational_summary_brief_and_full_share_same_structured_metri
     assert full.sections[0].metrics[0].trend_7d_pct == brief.sections[0].metrics[0].trend_7d_pct
 
 
-def test_wb_daily_operational_summary_full_markdown_contains_required_sections() -> None:
+def test_wb_daily_operational_summary_full_markdown_contains_compact_sections() -> None:
     markdown = render_wb_daily_operational_summary_markdown(
         FakeRepository().get_wb_daily_operational_summary(
             WbDailyOperationalSummaryRequest(mode="full", top_n=5, diagnostic=False)
         )
     )
     required_sections = [
-        "Главное за день",
-        "Трафик и видимость",
-        "Воронка и конверсия",
-        "Рекламная эффективность",
-        "Продажи и оборот",
-        "Прибыль и расходы",
-        "Остатки и склады",
-        "Ассортимент",
-        "Поиск и видимость",
-        "Приоритетные проверки",
-        "Сценарный итог",
+        "\u0418\u0442\u043e\u0433 \u0434\u043d\u044f",
+        "\u041a\u043b\u044e\u0447\u0435\u0432\u044b\u0435 \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u0435\u043b\u0438",
+        "\u0420\u0435\u043a\u043b\u0430\u043c\u043d\u0430\u044f \u044d\u0444\u0444\u0435\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c",
+        "\u041e\u043f\u0435\u0440\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f \u043f\u0440\u0438\u0431\u044b\u043b\u044c \u043f\u043e VVBromo",
+        "\u0422\u043e\u0432\u0430\u0440\u044b",
+        "\u041e\u0441\u0442\u0430\u0442\u043a\u0438",
+        "\u041f\u043e\u0438\u0441\u043a",
+        "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044f \u043d\u0430 \u0434\u0435\u043d\u044c",
     ]
     for section in required_sections:
         assert section in markdown
-    assert "Тренд 7 дней" in markdown
-    assert "include_profit" in markdown
+    for heading in ("\u041f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442\u043d\u044b\u0435 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438", "\u0421\u0446\u0435\u043d\u0430\u0440\u043d\u044b\u0439 \u0438\u0442\u043e\u0433", "\u0427\u0442\u043e \u0443\u0445\u0443\u0434\u0448\u0438\u043b\u043e\u0441\u044c", "\u0427\u0442\u043e \u0432\u044b\u0440\u043e\u0441\u043b\u043e", "\u041c\u043d\u0435\u043d\u0438\u0435 \u0418\u0418"):
+        assert heading not in markdown
+    assert "\u041a \u043f\u0440\u0435\u0434\u044b\u0434\u0443\u0449\u0438\u043c 7 \u0434\u043d\u044f\u043c" in markdown
 
 
 def test_wb_daily_operational_summary_brief_markdown_is_shorter_than_full() -> None:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
@@ -6,6 +6,7 @@ from decimal import Decimal
 from src.mcp_server.schemas import (
     WbDailyOperationalDiagnosticsResponse,
     WbDailyOperationalHighlightsResponse,
+    WbDailyOperationalMetricRowResponse,
     WbDailyOperationalReportWindowResponse,
     WbDailyOperationalSectionResponse,
     WbDailyOperationalSourceFreshnessResponse,
@@ -490,29 +491,321 @@ def test_build_priority_and_scenario_use_analysis_narratives_without_fallback_du
     assert priority.summary[0] != highlights.worse[0]
 
 
-def test_render_markdown_shows_ai_opinion_and_action_after_table() -> None:
-    section = WbDailyOperationalSectionResponse(
-        key="assortment",
-        title="\u0410\u0441\u0441\u043e\u0440\u0442\u0438\u043c\u0435\u043d\u0442",
-        status="OK",
-        summary=[
-            "\u0422\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442 \u0441\u043f\u0430\u0434.",
-            "\u041c\u043d\u0435\u043d\u0438\u0435 \u0418\u0418: \u0430\u0440\u0442\u0438\u043a\u0443\u043b 37320545 \u0434\u0430\u0451\u0442 \u0437\u0430\u043c\u0435\u0442\u043d\u0443\u044e \u043f\u043e\u0442\u0435\u0440\u044e \u0432 \u0430\u0441\u0441\u043e\u0440\u0442\u0438\u043c\u0435\u043d\u0442\u0435.",
-            "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435: \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u0437\u0430\u043f\u0430\u0441\u044b \u0438 \u0432\u043e\u0440\u043e\u043d\u043a\u0443 \u043f\u043e \u0430\u0440\u0442\u0438\u043a\u0443\u043b\u0443 37320545.",
-        ],
-        tables=[
-            WbDailyOperationalTableResponse(
-                title="\u0422\u043e\u043f \u043f\u043e\u0442\u0435\u0440\u044c",
-                columns=["\u0410\u0440\u0442\u0438\u043a\u0443\u043b", "\u0412\u043a\u043b\u0430\u0434, \u20bd"],
-                rows=[{"\u0410\u0440\u0442\u0438\u043a\u0443\u043b": "37320545", "\u0412\u043a\u043b\u0430\u0434, \u20bd": "-58 715 \u20bd"}],
-            )
-        ],
-    )
-    response = _build_response([section], WbDailyOperationalHighlightsResponse())
 
+
+
+
+def _build_compact_markdown_response() -> WbDailyOperationalSummaryResponse:
+    report_date = date(2026, 7, 17)
+    compare_date = date(2026, 7, 16)
+    current = {
+        "impressions": Decimal("125000"),
+        "card_clicks": Decimal("12500"),
+        "ctr": Decimal("10.0"),
+        "ad_views": Decimal("210000"),
+        "ad_clicks": Decimal("6400"),
+        "cart_count": Decimal("2310"),
+        "add_to_cart_conversion": Decimal("18.5"),
+        "order_count": Decimal("968"),
+        "cart_to_order_conversion": Decimal("41.9"),
+        "avg_check": Decimal("1420"),
+        "order_sum": Decimal("1375013"),
+        "ad_spend": Decimal("5047911.06"),
+        "ad_writeoff_total": Decimal("5047911.06"),
+        "ad_campaign_spend_total": Decimal("5047911.06"),
+        "ad_revenue_total": Decimal("22945050"),
+        "cpc": Decimal("31.4"),
+        "cpm": Decimal("210"),
+        "cpo": Decimal("152.38"),
+        "cost_per_cart": Decimal("66"),
+        "ad_atbs": Decimal("2310"),
+        "ad_orders": Decimal("529"),
+        "search_avg_position": Decimal("48.4"),
+        "search_visibility": Decimal("12.5"),
+        "search_clicks": Decimal("5800"),
+        "search_cart": Decimal("920"),
+        "search_orders": Decimal("410"),
+    }
+    previous = {
+        "impressions": Decimal("120000"),
+        "card_clicks": Decimal("12050"),
+        "ctr": Decimal("10.04"),
+        "ad_views": Decimal("208000"),
+        "ad_clicks": Decimal("6350"),
+        "cart_count": Decimal("2280"),
+        "add_to_cart_conversion": Decimal("17.9"),
+        "order_count": Decimal("1012"),
+        "cart_to_order_conversion": Decimal("42.1"),
+        "avg_check": Decimal("1390"),
+        "order_sum": Decimal("1433728"),
+        "ad_spend": Decimal("4927911.06"),
+        "ad_writeoff_total": Decimal("4927911.06"),
+        "ad_campaign_spend_total": Decimal("4927911.06"),
+        "ad_revenue_total": Decimal("24639555.30"),
+        "cpc": Decimal("31.8"),
+        "cpm": Decimal("212"),
+        "cpo": Decimal("152.78"),
+        "cost_per_cart": Decimal("59"),
+        "ad_atbs": Decimal("2280"),
+        "ad_orders": Decimal("534"),
+        "search_avg_position": Decimal("46.3"),
+        "search_visibility": Decimal("11.4"),
+        "search_clicks": Decimal("6000"),
+        "search_cart": Decimal("950"),
+        "search_orders": Decimal("430"),
+    }
+    current_7d = {
+        "impressions": Decimal("840000"),
+        "card_clicks": Decimal("84000"),
+        "ctr": Decimal("10.0"),
+        "ad_views": Decimal("1470000"),
+        "ad_clicks": Decimal("44800"),
+        "cart_count": Decimal("16170"),
+        "add_to_cart_conversion": Decimal("19.0"),
+        "order_count": Decimal("6776"),
+        "cart_to_order_conversion": Decimal("41.9"),
+        "avg_check": Decimal("1418"),
+        "order_sum": Decimal("9625091"),
+        "ad_spend": Decimal("35335373"),
+        "ad_writeoff_total": Decimal("35335373"),
+        "ad_campaign_spend_total": Decimal("35335373"),
+        "ad_revenue_total": Decimal("160615331.82"),
+        "cpc": Decimal("31.5"),
+        "cpm": Decimal("211"),
+        "cpo": Decimal("152.0"),
+        "cost_per_cart": Decimal("64.7"),
+        "ad_atbs": Decimal("54600"),
+        "ad_orders": Decimal("2321"),
+        "search_avg_position": Decimal("47.1"),
+        "search_visibility": Decimal("12.7"),
+        "search_clicks": Decimal("40100"),
+        "search_cart": Decimal("6500"),
+        "search_orders": Decimal("2840"),
+    }
+    previous_7d = {
+        "impressions": Decimal("792000"),
+        "card_clicks": Decimal("81100"),
+        "ctr": Decimal("9.98"),
+        "ad_views": Decimal("1430000"),
+        "ad_clicks": Decimal("44100"),
+        "cart_count": Decimal("15550"),
+        "add_to_cart_conversion": Decimal("18.7"),
+        "order_count": Decimal("6620"),
+        "cart_to_order_conversion": Decimal("41.4"),
+        "avg_check": Decimal("1393"),
+        "order_sum": Decimal("9320180"),
+        "ad_spend": Decimal("33813000"),
+        "ad_writeoff_total": Decimal("33813000"),
+        "ad_campaign_spend_total": Decimal("33813000"),
+        "ad_revenue_total": Decimal("169065000"),
+        "cpc": Decimal("31.25"),
+        "cpm": Decimal("208.7"),
+        "cpo": Decimal("149.5"),
+        "cost_per_cart": Decimal("63.4"),
+        "ad_atbs": Decimal("53300"),
+        "ad_orders": Decimal("2262"),
+        "search_avg_position": Decimal("46.1"),
+        "search_visibility": Decimal("12.3"),
+        "search_clicks": Decimal("39280"),
+        "search_cart": Decimal("6420"),
+        "search_orders": Decimal("2812"),
+    }
+    rules = summary_module.get_default_rules()
+    sections = [
+        summary_module.build_overview_section(current, previous, current_7d, previous_7d),
+        build_traffic_section(current, previous, current_7d, previous_7d),
+        build_funnel_section(current, previous, current_7d, previous_7d),
+        build_sales_section(current, previous, current_7d, previous_7d),
+        summary_module.build_ads_section(
+            current,
+            previous,
+            current_7d,
+            previous_7d,
+            campaign_rows=[
+                {"campaign_name": "Campaign A", "advert_id": 101, "row_type": "auction", "spend_current": Decimal("250000"), "spend_previous": Decimal("210000"), "orders_current": Decimal("0"), "orders_previous": Decimal("2"), "revenue_current": Decimal("0")},
+                {"campaign_name": "Campaign B", "advert_id": 102, "row_type": "search", "spend_current": Decimal("500000"), "spend_previous": Decimal("460000"), "orders_current": Decimal("25"), "orders_previous": Decimal("29"), "revenue_current": Decimal("1612903")},
+                {"campaign_name": "Campaign C", "advert_id": 103, "row_type": "catalog", "spend_current": Decimal("120000"), "spend_previous": Decimal("90000"), "orders_current": Decimal("11"), "orders_previous": Decimal("11"), "revenue_current": Decimal("666667")},
+                {"campaign_name": "Campaign D", "advert_id": 104, "row_type": "catalog", "spend_current": Decimal("50000"), "spend_previous": Decimal("40000"), "orders_current": Decimal("8"), "orders_previous": Decimal("8"), "revenue_current": Decimal("333333")},
+            ],
+            top_n=4,
+            rules=rules,
+        ),
+        summary_module.build_profit_section(
+            {
+                "daily": [
+                    {"day": compare_date, "operating_profit": Decimal("16000"), "profit_per_unit": Decimal("44.0")},
+                    {"day": report_date, "operating_profit": Decimal("17826"), "profit_per_unit": Decimal("47.3")},
+                ],
+                "trend": [
+                    {"bucket": "current", "operating_profit": Decimal("124782"), "profit_per_unit": Decimal("46.4")},
+                    {"bucket": "previous", "operating_profit": Decimal("121000"), "profit_per_unit": Decimal("45.5")},
+                ],
+                "max_day": report_date,
+            },
+            report_date,
+            compare_date,
+        ),
+        summary_module.build_assortment_section(
+            assortment_rows=[
+                {"nm_id": 577510563, "supplier_article": "GROW-1", "title": "Growth 1", "order_sum_current": Decimal("210000"), "order_sum_previous": Decimal("165660"), "order_sum_delta": Decimal("44340"), "order_count_current": Decimal("120"), "ad_spend_current": Decimal("10000"), "current_stock_qty": Decimal("85")},
+                {"nm_id": 577510564, "supplier_article": "GROW-2", "title": "Growth 2", "order_sum_current": Decimal("180000"), "order_sum_previous": Decimal("154820"), "order_sum_delta": Decimal("25180"), "order_count_current": Decimal("95"), "ad_spend_current": Decimal("9500"), "current_stock_qty": Decimal("44")},
+                {"nm_id": 577510565, "supplier_article": "GROW-3", "title": "Growth 3", "order_sum_current": Decimal("170000"), "order_sum_previous": Decimal("150800"), "order_sum_delta": Decimal("19200"), "order_count_current": Decimal("90"), "ad_spend_current": Decimal("8100"), "current_stock_qty": Decimal("33")},
+                {"nm_id": 577510566, "supplier_article": "GROW-4", "title": "Growth 4", "order_sum_current": Decimal("160000"), "order_sum_previous": Decimal("155000"), "order_sum_delta": Decimal("5000"), "order_count_current": Decimal("70"), "ad_spend_current": Decimal("7100"), "current_stock_qty": Decimal("22")},
+                {"nm_id": 37320545, "supplier_article": "DROP-1", "title": "Drop 1", "order_sum_current": Decimal("155000"), "order_sum_previous": Decimal("213715"), "order_sum_delta": Decimal("-58715"), "order_count_current": Decimal("88"), "ad_spend_current": Decimal("12000"), "current_stock_qty": Decimal("9")},
+                {"nm_id": 221311710, "supplier_article": "DROP-2", "title": "Drop 2", "order_sum_current": Decimal("130000"), "order_sum_previous": Decimal("174340"), "order_sum_delta": Decimal("-44340"), "order_count_current": Decimal("74"), "ad_spend_current": Decimal("11000"), "current_stock_qty": Decimal("6")},
+                {"nm_id": 335760311, "supplier_article": "DROP-3", "title": "Drop 3", "order_sum_current": Decimal("120000"), "order_sum_previous": Decimal("145180"), "order_sum_delta": Decimal("-25180"), "order_count_current": Decimal("61"), "ad_spend_current": Decimal("10500"), "current_stock_qty": Decimal("4")},
+                {"nm_id": 335760399, "supplier_article": "DROP-4", "title": "Drop 4", "order_sum_current": Decimal("119000"), "order_sum_previous": Decimal("127000"), "order_sum_delta": Decimal("-8000"), "order_count_current": Decimal("58"), "ad_spend_current": Decimal("9800"), "current_stock_qty": Decimal("3")},
+            ],
+            top_n=4,
+        ),
+        summary_module.build_search_section(
+            current,
+            previous,
+            current_7d,
+            previous_7d,
+            search_rows=[
+                {"nm_id": 1001, "supplier_article": "S-UP-1", "title": "Search Up 1", "avg_position_current": Decimal("12.0"), "avg_position_previous": Decimal("37.1"), "visibility_current": Decimal("9.0"), "search_clicks_current": Decimal("110"), "search_orders_current": Decimal("15")},
+                {"nm_id": 1002, "supplier_article": "S-UP-2", "title": "Search Up 2", "avg_position_current": Decimal("18.0"), "avg_position_previous": Decimal("39.0"), "visibility_current": Decimal("8.2"), "search_clicks_current": Decimal("105"), "search_orders_current": Decimal("14")},
+                {"nm_id": 1003, "supplier_article": "S-UP-3", "title": "Search Up 3", "avg_position_current": Decimal("21.0"), "avg_position_previous": Decimal("40.0"), "visibility_current": Decimal("7.8"), "search_clicks_current": Decimal("101"), "search_orders_current": Decimal("12")},
+                {"nm_id": 1004, "supplier_article": "S-UP-4", "title": "Search Up 4", "avg_position_current": Decimal("22.0"), "avg_position_previous": Decimal("39.0"), "visibility_current": Decimal("7.1"), "search_clicks_current": Decimal("99"), "search_orders_current": Decimal("11")},
+                {"nm_id": 0, "supplier_article": "S-UP-0", "title": "Zero Pos", "avg_position_current": Decimal("0.0"), "avg_position_previous": Decimal("25.0"), "visibility_current": Decimal("0.0"), "search_clicks_current": Decimal("0"), "search_orders_current": Decimal("0")},
+                {"nm_id": 2001, "supplier_article": "S-DN-1", "title": "Search Down 1", "avg_position_current": Decimal("78.7"), "avg_position_previous": Decimal("44.0"), "visibility_current": Decimal("5.0"), "search_clicks_current": Decimal("75"), "search_orders_current": Decimal("8")},
+                {"nm_id": 2002, "supplier_article": "S-DN-2", "title": "Search Down 2", "avg_position_current": Decimal("73.0"), "avg_position_previous": Decimal("42.0"), "visibility_current": Decimal("4.8"), "search_clicks_current": Decimal("71"), "search_orders_current": Decimal("7")},
+                {"nm_id": 2003, "supplier_article": "S-DN-3", "title": "Search Down 3", "avg_position_current": Decimal("69.0"), "avg_position_previous": Decimal("40.0"), "visibility_current": Decimal("4.5"), "search_clicks_current": Decimal("66"), "search_orders_current": Decimal("6")},
+                {"nm_id": 2004, "supplier_article": "S-DN-4", "title": "Search Down 4", "avg_position_current": Decimal("65.0"), "avg_position_previous": Decimal("39.0"), "visibility_current": Decimal("4.2"), "search_clicks_current": Decimal("61"), "search_orders_current": Decimal("5")},
+            ],
+            top_n=4,
+            rules=rules,
+        ),
+    ]
+    sections = [section for section in sections if section is not None]
+    response = _build_response(
+        sections,
+        WbDailyOperationalHighlightsResponse(
+            worse=["Есть потеря по артикулу 37320545."],
+            better=["Есть рост по артикулу 577510563."],
+            priority_checks=[
+                "Проверить причины снижения 37320545.",
+                "Проверить остатки 221311710.",
+                "Проверить рекламу по кампании 101.",
+            ],
+        ),
+    )
+    return response.model_copy(update={
+        "report_window": WbDailyOperationalReportWindowResponse(
+            report_date=report_date,
+            compare_date=compare_date,
+            trend_current_from=date(2026, 7, 11),
+            trend_current_to=report_date,
+            trend_previous_from=date(2026, 7, 4),
+            trend_previous_to=date(2026, 7, 10),
+            report_date_source="requested",
+        ),
+        "requested_options": {"mode": "full", "diagnostic": False, "top_n": 5},
+        "article_analysis": [
+            {"nm_id": 37320545, "title": "Drop 1", "stock": {"stock_qty_same_day": Decimal("9"), "warehouses_with_stock": 2, "warehouses_zero_stock": 3, "warehouse_rows": [{"total_stock_qty": Decimal("9"), "avg_orders_7d_article": Decimal("4.5")}]}, "funnel": {"order_count_baseline": {"avg_prev_7": Decimal("4.5")}}},
+            {"nm_id": 221311710, "title": "Drop 2", "stock": {"stock_qty_same_day": Decimal("6"), "warehouses_with_stock": 1, "warehouses_zero_stock": 4, "warehouse_rows": [{"total_stock_qty": Decimal("6"), "avg_orders_7d_article": Decimal("3.0")}]}, "funnel": {"order_count_baseline": {"avg_prev_7": Decimal("3.0")}}},
+            {"nm_id": 335760311, "title": "Drop 3", "stock": {"stock_qty_same_day": Decimal("4"), "warehouses_with_stock": 1, "warehouses_zero_stock": 5, "warehouse_rows": [{"total_stock_qty": Decimal("4"), "avg_orders_7d_article": Decimal("2.0")}]}, "funnel": {"order_count_baseline": {"avg_prev_7": Decimal("2.0")}}},
+            {"nm_id": 577510563, "title": "Growth 1", "stock": {"stock_qty_same_day": Decimal("85"), "warehouses_with_stock": 5, "warehouses_zero_stock": 0, "warehouse_rows": [{"total_stock_qty": Decimal("85"), "avg_orders_7d_article": Decimal("12.0")}]}, "funnel": {"order_count_baseline": {"avg_prev_7": Decimal("12.0")}}},
+        ],
+        "business_priorities": [
+            {"entity_type": "product", "entity_id": 37320545, "nm_id": 37320545, "kind": "large_turnover_loss", "direction": "negative", "impact_rub": Decimal("-58715"), "recommended_check": "Проверить причины снижения 37320545", "cause_status": "confirmed", "supporting_signals": [{"kind": "traffic"}], "supported_factors": ["traffic"], "user_visible": True},
+            {"entity_type": "product", "entity_id": 221311710, "nm_id": 221311710, "kind": "stock", "direction": "negative", "impact_rub": Decimal("-44340"), "recommended_check": "Проверить остатки 221311710", "cause_status": "confirmed", "supporting_signals": [{"kind": "stock"}], "supported_factors": ["stock"], "user_visible": True},
+            {"entity_type": "campaign", "entity_id": 101, "advert_id": 101, "kind": "ads", "direction": "negative", "impact_rub": Decimal("-25000"), "recommended_check": "Проверить рекламу по кампании 101", "cause_status": "confirmed", "supporting_signals": [{"kind": "ads", "advert_id": 101}], "supported_factors": ["ads"], "user_visible": True},
+            {"entity_type": "product", "entity_id": 577510563, "nm_id": 577510563, "kind": "large_turnover_growth", "direction": "positive", "impact_rub": Decimal("44340"), "recommended_check": "Подтвердить рост по артикулу 577510563", "cause_status": "confirmed", "supporting_signals": [{"kind": "traffic"}], "supported_factors": ["traffic"], "user_visible": True},
+        ],
+        "analysis_summary": {
+            "priority_narratives": [
+                {"entity_type": "product", "entity_id": 37320545, "nm_id": 37320545, "action": "Проверить причины снижения 37320545"},
+                {"entity_type": "product", "entity_id": 221311710, "nm_id": 221311710, "action": "Проверить остатки 221311710"},
+                {"entity_type": "campaign", "entity_id": 101, "advert_id": 101, "action": "Проверить рекламу по кампании 101"},
+                {"entity_type": "product", "entity_id": 577510563, "nm_id": 577510563, "action": "Подтвердить рост по артикулу 577510563"},
+            ],
+            "top_anomalies": [{"summary": "Статус seller price требует осторожной интерпретации."}],
+        },
+    })
+
+
+def _legacy_like_markdown(response: WbDailyOperationalSummaryResponse) -> str:
+    def metric_row(metric: WbDailyOperationalMetricRowResponse) -> list[str]:
+        return [
+            metric.metric,
+            str(metric.value),
+            str(metric.delta_abs if metric.delta_abs is not None else metric.delta_pct if metric.delta_pct is not None else metric.delta_pp),
+            str(metric.trend_7d_pct if metric.trend_7d_pct is not None else metric.trend_7d_pp),
+            str(metric.previous_value),
+        ]
+
+    lines = [
+        "# LEGACY REPORT",
+        f"???? ??????: {response.report_window.report_date.isoformat()}",
+        f"?????????: {response.report_window.report_date.isoformat()} ?????? {response.report_window.compare_date.isoformat()}",
+        "## ??? ??????????",
+        *[f"- {item}" for item in response.highlights.worse],
+        "## ??? ???????",
+        *[f"- {item}" for item in response.highlights.better],
+    ]
+    for section in response.sections:
+        lines.append(f"## {section.title}")
+        if section.metrics:
+            lines.append("| ?????????? | ???????? | ???. ?? ????? | ????? 7 ???? | ????. ???? |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            for row in section.metrics:
+                lines.append("| " + " | ".join(metric_row(row)) + " |")
+        for table in section.tables:
+            lines.append(f"**{table.title}**")
+            lines.append("| " + " | ".join(table.columns) + " |")
+            lines.append("| " + " | ".join(["---"] * len(table.columns)) + " |")
+            for table_row in table.rows:
+                lines.append("| " + " | ".join(str(table_row.get(column, "")) for column in table.columns) + " |")
+        for summary_line in section.summary[:3]:
+            lines.append(f"- {summary_line}")
+        lines.append("")
+    lines.append("## ???????????? ????????")
+    lines.extend(f"- {item}" for item in response.highlights.priority_checks)
+    lines.append("## ????????? ????")
+    lines.append("- ????????? fallback ?? ???????????.")
+    return "\n".join(lines)
+
+def test_render_markdown_compact_structure_and_limits() -> None:
+    response = _build_compact_markdown_response()
     markdown = render_wb_daily_operational_summary_markdown(response)
 
-    assert "| \u0410\u0440\u0442\u0438\u043a\u0443\u043b | \u0412\u043a\u043b\u0430\u0434, \u20bd |" in markdown
-    assert "\u041c\u043d\u0435\u043d\u0438\u0435 \u0418\u0418: \u0430\u0440\u0442\u0438\u043a\u0443\u043b 37320545 \u0434\u0430\u0451\u0442 \u0437\u0430\u043c\u0435\u0442\u043d\u0443\u044e \u043f\u043e\u0442\u0435\u0440\u044e \u0432 \u0430\u0441\u0441\u043e\u0440\u0442\u0438\u043c\u0435\u043d\u0442\u0435." in markdown
-    assert "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435: \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u0437\u0430\u043f\u0430\u0441\u044b \u0438 \u0432\u043e\u0440\u043e\u043d\u043a\u0443 \u043f\u043e \u0430\u0440\u0442\u0438\u043a\u0443\u043b\u0443 37320545." in markdown
-    assert markdown.index("| \u0410\u0440\u0442\u0438\u043a\u0443\u043b | \u0412\u043a\u043b\u0430\u0434, \u20bd |") < markdown.index("\u041c\u043d\u0435\u043d\u0438\u0435 \u0418\u0418:")
+    for heading in ("Мнение ИИ", "Сценарный итог", "Приоритетные проверки", "Что ухудшилось", "Что выросло"):
+        assert heading not in markdown
+    assert markdown.count("## Действия на день") == 1
+    assert sum(1 for line in markdown.splitlines() if line.startswith(("1. ", "2. ", "3. ", "4. "))) == 3
+    assert "577510566" not in markdown
+    assert "335760399" not in markdown
+    assert "Campaign D" not in markdown
+    assert "1004" not in markdown
+    assert "2004" not in markdown
+    assert "0000" not in markdown
+    assert "-25,1 позиции — улучшение" in markdown
+    assert "+34,7 позиции — ухудшение" in markdown
+    assert "## Операционная прибыль по VVBromo" in markdown
+
+
+def test_render_markdown_formats_currency_pp_and_normalizes_negative_zero() -> None:
+    response = _build_compact_markdown_response()
+    markdown = render_wb_daily_operational_summary_markdown(response)
+
+    assert "22,0%" in markdown
+    assert "+2,0 п.п." in markdown
+    assert "66 ₽" in markdown
+    assert "0 ₽" in markdown
+    for bad in ("-0 ₽", "−0 ₽", "-0,0%", "−0,0%", "-0,0 п.п.", "−0,0 п.п."):
+        assert bad not in markdown
+
+
+def test_render_markdown_2026_07_17_is_shorter_than_legacy_without_losing_core_sections() -> None:
+    response = _build_compact_markdown_response()
+    compact = render_wb_daily_operational_summary_markdown(response)
+    legacy = _legacy_like_markdown(response)
+
+    assert response.report_window.report_date == date(2026, 7, 17)
+    assert len(compact) <= len(legacy) * 0.7
+    assert "Период 7 дней" in compact
+    assert "К предыдущим 7 дням" in compact
+    assert "## Операционная прибыль по VVBromo" in compact
+    assert "## Действия на день" in compact
