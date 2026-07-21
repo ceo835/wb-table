@@ -1342,6 +1342,31 @@ class ExternalContextEvent(Base):
     )
 
 
+class ExternalContextWordstatDisplay(Base):
+    """Persistent display state for suppressing repeated Wordstat releases."""
+
+    __tablename__ = "external_context_wordstat_display"
+    __table_args__ = (
+        UniqueConstraint("wordstat_release_key", name="uq_external_context_wordstat_display_release"),
+        Index("idx_external_context_wordstat_display_last_shown", "last_shown_report_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    wordstat_release_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    metric_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    first_shown_report_date: Mapped[date] = mapped_column(Date, nullable=False)
+    last_shown_report_date: Mapped[date] = mapped_column(Date, nullable=False)
+    last_wb_change_pct: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    last_wb_direction: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_comparison_direction: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
 class ExternalContextMetric(Base):
     __tablename__ = "external_context_metric"
     __table_args__ = (

@@ -14,7 +14,7 @@ class ExternalContextRequest(BaseModel):
     period_end: date | None = None
     category: str | None = None
     region: str | None = None
-    max_signals: int = Field(default=3, ge=1, le=3)
+    max_signals: int = Field(default=6, ge=1, le=10)
     diagnostic: bool = False
 
 
@@ -50,6 +50,13 @@ class ExternalContextSignalResponse(BaseModel):
     interpretation: str | None = None
     source_reference: str | None = None
     data_status: str | None = "ok"
+    wb_change_pct: Decimal | None = None
+    comparison_direction: str | None = None
+    wordstat_release_key: str | None = None
+    first_shown_report_date: date | None = None
+    is_new_release: bool | None = None
+    is_repeat_suppressed: bool = False
+    repeat_reason: str | None = None
 
 
 class ExternalContextResponse(BaseModel):

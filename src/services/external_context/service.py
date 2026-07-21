@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from datetime import date, timedelta
 from typing import Any, Iterable
 from decimal import Decimal
@@ -9,7 +10,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from src.db.models import ExternalContextEvent, ExternalContextMetric
+from src.db.models import ExternalContextEvent, ExternalContextMetric, ExternalContextWordstatDisplay
 from src.services.external_context.schemas import ExternalContextResponse, ExternalContextSignalResponse
 from src.services.external_context.category_config import CATEGORIES_CONFIG, get_active_categories
 
@@ -38,6 +39,127 @@ CAT_DATIVE_LOWER = {
     "childrens_tshirts": "детским футболкам",
 }
 
+
+WORDSTAT_REPEAT_THRESHOLD_PP = Decimal("10")
+
+
+def wordstat_release_key(metric: ExternalContextMetric) -> str:
+    """Identify one immutable Wordstat publication, not one rolling WB report."""
+    retrieved_at = metric.retrieved_at.isoformat() if metric.retrieved_at else ""
+    raw = "|".join((
+        metric.metric_code or "",
+        metric.period_start.isoformat(),
+        metric.period_end.isoformat(),
+        retrieved_at,
+    ))
+    return sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _wordstat_wb_direction(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    if value > 0:
+        return "growth"
+    if value < 0:
+        return "decline"
+    return "stable"
+
+
+def _wordstat_display_decision(
+    session: Session,
+    metric: ExternalContextMetric,
+    report_date: date,
+    wb_change_pct: Decimal | None,
+    comparison_direction: str | None,
+) -> dict[str, Any]:
+    release_key = wordstat_release_key(metric)
+    available_date = metric.published_at.date() if metric.published_at else metric.retrieved_at.date() if metric.retrieved_at else metric.period_end
+    state = session.scalar(
+        select(ExternalContextWordstatDisplay).where(
+            ExternalContextWordstatDisplay.wordstat_release_key == release_key
+        )
+    )
+    base = {
+        "wordstat_release_key": release_key,
+        "first_shown_report_date": state.first_shown_report_date if state else available_date,
+        "is_new_release": state is None,
+        "is_repeat_suppressed": False,
+        "repeat_reason": None,
+        "should_show": True,
+    }
+    if report_date < available_date:
+        base.update(should_show=False, repeat_reason="release_not_available_on_report_date")
+        return base
+    if state is None:
+        if report_date > available_date:
+            base.update(
+                is_new_release=False,
+                is_repeat_suppressed=True,
+                should_show=False,
+                repeat_reason="release_available_before_state_tracking",
+            )
+        else:
+            base["repeat_reason"] = "new_wordstat_release"
+        return base
+    if state.first_shown_report_date == report_date:
+        base["is_new_release"] = False
+        base["repeat_reason"] = "same_report_date"
+        return base
+
+    current_direction = _wordstat_wb_direction(wb_change_pct)
+    reasons: list[str] = []
+    if state.last_wb_direction and current_direction and state.last_wb_direction != current_direction:
+        reasons.append("wb_direction_changed")
+    if state.last_wb_change_pct is not None and wb_change_pct is not None:
+        if abs(wb_change_pct - state.last_wb_change_pct) >= WORDSTAT_REPEAT_THRESHOLD_PP:
+            reasons.append("wb_change_pct_changed_10pp_or_more")
+    if state.last_comparison_direction != comparison_direction:
+        reasons.append("comparison_direction_changed")
+
+    if reasons:
+        base["repeat_reason"] = "+".join(reasons)
+    else:
+        base.update(
+            should_show=False,
+            is_repeat_suppressed=True,
+            repeat_reason="same_wordstat_release_no_material_change",
+        )
+    return base
+
+
+def _record_wordstat_display(
+    session: Session,
+    metric: ExternalContextMetric,
+    report_date: date,
+    wb_change_pct: Decimal | None,
+    comparison_direction: str | None,
+) -> None:
+    release_key = wordstat_release_key(metric)
+    state = session.scalar(
+        select(ExternalContextWordstatDisplay).where(
+            ExternalContextWordstatDisplay.wordstat_release_key == release_key
+        )
+    )
+    wb_direction = _wordstat_wb_direction(wb_change_pct)
+    if state is None:
+        available_date = metric.published_at.date() if metric.published_at else metric.retrieved_at.date() if metric.retrieved_at else metric.period_end
+        session.add(ExternalContextWordstatDisplay(
+            wordstat_release_key=release_key,
+            metric_code=metric.metric_code,
+            period_start=metric.period_start,
+            period_end=metric.period_end,
+            retrieved_at=metric.retrieved_at,
+            first_shown_report_date=available_date,
+            last_shown_report_date=report_date,
+            last_wb_change_pct=wb_change_pct,
+            last_wb_direction=wb_direction,
+            last_comparison_direction=comparison_direction,
+        ))
+        return
+    state.last_shown_report_date = report_date
+    state.last_wb_change_pct = wb_change_pct
+    state.last_wb_direction = wb_direction
+    state.last_comparison_direction = comparison_direction
 
 class ExternalContextService:
     def __init__(self, session: Session, settings: McpServiceSettings | None = None):
@@ -97,6 +219,7 @@ class ExternalContextService:
         candidates_p4: list[ExternalContextSignalResponse] = []  # Annual Inflation / Macro
 
         diag_details: list[dict[str, Any]] = []
+        wordstat_decisions: dict[str, dict[str, Any]] = {}
 
         # ----------------------------------------------------
         # 1. P1: Wordstat (Search Demand)
@@ -227,6 +350,23 @@ class ExternalContextService:
 
                     fresh_until = metric.period_end + timedelta(days=7)
                     pub_date = metric.published_at.date() if metric.published_at else metric.period_end
+                    release_decision = _wordstat_display_decision(
+                        self.session,
+                        metric,
+                        report_date,
+                        wb_change_pct,
+                        comparison_direction,
+                    )
+                    release_key = release_decision["wordstat_release_key"]
+                    wordstat_decisions[release_key] = {
+                        "metric": metric,
+                        "wb_change_pct": wb_change_pct,
+                        "comparison_direction": comparison_direction,
+                        **release_decision,
+                    }
+                    if not release_decision["should_show"]:
+                        selection_reason = release_decision["repeat_reason"]
+                        is_selectable = False
 
                     diag_details.append({
                         "source": "search_demand",
@@ -239,6 +379,11 @@ class ExternalContextService:
                         "comparison_direction": comparison_direction,
                         "selection_reason": selection_reason,
                         "is_selectable": is_selectable,
+                        "wordstat_release_key": release_key,
+                        "first_shown_report_date": release_decision["first_shown_report_date"].isoformat(),
+                        "is_new_release": release_decision["is_new_release"],
+                        "is_repeat_suppressed": release_decision["is_repeat_suppressed"],
+                        "repeat_reason": release_decision["repeat_reason"],
                     })
 
                     if is_selectable:
@@ -263,6 +408,13 @@ class ExternalContextService:
                             interpretation=short_interpretation,
                             source_reference=metric.source_reference or "Yandex Wordstat",
                             data_status=metric.data_status,
+                            wb_change_pct=wb_change_pct,
+                            comparison_direction=comparison_direction,
+                            wordstat_release_key=release_key,
+                            first_shown_report_date=release_decision["first_shown_report_date"],
+                            is_new_release=release_decision["is_new_release"],
+                            is_repeat_suppressed=False,
+                            repeat_reason=release_decision["repeat_reason"],
                         )
                         candidates_p1.append(signal)
 
@@ -542,6 +694,18 @@ class ExternalContextService:
 
         all_candidates.sort(key=_overall_signal_sort_key)
         selected_signals: list[ExternalContextSignalResponse] = all_candidates[:max_signals]
+        for selected_signal in selected_signals:
+            if selected_signal.source != "search_demand" or not selected_signal.wordstat_release_key:
+                continue
+            decision = wordstat_decisions.get(selected_signal.wordstat_release_key)
+            if decision:
+                _record_wordstat_display(
+                    self.session,
+                    decision["metric"],
+                    report_date,
+                    decision["wb_change_pct"],
+                    decision["comparison_direction"],
+                )
 
         # Compute refined status for search_demand
         if self.settings.external_search_demand_enabled and sources_status["search_demand"] != "disabled":
