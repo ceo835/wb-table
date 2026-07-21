@@ -17,6 +17,8 @@ from src.mcp_server.schemas import (
     ActiveProductsResponse,
     DashboardSummaryRequest,
     DashboardSummaryResponse,
+    ExternalContextRequest,
+    ExternalContextResponse,
     DbHealthResponse,
     ErrorResponse,
     HealthResponse,
@@ -277,6 +279,14 @@ def build_mcp_tools_catalog() -> list[dict]:
                 "Использовать для проверки, какой список товаров применяется в аналитике по умолчанию."
             ),
             "inputSchema": _tool_schema(ActiveProductsRequest),
+        },
+        {
+            "name": "get_wb_external_context",
+            "description": (
+                "Returns active calendar and seasonal context signals for a report date or period. "
+                "Signals are context-only and do not prove causality."
+            ),
+            "inputSchema": _tool_schema(ExternalContextRequest),
         },
         {
             "name": "get_wb_daily_operational_summary",
@@ -716,6 +726,8 @@ def _execute_mcp_tool(name: str, arguments: dict, repository: McpRepository) -> 
         result = repository.get_price_monitor(PriceMonitorRequest.model_validate(arguments))
     elif name == "get_active_products":
         result = repository.get_active_products(ActiveProductsRequest.model_validate(arguments))
+    elif name == "get_wb_external_context":
+        result = repository.get_wb_external_context(ExternalContextRequest.model_validate(arguments))
     elif name in {"get_wb_daily_operational_summary", "get_wb_daily_operational_summary_data"}:
         result = repository.get_wb_daily_operational_summary(_build_wb_daily_operational_summary_request(arguments))
     else:

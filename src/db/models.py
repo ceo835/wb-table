@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -1299,6 +1299,47 @@ class FactOzonPriceSnapshot(Base, TimestampMixin):
     status_web: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+
+
+class ExternalContextEvent(Base):
+    __tablename__ = "external_context_event"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "event_code",
+            "date_start",
+            "date_end",
+            "region",
+            "category",
+            name="uq_external_context_event_identity",
+        ),
+        Index("idx_external_context_event_dates", "date_start", "date_end"),
+        Index("idx_external_context_event_type", "event_type"),
+        Index("idx_external_context_event_category", "category"),
+        Index("idx_external_context_event_active", "is_active"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    date_start: Mapped[date] = mapped_column(Date, nullable=False)
+    date_end: Mapped[date] = mapped_column(Date, nullable=False)
+    region: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    impact_direction: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    impact_strength: Mapped[str] = mapped_column(String(16), nullable=False, default="medium")
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="medium")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    source_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
 
 # Р РµРіРёСЃС‚СЂР°С†РёСЏ РјРѕРґРµР»РµР№ РјРѕРґСѓР»СЏ РєРѕРјРјСѓРЅРёРєР°С†РёР№

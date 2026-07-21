@@ -12,6 +12,8 @@ from sqlalchemy.engine import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.db.models import DimProduct, FactWbSitePriceAlert, FactWbSitePriceSnapshot, MartTotalReport, SettingsProducts
+from src.mcp_server.schemas import ExternalContextRequest, ExternalContextResponse
+from src.services.external_context.service import ExternalContextService
 from src.mcp_server.schemas import (
     ActiveProductsItemResponse,
     ActiveProductsRequest,
@@ -127,6 +129,7 @@ class McpRepository(Protocol):
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse: ...
     def get_active_products(self, payload: ActiveProductsRequest) -> ActiveProductsResponse: ...
     def get_wb_daily_operational_summary(self, payload: WbDailyOperationalSummaryRequest) -> WbDailyOperationalSummaryResponse: ...
+    def get_wb_external_context(self, payload: ExternalContextRequest) -> ExternalContextResponse: ...
 
 
 def _safe_divide(numerator: Decimal | None, denominator: Decimal | None, multiplier: Decimal | None = None) -> Decimal | None:
@@ -1057,7 +1060,33 @@ class PostgresMcpRepository:
 
     def get_wb_daily_operational_summary(self, payload: WbDailyOperationalSummaryRequest) -> WbDailyOperationalSummaryResponse:
         with self.readonly_session() as session:
-            return build_operational_summary(session, payload)
+            context_enabled = self.settings.external_context_enabled and self.settings.external_calendar_enabled
+            return build_operational_summary(
+                session,
+                payload,
+                external_context_service=ExternalContextService(session) if context_enabled else None,
+                external_context_enabled=context_enabled,
+                external_context_max_signals=self.settings.external_context_max_signals,
+            )
+
+    def get_wb_external_context(self, payload: ExternalContextRequest) -> ExternalContextResponse:
+        if not (self.settings.external_context_enabled and self.settings.external_calendar_enabled):
+            return ExternalContextResponse(
+                report_date=payload.report_date,
+                period_start=payload.period_start,
+                period_end=payload.period_end,
+                status="DISABLED",
+                diagnostics={"reason": "external context or calendar source is disabled"},
+            )
+        with self.readonly_session() as session:
+            return ExternalContextService(session).get_external_context(
+                report_date=payload.report_date,
+                period_start=payload.period_start,
+                period_end=payload.period_end,
+                categories=[payload.category] if payload.category else None,
+                region=payload.region,
+                max_signals=payload.max_signals,
+            )
 
     def get_price_monitor(self, payload: PriceMonitorRequest) -> PriceMonitorResponse:
         with self.readonly_session() as session:

@@ -791,6 +791,7 @@ def test_mcp_tools_list_exposes_registered_tools() -> None:
         "get_product_metrics",
         "get_price_monitor",
         "get_active_products",
+        "get_wb_external_context",
         "get_wb_daily_operational_summary",
         "get_wb_daily_operational_summary_data",
     ]

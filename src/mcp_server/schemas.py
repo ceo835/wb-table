@@ -199,6 +199,13 @@ class ActiveProductsResponse(ApiModel):
     items: list[ActiveProductsItemResponse]
 
 
+from src.services.external_context.schemas import (
+    ExternalContextRequest,
+    ExternalContextSignalResponse,
+    ExternalContextResponse,
+)
+
+
 SummaryMode = Literal["full", "brief"]
 
 
@@ -317,6 +324,7 @@ class WbDailyOperationalSummaryResponse(ApiModel):
     data_anomalies: list[dict[str, Any]] = Field(default_factory=list)
     analysis_summary: dict[str, Any] = Field(default_factory=dict)
     weekly_analysis: dict[str, Any] | None = Field(default=None)
+    external_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ErrorResponse(ApiModel):

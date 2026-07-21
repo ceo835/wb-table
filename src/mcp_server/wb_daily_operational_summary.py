@@ -33,6 +33,7 @@ from src.mcp_server.wb_daily_operational_summary_additional import (
 )
 from src.mcp_server.wb_daily_operational_summary_format import render_wb_daily_operational_summary_markdown
 from src.mcp_server.wb_daily_operational_summary_rules import WbDailyOperationalSummaryRules, get_default_rules
+from src.services.external_context.service import ExternalContextService
 from src.mcp_server.wb_daily_operational_summary_sql import (
     fetch_assortment_changes,
     fetch_core_source_freshness,
@@ -776,7 +777,16 @@ def build_scenario_section(
     return WbDailyOperationalSectionResponse(key="scenario", title=SECTION_TITLES["scenario"], status="OK", summary=summary, notes=["\u0420\u0430\u0437\u0434\u0435\u043b \u043d\u0435 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430 \u043e\u0431\u043e\u0440\u043e\u0442\u0430 \u0438\u043b\u0438 \u043f\u0440\u0438\u0431\u044b\u043b\u0438 \u0438 \u043e\u043f\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043d\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b."])
 
 
-def build_operational_summary(session: Session, payload: WbDailyOperationalSummaryRequest, *, rules: WbDailyOperationalSummaryRules | None = None, now_date: date | None = None) -> WbDailyOperationalSummaryResponse:
+def build_operational_summary(
+    session: Session,
+    payload: WbDailyOperationalSummaryRequest,
+    *,
+    rules: WbDailyOperationalSummaryRules | None = None,
+    now_date: date | None = None,
+    external_context_service: ExternalContextService | None = None,
+    external_context_enabled: bool = False,
+    external_context_max_signals: int = 3,
+) -> WbDailyOperationalSummaryResponse:
     resolved_rules = rules or get_default_rules()
     started_at = perf_counter()
     query_counter = {"count": 0, "timings": []}
@@ -817,6 +827,20 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         nm_ids=candidate_nm_ids,
         query_counter=query_counter,
     )
+
+    external_context: dict[str, Any] = {}
+    if external_context_enabled and external_context_service is not None:
+        external_context = _run_safe_additional_block(
+            stage_timings=stage_timings,
+            stage_name="external_context",
+            source_table="external_context_event",
+            builder=lambda: external_context_service.get_external_context(
+                report_date=window.report_date,
+                period_start=window.trend_current_from,
+                period_end=window.trend_current_to,
+                max_signals=external_context_max_signals,
+            ).model_dump(mode="json"),
+        )
 
     database_audit = _run_safe_additional_block(
         stage_timings=stage_timings,
@@ -1050,6 +1074,7 @@ def build_operational_summary(session: Session, payload: WbDailyOperationalSumma
         data_anomalies=analysis_payload.get("data_anomalies", []),
         analysis_summary=analysis_payload.get("analysis_summary", {}),
         weekly_analysis=weekly_analysis_val,
+        external_context=external_context,
     )
     if payload.diagnostic:
         stage_started = perf_counter()

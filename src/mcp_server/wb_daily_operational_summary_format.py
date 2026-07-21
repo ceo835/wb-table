@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import re
 from decimal import Decimal
 from typing import Any
@@ -44,6 +45,11 @@ def _quantized_decimal(value: Any, decimals: int = 0) -> Decimal | None:
 def _format_date(value: Any) -> str:
     if value is None:
         return "н/д"
+    if isinstance(value, str):
+        try:
+            value = date.fromisoformat(value[:10])
+        except ValueError:
+            return value
     return value.strftime("%d.%m.%Y")
 
 
@@ -624,6 +630,24 @@ def _collect_quality_warnings(response: WbDailyOperationalSummaryResponse, *, li
     return warnings
 
 
+def _build_external_context_lines(response: WbDailyOperationalSummaryResponse, *, limit: int = 3) -> list[str]:
+    context = response.external_context or {}
+    if context.get("status") not in {"OK", "PARTIAL"}:
+        return []
+    lines: list[str] = []
+    for signal in (context.get("signals") or [])[:limit]:
+        if not isinstance(signal, dict):
+            continue
+        title = " ".join(str(signal.get("title") or signal.get("event_type") or "").split()).strip()
+        if not title:
+            continue
+        start = _format_date(signal.get("date_start"))
+        end = _format_date(signal.get("date_end"))
+        period = start if start == end else f"{start}–{end}"
+        lines.append(f"- {title} ({period}) — контекстный фактор; прямое влияние на продажи не подтверждено.")
+    return lines[:limit]
+
+
 def render_wb_daily_operational_summary_markdown(response: WbDailyOperationalSummaryResponse) -> str:
     window = response.report_window
     mode = response.requested_options.get("mode") or "full"
@@ -769,6 +793,12 @@ def render_wb_daily_operational_summary_markdown(response: WbDailyOperationalSum
                         worsened_rows,
                     )
                 )
+        lines.append("")
+
+    external_lines = _build_external_context_lines(response)
+    if external_lines:
+        lines.append("## Внешний фон")
+        lines.extend(external_lines)
         lines.append("")
 
     lines.append("## Действия на день")
