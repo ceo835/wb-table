@@ -65,7 +65,8 @@ class ExternalContextService:
         }
 
         if self.settings.external_search_demand_enabled:
-            sources_status["search_demand"] = "ok" if self.settings.yandex_direct_token else "unavailable"
+            has_credentials = bool(self.settings.yandex_search_api_key or self.settings.yandex_direct_token)
+            sources_status["search_demand"] = "ok" if has_credentials else "unavailable"
         if self.settings.external_consumer_sentiment_enabled:
             sources_status["consumer_sentiment"] = "ok"
         if self.settings.external_macro_enabled:
@@ -103,7 +104,7 @@ class ExternalContextService:
                 db_metrics = self.session.scalars(
                     select(ExternalContextMetric)
                     .where(
-                        ExternalContextMetric.source == "yandex_direct",
+                        ExternalContextMetric.source.in_(["yandex_direct", "yandex_cloud_wordstat"]),
                         ExternalContextMetric.period_start <= resolved_period_end,
                         ExternalContextMetric.period_end >= resolved_period_start,
                     )

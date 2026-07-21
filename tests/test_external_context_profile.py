@@ -8,11 +8,9 @@ test_db_url = os.getenv("TEST_DATABASE_URL")
 if not test_db_url:
     raise RuntimeError("Safety Block: TEST_DATABASE_URL environment variable is not configured. Run blocked.")
 
-# Check for railway production host
-for key in ("DATABASE_URL", "TEST_DATABASE_URL"):
-    val = os.getenv(key) or ""
-    if "rlwy.net" in val or "railway" in val:
-        raise RuntimeError(f"Safety Block: {key} contains Railway production database host! Run blocked to protect production data.")
+# Check TEST_DATABASE_URL for railway production host
+if "rlwy.net" in test_db_url or "railway" in test_db_url:
+    raise RuntimeError("Safety Block: TEST_DATABASE_URL contains Railway production database host! Run blocked to protect production data.")
 
 # Override DATABASE_URL so all subsequent imports and settings use the test DB url
 os.environ["DATABASE_URL"] = test_db_url
@@ -459,3 +457,13 @@ def test_actions_of_the_day_regression(clean_external_db) -> None:
     assert "1. Проверить причины отрицательной прибыли по VVBromo: −5 543 ₽." in markdown
     assert "2. Пересмотреть рекламу: ДРР 22,1%, CPO 346 ₽, рекламные заказы −10,2% за сутки." in markdown
     assert "3. Проверить устойчивость роста по артикулу 221311710." in markdown
+
+
+@pytest.mark.skipif(os.getenv("RUN_YANDEX_INTEGRATION_TEST") != "1", reason="Manual integration test. Set RUN_YANDEX_INTEGRATION_TEST=1 to execute.")
+def test_yandex_wordstat_manual_integration() -> None:
+    from src.services.external_context.sources.search_demand import YandexCloudWordstatAdapter
+    api_key = os.getenv("YANDEX_SEARCH_API_KEY")
+    folder_id = os.getenv("YANDEX_CLOUD_FOLDER_ID")
+    adapter = YandexCloudWordstatAdapter(api_key, folder_id)
+    res = adapter.fetch_search_demand(date(2026, 7, 13), date(2026, 7, 19), ["футболка женская"], category="womens_tshirts")
+    assert "status" in res

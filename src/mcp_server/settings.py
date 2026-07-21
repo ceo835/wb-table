@@ -41,6 +41,8 @@ class McpServiceSettings:
     macro_signal_display_days: int = 7
 
     # Credentials
+    yandex_search_api_key: str | None = None
+    yandex_cloud_folder_id: str | None = None
     yandex_direct_token: str | None = None
     yandex_direct_client_login: str | None = None
 
@@ -75,6 +77,8 @@ def load_mcp_service_settings() -> McpServiceSettings:
     macro_signal_display_days = int(os.getenv("MACRO_SIGNAL_DISPLAY_DAYS") or "7")
 
     # Credentials
+    yandex_search_api_key = os.getenv("YANDEX_SEARCH_API_KEY")
+    yandex_cloud_folder_id = os.getenv("YANDEX_CLOUD_FOLDER_ID")
     yandex_direct_token = os.getenv("YANDEX_DIRECT_TOKEN")
     yandex_direct_client_login = os.getenv("YANDEX_DIRECT_CLIENT_LOGIN")
 
@@ -99,6 +103,8 @@ def load_mcp_service_settings() -> McpServiceSettings:
         calendar_transition_window_days=calendar_transition_window_days,
         consumer_signal_display_days=consumer_signal_display_days,
         macro_signal_display_days=macro_signal_display_days,
+        yandex_search_api_key=yandex_search_api_key,
+        yandex_cloud_folder_id=yandex_cloud_folder_id,
         yandex_direct_token=yandex_direct_token,
         yandex_direct_client_login=yandex_direct_client_login,
     )
