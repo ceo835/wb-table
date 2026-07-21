@@ -746,3 +746,107 @@ def test_category_code_strict_1to1_subject_mapping(clean_external_db, test_setti
         # Verify underwear_sig matches ONLY womens_underwear trend (-12.41% -> 12%)
         assert "поисковые заказы категории на WB снизились на 12%" in underwear_sig.interpretation
         assert "27%" not in underwear_sig.interpretation
+
+
+# 20. Four fixed categories, Wordstat loader requirements & signal prioritization
+def test_four_fixed_categories_wordstat_loader_and_signals(clean_external_db, test_settings, shared_engine) -> None:
+    from src.services.external_context.category_config import CATEGORIES_CONFIG, get_active_categories
+
+    active_cats = get_active_categories()
+    assert len(active_cats) == 4
+    cat_codes = [c["category_code"] for c in active_cats]
+    assert set(cat_codes) == {"womens_tshirts", "childrens_tshirts", "womens_underwear", "childrens_underwear"}
+
+    # Check search queries map to single required query per category
+    query_map = {c["category_code"]: c["search_queries"] for c in active_cats}
+    assert query_map["womens_tshirts"] == ["женские футболки"]
+    assert query_map["childrens_tshirts"] == ["детские футболки"]
+    assert query_map["womens_underwear"] == ["женские трусы"]
+    assert query_map["childrens_underwear"] == ["детские трусы"]
+
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        # womens_tshirts: divergent (Yandex +30%, WB -15%) -> Priority 1 (Discrepancy)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Поисковый спрос: Женские футболки",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("13000"),
+            previous_value=Decimal("10000"),
+            change_pct=Decimal("30.0"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        # childrens_tshirts: matching growth (Yandex +20%, WB +20%)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_childrens_tshirts",
+            metric_name="Поисковый спрос: Детские футболки",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("12000"),
+            previous_value=Decimal("10000"),
+            change_pct=Decimal("20.0"),
+            category="childrens_tshirts",
+            data_status="ok"
+        ))
+        # womens_underwear: matching growth (Yandex +15%, WB +15%)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_underwear",
+            metric_name="Поисковый спрос: Женское белье",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("11500"),
+            previous_value=Decimal("10000"),
+            change_pct=Decimal("15.0"),
+            category="womens_underwear",
+            data_status="ok"
+        ))
+        # childrens_underwear: weak change (Yandex +5% < min threshold 8%)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_childrens_underwear",
+            metric_name="Поисковый спрос: Детское белье",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("10500"),
+            previous_value=Decimal("10000"),
+            change_pct=Decimal("5.0"),
+            category="childrens_underwear",
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        cat_trends = {
+            "womens_tshirts": {"change_pct": Decimal("-15.0")},
+            "childrens_tshirts": {"change_pct": Decimal("20.0")},
+            "womens_underwear": {"change_pct": Decimal("15.0")},
+            "childrens_underwear": {"change_pct": Decimal("5.0")},
+        }
+
+        res = service.get_external_context(report_date=date(2026, 7, 19), category_sales_trends=cat_trends, max_signals=2, diagnostic=True)
+
+        # Max 2 signals returned
+        assert len(res.signals) <= 2
+
+        # Discrepancy signal (womens_tshirts) MUST be first due to priority
+        assert res.signals[0].category == "womens_tshirts"
+        assert "вырос на 30%" in res.signals[0].interpretation
+        assert "снизились на 15%" in res.signals[0].interpretation
+
+        # All signals must contain 'в Яндексе'
+        for sig in res.signals:
+            assert "в Яндексе" in sig.interpretation
+
+        # Weak change (childrens_underwear 5%) must be excluded
+        assert not any(s.category == "childrens_underwear" for s in res.signals)
+

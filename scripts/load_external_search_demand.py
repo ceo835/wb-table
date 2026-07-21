@@ -180,17 +180,20 @@ def main() -> int:
                 category=cat["category_code"]
             ).first()
 
+            q_text = queries[0] if queries else None
             if existing:
                 changed = (
                     existing.value != tot_value or
                     existing.previous_value != tot_prev or
                     existing.change_pct != change_pct or
-                    existing.data_status != "ok"
+                    existing.data_status != "ok" or
+                    existing.query_text != q_text
                 )
                 if changed:
                     existing.value = tot_value
                     existing.previous_value = tot_prev
                     existing.change_pct = change_pct
+                    existing.query_text = q_text
                     existing.data_status = "ok"
                     existing.updated_at = datetime.now()
                     stats["updated"] += 1
@@ -206,6 +209,7 @@ def main() -> int:
                     value=tot_value,
                     previous_value=tot_prev,
                     change_pct=change_pct,
+                    query_text=q_text,
                     region=args.region,
                     category=cat["category_code"],
                     unit="searches",

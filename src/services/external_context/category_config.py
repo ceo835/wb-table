@@ -4,25 +4,9 @@ from typing import Any
 
 CATEGORIES_CONFIG: list[dict[str, Any]] = [
     {
-        "category_code": "womens_underwear",
-        "category_title": "Женское белье",
-        "search_queries": ["трусы женские набор", "женские трусы хлопок", "трусы слипы женские"],
-        "related_subjects": ["Трусы"],
-        "region": None,
-        "is_active": True,
-    },
-    {
-        "category_code": "childrens_underwear",
-        "category_title": "Детское белье",
-        "search_queries": ["трусы детские", "трусы для девочки", "трусы для мальчика"],
-        "related_subjects": ["Трусы детские", "Колготки детские"],
-        "region": None,
-        "is_active": True,
-    },
-    {
         "category_code": "womens_tshirts",
         "category_title": "Женские футболки",
-        "search_queries": ["футболка женская оверсайз", "футболка женская хлопок"],
+        "search_queries": ["женские футболки"],
         "related_subjects": ["Футболки", "Футболка"],
         "region": None,
         "is_active": True,
@@ -30,8 +14,24 @@ CATEGORIES_CONFIG: list[dict[str, Any]] = [
     {
         "category_code": "childrens_tshirts",
         "category_title": "Детские футболки",
-        "search_queries": ["футболка детская", "детская футболка с принтом"],
+        "search_queries": ["детские футболки"],
         "related_subjects": ["Футболки детские"],
+        "region": None,
+        "is_active": True,
+    },
+    {
+        "category_code": "womens_underwear",
+        "category_title": "Женское белье",
+        "search_queries": ["женские трусы"],
+        "related_subjects": ["Трусы"],
+        "region": None,
+        "is_active": True,
+    },
+    {
+        "category_code": "childrens_underwear",
+        "category_title": "Детское белье",
+        "search_queries": ["детские трусы"],
+        "related_subjects": ["Трусы детские", "Колготки детские"],
         "region": None,
         "is_active": True,
     },

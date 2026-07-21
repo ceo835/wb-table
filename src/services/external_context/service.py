@@ -265,6 +265,22 @@ class ExternalContextService:
                             data_status=metric.data_status,
                         )
                         candidates_p1.append(signal)
+
+                # Prioritize Wordstat signals: discrepancies between Yandex and WB first (relevance="high"),
+                # then category matched stable/same direction, then standalone strong.
+                def _wordstat_priority_key(sig: ExternalContextSignalResponse) -> tuple[int, float]:
+                    rel_rank = 3
+                    if sig.relevance == "high":
+                        rel_rank = 0
+                    elif "практически не изменились" in (sig.interpretation or ""):
+                        rel_rank = 1
+                    elif sig.relevance == "medium":
+                        rel_rank = 2
+
+                    change_mag = float(abs(sig.change_pct)) if sig.change_pct is not None else 0.0
+                    return (rel_rank, -change_mag)
+
+                candidates_p1.sort(key=_wordstat_priority_key)
             except SQLAlchemyError:
                 sources_status["search_demand"] = "error"
 
