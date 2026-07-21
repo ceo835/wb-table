@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, timedelta
@@ -105,8 +105,8 @@ def fetch_article_context(session: Session, *, report_date: date, history_from: 
             m.title,
             m.subject,
             m.brand,
-            m.impressions,
-            m.card_clicks,
+            coalesce(m.impressions, m.entry_impressions_total) as impressions,
+            coalesce(m.card_clicks, m.entry_card_clicks_total) as card_clicks,
             m.cart_count,
             m.order_count,
             m.order_sum,

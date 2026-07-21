@@ -190,9 +190,9 @@ def test_fetch_mart_daily_overview_sql_uses_weighted_ctr_from_sums() -> None:
     fetch_mart_daily_overview(session, date(2026, 7, 15), date(2026, 7, 14), query_counter)
 
     sql = str(session.statements[0])
-    assert "sum(impressions) as impressions" in sql
-    assert "sum(card_clicks) as card_clicks" in sql
-    assert "sum(card_clicks) / nullif(sum(impressions), 0) * 100 end as ctr" in sql
+    assert "sum(coalesce(impressions, entry_impressions_total)) as impressions" in sql
+    assert "sum(coalesce(card_clicks, entry_card_clicks_total)) as card_clicks" in sql
+    assert "sum(coalesce(card_clicks, entry_card_clicks_total)) / nullif(sum(coalesce(impressions, entry_impressions_total)), 0) * 100 end as ctr" in sql
     assert "avg(ctr)" not in sql
 
 
@@ -210,9 +210,9 @@ def test_fetch_mart_window_overview_sql_uses_weighted_ctr_from_sums() -> None:
     )
 
     sql = str(session.statements[0])
-    assert "sum(impressions) as impressions" in sql
-    assert "sum(card_clicks) as card_clicks" in sql
-    assert "sum(card_clicks) / nullif(sum(impressions), 0) * 100 end as ctr" in sql
+    assert "sum(coalesce(impressions, entry_impressions_total)) as impressions" in sql
+    assert "sum(coalesce(card_clicks, entry_card_clicks_total)) as card_clicks" in sql
+    assert "sum(coalesce(card_clicks, entry_card_clicks_total)) / nullif(sum(coalesce(impressions, entry_impressions_total)), 0) * 100 end as ctr" in sql
     assert "avg(ctr)" not in sql
 
 
@@ -809,3 +809,134 @@ def test_render_markdown_2026_07_17_is_shorter_than_legacy_without_losing_core_s
     assert "К предыдущим 7 дням" in compact
     assert "## Операционная прибыль по VVBromo" in compact
     assert "## Действия на день" in compact
+
+
+def test_total_impressions_equals_sum_of_row_impressions() -> None:
+    current = {"impressions": Decimal("5000"), "card_clicks": Decimal("250"), "ctr": Decimal("5.0")}
+    previous = {"impressions": Decimal("4000"), "card_clicks": Decimal("160"), "ctr": Decimal("4.0")}
+    current_7d = {"impressions": Decimal("35000"), "card_clicks": Decimal("1750"), "ctr": Decimal("5.0")}
+    previous_7d = {"impressions": Decimal("30000"), "card_clicks": Decimal("1200"), "ctr": Decimal("4.0")}
+
+    section = build_traffic_section(current, previous, current_7d, previous_7d)
+    assert section is not None
+    impressions_row = next(m for m in section.metrics if m.metric == "Общие показы")
+    assert impressions_row.value == Decimal("5000")
+    assert impressions_row.previous_value == Decimal("4000")
+
+
+def test_total_clicks_equals_sum_of_row_clicks() -> None:
+    current = {"impressions": Decimal("5000"), "card_clicks": Decimal("250"), "ctr": Decimal("5.0")}
+    previous = {"impressions": Decimal("4000"), "card_clicks": Decimal("160"), "ctr": Decimal("4.0")}
+    current_7d = {"impressions": Decimal("35000"), "card_clicks": Decimal("1750"), "ctr": Decimal("5.0")}
+    previous_7d = {"impressions": Decimal("30000"), "card_clicks": Decimal("1200"), "ctr": Decimal("4.0")}
+
+    section = build_traffic_section(current, previous, current_7d, previous_7d)
+    assert section is not None
+    clicks_row = next(m for m in section.metrics if m.metric == "Общие клики")
+    assert clicks_row.value == Decimal("250")
+    assert clicks_row.previous_value == Decimal("160")
+
+
+def test_ctr_calculated_from_total_sums() -> None:
+    # Article A: 10,000 impressions, 1,000 clicks (CTR 10%)
+    # Article B: 100 impressions, 1 click (CTR 1%)
+    # Total impressions = 10,100, Total clicks = 1,001 -> Correct Total CTR = 1,001 / 10,100 * 100 = 9.91089%
+    row_a_imp, row_a_clicks = Decimal("10000"), Decimal("1000")
+    row_b_imp, row_b_clicks = Decimal("100"), Decimal("1")
+    total_imp = row_a_imp + row_b_imp
+    total_clicks = row_a_clicks + row_b_clicks
+    total_ctr = (total_clicks / total_imp * Decimal("100")) if total_imp > 0 else None
+
+    assert total_ctr is not None
+    assert round(float(total_ctr), 4) == 9.9109
+
+    current = {"impressions": total_imp, "card_clicks": total_clicks, "ctr": total_ctr}
+    previous = {"impressions": Decimal("10000"), "card_clicks": Decimal("800"), "ctr": Decimal("8.0")}
+    current_7d = {"impressions": total_imp * 7, "card_clicks": total_clicks * 7, "ctr": total_ctr}
+    previous_7d = {"impressions": Decimal("70000"), "card_clicks": Decimal("5600"), "ctr": Decimal("8.0")}
+
+    section = build_traffic_section(current, previous, current_7d, previous_7d)
+    assert section is not None
+    ctr_row = next(m for m in section.metrics if m.metric == "CTR общий")
+    assert ctr_row.value == total_ctr
+
+
+def test_ctr_not_equal_simple_average_of_article_ctrs() -> None:
+    # Article A: 10,000 impressions, 1,000 clicks (CTR 10.0%)
+    # Article B: 100 impressions, 1 click (CTR 1.0%)
+    # Simple average CTR = (10.0 + 1.0) / 2 = 5.5%
+    # Weighted Total CTR = (1000 + 1) / (10000 + 100) * 100 = 9.91089%
+    simple_average_ctr = Decimal("5.5")
+    total_imp = Decimal("10100")
+    total_clicks = Decimal("1001")
+    total_ctr = total_clicks / total_imp * Decimal("100")
+
+    assert total_ctr != simple_average_ctr
+    assert abs(total_ctr - simple_average_ctr) > Decimal("4.0")
+
+
+def test_zero_or_null_impressions_yields_null_ctr() -> None:
+    current = {"impressions": Decimal("0"), "card_clicks": Decimal("0"), "ctr": None}
+    previous = {"impressions": None, "card_clicks": None, "ctr": None}
+    current_7d = {"impressions": Decimal("0"), "card_clicks": Decimal("0"), "ctr": None}
+    previous_7d = {"impressions": None, "card_clicks": None, "ctr": None}
+
+    section = build_traffic_section(current, previous, current_7d, previous_7d)
+    assert section is not None
+    ctr_row = next(m for m in section.metrics if m.metric == "CTR общий")
+    assert ctr_row.value is None
+
+    markdown = render_wb_daily_operational_summary_markdown(_build_response([section], WbDailyOperationalHighlightsResponse()))
+    assert "| CTR общий | н/д | н/д | н/д |" in markdown
+
+
+def test_ctr_daily_and_weekly_deltas_expressed_in_percentage_points() -> None:
+    current = {"impressions": Decimal("1000"), "card_clicks": Decimal("100"), "ctr": Decimal("10.0")}
+    previous = {"impressions": Decimal("1000"), "card_clicks": Decimal("80"), "ctr": Decimal("8.0")}
+    current_7d = {"impressions": Decimal("7000"), "card_clicks": Decimal("700"), "ctr": Decimal("10.0")}
+    previous_7d = {"impressions": Decimal("7000"), "card_clicks": Decimal("420"), "ctr": Decimal("6.0")}
+
+    section = build_traffic_section(current, previous, current_7d, previous_7d)
+    assert section is not None
+    ctr_row = next(m for m in section.metrics if m.metric == "CTR общий")
+    assert ctr_row.delta_pp == Decimal("2.0")
+    assert ctr_row.delta_pct is None
+    assert ctr_row.trend_7d_pp == Decimal("4.0")
+    assert ctr_row.trend_7d_pct is None
+
+    markdown = render_wb_daily_operational_summary_markdown(_build_response([section], WbDailyOperationalHighlightsResponse()))
+    assert "| CTR общий | 10,0% | +2,0 п.п. | +4,0 п.п. |" in markdown
+
+
+def test_other_report_sections_remain_unchanged() -> None:
+    current = {
+        "order_sum": Decimal("1000000"),
+        "order_count": Decimal("700"),
+        "ad_writeoff_total": Decimal("90000"),
+        "ad_spend": Decimal("90000"),
+        "cart_count": Decimal("3000"),
+        "add_to_cart_conversion": Decimal("8.0"),
+        "cart_to_order_conversion": Decimal("23.0"),
+        "avg_check": Decimal("1400"),
+    }
+    previous = {
+        "order_sum": Decimal("900000"),
+        "order_count": Decimal("650"),
+        "ad_writeoff_total": Decimal("80000"),
+        "ad_spend": Decimal("80000"),
+        "cart_count": Decimal("2800"),
+        "add_to_cart_conversion": Decimal("8.2"),
+        "cart_to_order_conversion": Decimal("23.5"),
+        "avg_check": Decimal("1380"),
+    }
+    current_7d = dict(current)
+    previous_7d = dict(previous)
+
+    sales_sec = build_sales_section(current, previous, current_7d, previous_7d)
+    funnel_sec = build_funnel_section(current, previous, current_7d, previous_7d)
+    assert sales_sec is not None
+    assert funnel_sec is not None
+    assert sales_sec.key == "sales"
+    assert funnel_sec.key == "funnel"
+    assert any(m.metric in ("Оборот заказов", "Сумма заказов") for m in sales_sec.metrics)
+    assert any(m.metric in ("Конверсия в корзину", "Заказы") for m in funnel_sec.metrics)
