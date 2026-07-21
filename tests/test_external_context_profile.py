@@ -637,3 +637,112 @@ def test_future_published_at_not_selected(clean_external_db, test_settings, shar
         res_pub_day = service.get_external_context(report_date=date(2026, 7, 31), diagnostic=True)
         assert len(res_pub_day.signals) == 1
         assert res_pub_day.external_context_status == "signals_available"
+
+
+# 19. Detailed Wordstat comparison formulation and direction tests
+def test_wordstat_formulation_matrix_and_directions(clean_external_db, test_settings, shared_engine) -> None:
+    with session_scope(shared_engine) as session:
+        # Metric with +33.2% change (growth)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Wordstat",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            value=Decimal("3985"),
+            previous_value=Decimal("2992"),
+            change_pct=Decimal("33.2"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+
+        # Test A: +33.2% external and near-zero WB (+0.4% WB)
+        cat_trends_stable = {"womens_tshirts": {"change_pct": Decimal("0.4")}}
+        res_stable = service.get_external_context(report_date=date(2026, 7, 19), category_sales_trends=cat_trends_stable, diagnostic=True)
+        assert len(res_stable.signals) == 1
+        interp_stable = res_stable.signals[0].interpretation
+        assert "вырос на 33%" in interp_stable
+        assert "растут на 0%" not in interp_stable
+        assert "снижение" not in interp_stable
+        assert "продажи категории на WB практически не изменились" in interp_stable
+
+        # Test B: +33.2% external and None WB change -> standalone
+        res_none = service.get_external_context(report_date=date(2026, 7, 19), category_sales_trends=None, diagnostic=True)
+        assert len(res_none.signals) == 1
+        assert res_none.signals[0].interpretation == "Внешний поисковый интерес в Яндексе к женским футболкам вырос на 33%."
+
+        # Test C: Negative external (-33.2%) and positive WB (+10.0%) -> divergent
+        with session_scope(shared_engine) as session_neg:
+            m = session_neg.query(ExternalContextMetric).filter_by(metric_code="search_demand_womens_tshirts").first()
+            m.change_pct = Decimal("-33.2")
+            session_neg.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        cat_trends_div = {"womens_tshirts": {"change_pct": Decimal("10.0")}}
+        res_div = service.get_external_context(report_date=date(2026, 7, 19), category_sales_trends=cat_trends_div, diagnostic=True)
+        assert len(res_div.signals) == 1
+        interp_div = res_div.signals[0].interpretation
+        assert "вопреки снижению внешнего поискового интереса в Яндексе на 33%" in interp_div
+        assert "вырос на" not in interp_div
+
+
+# 20. Strict 1-to-1 mapping verification between category_code and subject
+def test_category_code_strict_1to1_subject_mapping(clean_external_db, test_settings, shared_engine) -> None:
+    with session_scope(shared_engine) as session:
+        # Metric for womens_tshirts
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Wordstat",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            value=Decimal("3985"),
+            previous_value=Decimal("2992"),
+            change_pct=Decimal("33.2"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        # Metric for womens_underwear
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_underwear",
+            metric_name="Wordstat",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            value=Decimal("5000"),
+            previous_value=Decimal("4000"),
+            change_pct=Decimal("25.0"),
+            category="womens_underwear",
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+
+        # Strict trends dictionary: womens_tshirts trend != womens_underwear trend
+        cat_trends = {
+            "womens_tshirts": {"change_pct": Decimal("-26.59"), "orders": 2796},
+            "womens_underwear": {"change_pct": Decimal("-12.41"), "orders": 2965},
+            "childrens_underwear": {"change_pct": Decimal("0.0"), "orders": 0},
+            "childrens_tshirts": {"change_pct": Decimal("0.0"), "orders": 0},
+        }
+
+        res = service.get_external_context(report_date=date(2026, 7, 19), category_sales_trends=cat_trends, diagnostic=True)
+        assert len(res.signals) == 2
+
+        tshirt_sig = next(s for s in res.signals if s.category == "womens_tshirts")
+        underwear_sig = next(s for s in res.signals if s.category == "womens_underwear")
+
+        # Verify tshirt_sig matches ONLY womens_tshirts trend (-26.59% -> 27%)
+        assert "поисковые заказы категории на WB снизились на 27%" in tshirt_sig.interpretation
+        assert "12%" not in tshirt_sig.interpretation
+
+        # Verify underwear_sig matches ONLY womens_underwear trend (-12.41% -> 12%)
+        assert "поисковые заказы категории на WB снизились на 12%" in underwear_sig.interpretation
+        assert "27%" not in underwear_sig.interpretation

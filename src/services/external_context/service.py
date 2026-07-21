@@ -170,44 +170,60 @@ class ExternalContextService:
                     comparison_available = sales_trend is not None
                     wb_change_pct = Decimal(str(sales_trend.get("change_pct"))) if (comparison_available and sales_trend.get("change_pct") is not None) else None
 
+                    ext_change = float(change_pct)
+                    ext_dir_word = "вырос" if ext_change > 0 else "снизился"
+                    ext_abs_pct = abs(int(round(ext_change)))
+
                     comparison_direction = None
                     selection_reason = None
                     is_selectable = False
 
                     if comparison_available and wb_change_pct is not None:
-                        if (change_pct > 0 and wb_change_pct > 0) or (change_pct < 0 and wb_change_pct < 0):
+                        wb_change = float(wb_change_pct)
+                        wb_abs_pct = abs(int(round(wb_change)))
+
+                        if -1.0 < wb_change < 1.0:
+                            comparison_direction = "stable_vs_growth" if ext_change > 0 else "stable_vs_decline"
+                            relevance = "medium"
+                            is_selectable = True
+                            selection_reason = "category_matched_wb_stable"
+                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} {ext_dir_word} на {ext_abs_pct}%, а продажи категории на WB практически не изменились."
+                        elif ext_change > 0 and wb_change >= 1.0:
                             comparison_direction = "matching"
                             relevance = "medium"
                             is_selectable = True
                             selection_reason = "category_matched_same_direction"
-                            if change_pct > 0:
-                                short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} и продажи категории на WB растут одновременно."
-                            else:
-                                short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} и продажи категории на WB снижаются одновременно."
-                        else:
+                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} и продажи категории на WB растут одновременно."
+                        elif ext_change < 0 and wb_change <= -1.0:
+                            comparison_direction = "matching"
+                            relevance = "medium"
+                            is_selectable = True
+                            selection_reason = "category_matched_same_direction"
+                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} и продажи категории на WB снижаются одновременно."
+                        elif ext_change > 0 and wb_change <= -1.0:
                             comparison_direction = "divergent"
                             relevance = "high"
                             is_selectable = True
                             selection_reason = "category_matched_divergent_direction"
-                            if change_pct > 0 and wb_change_pct < 0:
-                                short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} вырос на {abs(int(change_pct))}%, при этом поисковые заказы категории на WB снизились на {abs(int(wb_change_pct))}%."
-                            else:
-                                short_interpretation = f"Продажи категории {cat_title.lower()} на WB растут на {abs(int(wb_change_pct))}% вопреки снижению внешнего поискового интереса в Яндексе на {abs(int(change_pct))}%."
+                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} вырос на {ext_abs_pct}%, при этом поисковые заказы категории на WB снизились на {wb_abs_pct}%."
+                        elif ext_change < 0 and wb_change >= 1.0:
+                            comparison_direction = "divergent"
+                            relevance = "high"
+                            is_selectable = True
+                            selection_reason = "category_matched_divergent_direction"
+                            short_interpretation = f"Продажи категории {cat_title.lower()} на WB выросли на {wb_abs_pct}% вопреки снижению внешнего поискового интереса в Яндексе на {ext_abs_pct}%."
+                        else:
+                            comparison_direction = "standalone"
+                            is_selectable = abs(ext_change) >= 25.0
+                            relevance = "medium" if is_selectable else "low"
+                            selection_reason = "standalone_strong_change" if is_selectable else "standalone_normal_change_diagnostic_only"
+                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} {ext_dir_word} на {ext_abs_pct}%."
                     else:
                         comparison_direction = "standalone"
-                        # Without WB category comparison: only selectable for main report if strong change >= 25.0%
-                        if abs(float(change_pct)) >= 25.0:
-                            relevance = "medium"
-                            is_selectable = True
-                            selection_reason = "standalone_strong_change"
-                            dir_str = "вырос" if change_pct > 0 else "снизился"
-                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} {dir_str} на {abs(int(change_pct))}%."
-                        else:
-                            relevance = "low"
-                            is_selectable = False
-                            selection_reason = "standalone_normal_change_diagnostic_only"
-                            dir_str = "вырос" if change_pct > 0 else "снизился"
-                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} {dir_str} на {abs(int(change_pct))}%."
+                        is_selectable = abs(ext_change) >= 25.0
+                        relevance = "medium" if is_selectable else "low"
+                        selection_reason = "standalone_strong_change" if is_selectable else "standalone_normal_change_diagnostic_only"
+                        short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} {ext_dir_word} на {ext_abs_pct}%."
 
                     fresh_until = metric.period_end + timedelta(days=7)
                     pub_date = metric.published_at.date() if metric.published_at else metric.period_end
