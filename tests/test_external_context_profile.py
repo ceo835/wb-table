@@ -909,3 +909,255 @@ def test_category_with_none_change_pct_diagnostic_flag(clean_external_db, test_s
         assert women_diag["comparison_direction"] == "divergent"
 
 
+# 22. Limit 6 signals and multi-source coexistence (Wordstat + Calendar + Sentiment + Inflation)
+def test_max_signals_limit_six_and_multi_source_coexistence(clean_external_db, test_settings, shared_engine) -> None:
+    report_dt = date(2026, 7, 19)
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        # Wordstat signal 1
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_underwear",
+            metric_name="Поисковый спрос: Женское белье",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("55439"),
+            previous_value=Decimal("38481"),
+            change_pct=Decimal("44.1"),
+            category="womens_underwear",
+            data_status="ok"
+        ))
+        # Wordstat signal 2
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Поисковый спрос: Женские футболки",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("59069"),
+            previous_value=Decimal("42759"),
+            change_pct=Decimal("38.1"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        # Calendar Event (active window)
+        session.add(ExternalContextEvent(
+            source="internal_calendar",
+            event_code="summer_sale_2026",
+            event_type="sale",
+            title="Летняя распродажа",
+            description="Большая летняя распродажа на маркетплейсах",
+            date_start=date(2026, 7, 18),
+            date_end=date(2026, 7, 21),
+            is_active=True
+        ))
+        # Sentiment Index (fresh: published 2026-07-15 <= 7 days from 2026-07-19)
+        session.add(ExternalContextMetric(
+            source="cbr",
+            metric_code="consumer_sentiment_index",
+            metric_name="Индекс потребительских настроений",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 15),
+            published_at=pub_dt,
+            value=Decimal("108.5"),
+            previous_value=Decimal("105.0"),
+            change_pct=Decimal("3.3"),
+            data_status="ok"
+        ))
+        # Inflation rate (fresh: published 2026-07-15 <= 7 days from 2026-07-19)
+        session.add(ExternalContextMetric(
+            source="rosstat",
+            metric_code="inflation_rate",
+            metric_name="Годовая инфляция",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 15),
+            published_at=pub_dt,
+            value=Decimal("8.2"),
+            previous_value=Decimal("8.5"),
+            change_pct=Decimal("-3.5"),
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        cat_trends = {
+            "womens_underwear": {"subject": "Трусы", "current_orders": Decimal("2965"), "previous_orders": Decimal("3385"), "change_pct": Decimal("-12.41")},
+            "womens_tshirts": {"subject": "Футболки", "current_orders": Decimal("2796"), "previous_orders": Decimal("3809"), "change_pct": Decimal("-26.59")},
+        }
+
+        res = service.get_external_context(report_date=report_dt, category_sales_trends=cat_trends, max_signals=6)
+
+        # All 5 available signals (2 Wordstat + 1 Calendar + 1 Sentiment + 1 Inflation) must coexist without displacement
+        assert len(res.signals) == 5
+        sources = {s.source for s in res.signals}
+        assert sources == {"search_demand", "internal_calendar", "cbr", "rosstat"}
+
+
+# 23. Stale sentiment and inflation metrics (>7 days) drop off
+def test_stale_macro_metrics_outside_seven_day_window_excluded(clean_external_db, test_settings, shared_engine) -> None:
+    report_dt = date(2026, 7, 25)  # 10 days after published_at 2026-07-15
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="cbr",
+            metric_code="consumer_sentiment_index",
+            metric_name="Индекс потребительских настроений",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 15),
+            published_at=pub_dt,
+            value=Decimal("108.5"),
+            previous_value=Decimal("105.0"),
+            change_pct=Decimal("3.3"),
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        res = service.get_external_context(report_date=report_dt, max_signals=6, diagnostic=True)
+
+        assert len(res.signals) == 0
+        assert res.external_context_status == "no_significant_signals"
+        excluded = [d for d in res.diagnostics.get("candidate_evaluations", []) if d.get("metric_code") == "consumer_sentiment_index"]
+        assert len(excluded) == 1
+        assert excluded[0]["excluded_reason"] == "outside_7day_freshness_window"
+
+
+# 24. 4 active Wordstat candidates + calendar + sentiment + inflation -> 2 Wordstat and all 3 other sources selected
+def test_four_wordstat_candidates_plus_other_sources_outputs_two_wordstat_and_all_others(clean_external_db, test_settings, shared_engine) -> None:
+    report_dt = date(2026, 7, 19)
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        # Wordstat candidate 1 (divergent)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_underwear",
+            metric_name="Поисковый спрос: Женские трусы",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("55439"),
+            previous_value=Decimal("38481"),
+            change_pct=Decimal("44.1"),
+            category="womens_underwear",
+            data_status="ok"
+        ))
+        # Wordstat candidate 2 (divergent)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Поисковый спрос: Женские футболки",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("59069"),
+            previous_value=Decimal("42759"),
+            change_pct=Decimal("38.1"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        # Wordstat candidate 3 (standalone strong)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_childrens_underwear",
+            metric_name="Поисковый спрос: Детские трусы",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("15200"),
+            previous_value=Decimal("11030"),
+            change_pct=Decimal("37.8"),
+            category="childrens_underwear",
+            data_status="ok"
+        ))
+        # Wordstat candidate 4 (standalone strong)
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_childrens_tshirts",
+            metric_name="Поисковый спрос: Детские футболки",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("25800"),
+            previous_value=Decimal("19020"),
+            change_pct=Decimal("35.7"),
+            category="childrens_tshirts",
+            data_status="ok"
+        ))
+        # Calendar Event
+        session.add(ExternalContextEvent(
+            source="internal_calendar",
+            event_code="summer_sale_2026",
+            event_type="sale",
+            title="Летняя распродажа",
+            description="Большая летняя распродажа на маркетплейсах",
+            date_start=date(2026, 7, 18),
+            date_end=date(2026, 7, 21),
+            is_active=True
+        ))
+        # Sentiment Index
+        session.add(ExternalContextMetric(
+            source="cbr",
+            metric_code="consumer_sentiment_index",
+            metric_name="Индекс потребительских настроений",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 15),
+            published_at=pub_dt,
+            value=Decimal("108.5"),
+            previous_value=Decimal("105.0"),
+            change_pct=Decimal("3.3"),
+            data_status="ok"
+        ))
+        # Inflation rate
+        session.add(ExternalContextMetric(
+            source="rosstat",
+            metric_code="inflation_rate",
+            metric_name="Годовая инфляция",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 15),
+            published_at=pub_dt,
+            value=Decimal("8.2"),
+            previous_value=Decimal("8.5"),
+            change_pct=Decimal("-3.5"),
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        cat_trends = {
+            "womens_underwear": {"subject": "Трусы", "current_orders": Decimal("2965"), "previous_orders": Decimal("3385"), "change_pct": Decimal("-12.41")},
+            "womens_tshirts": {"subject": "Футболки", "current_orders": Decimal("2796"), "previous_orders": Decimal("3809"), "change_pct": Decimal("-26.59")},
+            "childrens_underwear": {"subject": "Трусы детские", "current_orders": Decimal("0"), "previous_orders": Decimal("0"), "change_pct": None},
+            "childrens_tshirts": {"subject": "Футболки детские", "current_orders": Decimal("0"), "previous_orders": Decimal("0"), "change_pct": None},
+        }
+
+        res = service.get_external_context(report_date=report_dt, category_sales_trends=cat_trends, max_signals=6, diagnostic=True)
+
+        # Total selected signals: 2 Wordstat + 1 Calendar + 1 Sentiment + 1 Inflation = 5 signals
+        assert len(res.signals) == 5
+
+        wordstat_signals = [s for s in res.signals if s.source == "search_demand"]
+        calendar_signals = [s for s in res.signals if s.source == "internal_calendar"]
+        sentiment_signals = [s for s in res.signals if s.source == "cbr"]
+        inflation_signals = [s for s in res.signals if s.source == "rosstat"]
+
+        assert len(wordstat_signals) == 2
+        assert len(calendar_signals) == 1
+        assert len(sentiment_signals) == 1
+        assert len(inflation_signals) == 1
+
+        selected_wordstat_cats = {s.category for s in wordstat_signals}
+        assert selected_wordstat_cats == {"womens_underwear", "womens_tshirts"}
+
+        # Non-selected Wordstat candidates are retained in diagnostics
+        diag_evals = res.diagnostics.get("candidate_evaluations", [])
+        evaluated_wordstat_cats = {d.get("wordstat_category") for d in diag_evals if "wordstat_category" in d}
+        assert evaluated_wordstat_cats == {"womens_underwear", "womens_tshirts", "childrens_underwear", "childrens_tshirts"}
+
+
+
+

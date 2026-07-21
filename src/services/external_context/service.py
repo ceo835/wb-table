@@ -55,11 +55,11 @@ class ExternalContextService:
         period_end: date | None = None,
         categories: Iterable[str] | None = None,
         region: str | None = None,
-        max_signals: int = 2,
+        max_signals: int = 6,
         category_sales_trends: dict[str, dict[str, Any]] | None = None,
         diagnostic: bool = False,
     ) -> ExternalContextResponse:
-        max_signals = max(1, min(int(max_signals), 2))
+        max_signals = max(1, min(int(max_signals), 10))
         resolved_period_start = period_start if period_start is not None else report_date
         resolved_period_end = period_end if period_end is not None else report_date
         if resolved_period_start > resolved_period_end:
@@ -266,16 +266,16 @@ class ExternalContextService:
                         )
                         candidates_p1.append(signal)
 
-                # Prioritize Wordstat signals: discrepancies between Yandex and WB first (relevance="high"),
-                # then category matched stable/same direction, then standalone strong.
+                # Prioritize Wordstat signals:
+                # 1. Discrepancy with WB (relevance="high")
+                # 2. Strong category-matched change with WB
+                # 3. Standalone strong change without WB comparison
                 def _wordstat_priority_key(sig: ExternalContextSignalResponse) -> tuple[int, float]:
-                    rel_rank = 3
+                    rel_rank = 2
                     if sig.relevance == "high":
                         rel_rank = 0
-                    elif "практически не изменились" in (sig.interpretation or ""):
+                    elif "WB" in (sig.interpretation or ""):
                         rel_rank = 1
-                    elif sig.relevance == "medium":
-                        rel_rank = 2
 
                     change_mag = float(abs(sig.change_pct)) if sig.change_pct is not None else 0.0
                     return (rel_rank, -change_mag)
@@ -520,17 +520,28 @@ class ExternalContextService:
                 sources_status["macro"] = "error"
 
         # ----------------------------------------------------
-        # 5. Selection with Priority & Cap (max 2 signals)
+        # 5. Selection & Ranking across all sources (max_signals)
+        # Wordstat is capped at maximum 2 signals for main output.
         # ----------------------------------------------------
-        selected_signals: list[ExternalContextSignalResponse] = []
+        selected_wordstat: list[ExternalContextSignalResponse] = candidates_p1[:2]
 
-        for bucket in (candidates_p1, candidates_p2, candidates_p3, candidates_p4):
-            for signal in bucket:
-                if len(selected_signals) >= max_signals:
-                    break
-                selected_signals.append(signal)
-            if len(selected_signals) >= max_signals:
-                break
+        all_candidates: list[ExternalContextSignalResponse] = (
+            selected_wordstat + candidates_p2 + candidates_p3 + candidates_p4
+        )
+
+        def _overall_signal_sort_key(sig: ExternalContextSignalResponse) -> tuple[int, int, float]:
+            rel_map = {"high": 0, "medium": 1, "low": 2}
+            rel_rank = rel_map.get(sig.relevance or "medium", 1)
+
+            pub_date = sig.published_at or sig.period_end or report_date
+            days_ago = max(0, (report_date - pub_date).days)
+
+            mag = float(abs(sig.change_pct)) if sig.change_pct is not None else 0.0
+
+            return (rel_rank, days_ago, -mag)
+
+        all_candidates.sort(key=_overall_signal_sort_key)
+        selected_signals: list[ExternalContextSignalResponse] = all_candidates[:max_signals]
 
         # Compute refined status for search_demand
         if self.settings.external_search_demand_enabled and sources_status["search_demand"] != "disabled":
