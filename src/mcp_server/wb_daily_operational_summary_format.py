@@ -822,7 +822,7 @@ def _collect_quality_warnings(response: WbDailyOperationalSummaryResponse, *, li
     return warnings
 
 
-def _build_external_context_lines(response: WbDailyOperationalSummaryResponse, *, limit: int = 4) -> list[str]:
+def _build_external_context_lines(response: WbDailyOperationalSummaryResponse, *, limit: int = 2) -> list[str]:
     context = response.external_context or {}
     # Only show ok and partial status data in main report
     if context.get("status") not in {"OK", "PARTIAL"}:

@@ -47,10 +47,11 @@ class ExternalContextService:
         period_end: date | None = None,
         categories: Iterable[str] | None = None,
         region: str | None = None,
-        max_signals: int = 4,
+        max_signals: int = 2,
         category_sales_trends: dict[str, dict[str, Any]] | None = None,
+        diagnostic: bool = False,
     ) -> ExternalContextResponse:
-        max_signals = max(1, min(int(max_signals), 4))
+        max_signals = max(1, min(int(max_signals), 2))
         resolved_period_start = period_start if period_start is not None else report_date
         resolved_period_end = period_end if period_end is not None else report_date
         if resolved_period_start > resolved_period_end:
@@ -79,28 +80,21 @@ class ExternalContextService:
             "period_end": resolved_period_end.isoformat(),
             "region": region,
             "max_signals": max_signals,
+            "diagnostic": diagnostic,
         }
 
-        # Candidate signals storage
-        candidates_p1 = []  # Search demand
-        candidates_p2 = []  # Calendar
-        candidates_p3 = []  # Consumer Sentiment
-        candidates_p4 = []  # Macro
+        candidates_p1: list[ExternalContextSignalResponse] = []  # Search demand (Wordstat)
+        candidates_p2: list[ExternalContextSignalResponse] = []  # Calendar events
+        candidates_p3: list[ExternalContextSignalResponse] = []  # Consumer Sentiment Index
+        candidates_p4: list[ExternalContextSignalResponse] = []  # Annual Inflation / Macro
 
-        # SQL Diagnostics trackers
-        diag_counts = {
-            "calendar": {"candidates": 0, "selected": 0, "excluded": 0},
-            "search_demand": {"candidates": 0, "selected": 0, "excluded": 0},
-            "consumer_sentiment": {"candidates": 0, "selected": 0, "excluded": 0},
-            "macro": {"candidates": 0, "selected": 0, "excluded": 0},
-        }
+        diag_details: list[dict[str, Any]] = []
 
         # ----------------------------------------------------
-        # 1. P1: Search Demand Logic
+        # 1. P1: Wordstat (Search Demand)
         # ----------------------------------------------------
         if self.settings.external_search_demand_enabled and sources_status["search_demand"] != "disabled":
             try:
-                # Fetch search demand metrics from DB
                 db_metrics = self.session.scalars(
                     select(ExternalContextMetric)
                     .where(
@@ -110,148 +104,115 @@ class ExternalContextService:
                     )
                 ).all()
 
-                diag_counts["search_demand"]["candidates"] = len(db_metrics)
-
                 for metric in db_metrics:
                     cat_code = metric.category
                     if not cat_code:
                         continue
-                    
-                    # Find category config
                     cat_cfg = next((c for c in CATEGORIES_CONFIG if c["category_code"] == cat_code), None)
                     if not cat_cfg or not cat_cfg["is_active"]:
-                        diag_counts["search_demand"]["excluded"] += 1
+                        diag_details.append({
+                            "source": "search_demand",
+                            "metric_code": metric.metric_code,
+                            "excluded_reason": "category_inactive",
+                        })
                         continue
 
-                    # If unavailable in DB, skip for main display but keep in diagnostics
+                    # Freshness for Wordstat: period_end must be within 14 days of report_date
+                    days_diff = (report_date - metric.period_end).days
+                    if days_diff > 14 or days_diff < 0:
+                        diag_details.append({
+                            "source": "search_demand",
+                            "metric_code": metric.metric_code,
+                            "excluded_reason": "stale_period",
+                            "days_diff": days_diff,
+                        })
+                        continue
+
                     if metric.data_status != "ok":
-                        diag_counts["search_demand"]["excluded"] += 1
+                        diag_details.append({
+                            "source": "search_demand",
+                            "metric_code": metric.metric_code,
+                            "excluded_reason": "data_status_not_ok",
+                        })
                         continue
 
                     val = metric.value
                     prev_val = metric.previous_value
                     change_pct = metric.change_pct
                     if val is None or prev_val is None or change_pct is None:
-                        # Fallback calculation if missing
                         if prev_val and prev_val > 0:
-                            change_pct = ((val - prev_val) / prev_val) * 100
+                            change_pct = ((val - prev_val) / prev_val) * Decimal("100")
                         else:
                             change_pct = Decimal("0")
 
-                    # Check significance threshold
                     if abs(float(change_pct)) < self.settings.search_demand_min_change_pct:
-                        diag_counts["search_demand"]["excluded"] += 1
+                        diag_details.append({
+                            "source": "search_demand",
+                            "metric_code": metric.metric_code,
+                            "excluded_reason": "change_pct_below_threshold",
+                            "change_pct": float(change_pct),
+                        })
                         continue
 
-                    # Determine sales trend mapping
-                    sales_trend = None
-                    if category_sales_trends and cat_code in category_sales_trends:
-                        sales_trend = category_sales_trends[cat_code]
-                    elif category_sales_trends is not None:
-                        # Explicit check: if sales trends dictionary is passed, but category is missing,
-                        # it means there is no sales mapping for this category.
-                        pass
-
-                    # Category mapping matching rules
-                    interpretation = None
-                    relevance = "low"
-                    
-                    if sales_trend:
-                        sales_change = Decimal(str(sales_trend.get("change_pct") or "0"))
-                        relevance = "high"
-                        direction_str = "снизился" if change_pct < 0 else "вырос"
-                        
-                        if change_pct < 0 and sales_change < 0:
-                            interpretation = f"Поисковый спрос на {cat_cfg['category_title'].lower()} снизился на {abs(int(change_pct))}%; продажи категории снизились в том же направлении."
-                        elif change_pct > 0 and sales_change < 0:
-                            interpretation = f"Поисковый спрос на {cat_cfg['category_title'].lower()} вырос на {abs(int(change_pct))}%, а продажи снизились; вероятнее следует проверить внутренние факторы."
-                        elif change_pct < 0 and sales_change > 0:
-                            interpretation = f"Продажи категории {cat_cfg['category_title'].lower()} растут вопреки снижению внешнего поискового спроса на {abs(int(change_pct))}%."
-                        else:
-                            interpretation = f"Поисковый спрос на {cat_cfg['category_title'].lower()} вырос на {abs(int(change_pct))}%; продажи категории изменились в том же направлении."
-                    else:
-                        # If no sales trend correlation is possible, do not show in main operational summary report,
-                        # but keep as candidates for diagnostic Tool.
-                        interpretation = f"Поисковый спрос на {cat_cfg['category_title'].lower()} изменился на {change_pct}%."
+                    cat_title = cat_cfg["category_title"]
+                    direction_str = "вырос" if change_pct > 0 else "снизился"
+                    short_interpretation = f"Поисковый спрос на {cat_title.lower()} {direction_str} на {abs(int(change_pct))}%."
+                    fresh_until = metric.period_end + timedelta(days=7)
+                    pub_date = metric.published_at.date() if metric.published_at else metric.period_end
 
                     signal = ExternalContextSignalResponse(
                         source="search_demand",
                         signal_type="demand_change",
                         metric_code=metric.metric_code,
-                        title=f"Поисковый спрос: {cat_cfg['category_title']}",
+                        title=f"Поисковый спрос: {cat_title}",
                         period_start=metric.period_start,
                         period_end=metric.period_end,
                         value=val,
+                        current_value=val,
                         previous_value=prev_val,
+                        change_value=val - prev_val if (val is not None and prev_val is not None) else None,
                         change_pct=change_pct,
+                        published_at=pub_date,
+                        fresh_until=fresh_until,
+                        neutral_level=None,
                         category=cat_code,
-                        relevance=relevance,
+                        relevance="high",
                         confidence_level="context_only",
-                        interpretation=interpretation,
+                        interpretation=short_interpretation,
                         source_reference=metric.source_reference or "Yandex Wordstat",
                         data_status=metric.data_status,
                     )
                     candidates_p1.append(signal)
-                    diag_counts["search_demand"]["selected"] += 1
-            except SQLAlchemyError as exc:
+            except SQLAlchemyError:
                 sources_status["search_demand"] = "error"
 
         # ----------------------------------------------------
-        # 2. P2: Calendar Logic
+        # 2. P2: Calendar Events
         # ----------------------------------------------------
         if self.settings.external_calendar_enabled and sources_status["calendar"] != "disabled":
             try:
-                date_match = or_(
-                    and_(ExternalContextEvent.date_start <= report_date, ExternalContextEvent.date_end >= report_date),
-                    and_(ExternalContextEvent.date_start <= resolved_period_end, ExternalContextEvent.date_end >= resolved_period_start),
-                )
                 events = self.session.scalars(
                     select(ExternalContextEvent)
-                    .where(ExternalContextEvent.is_active.is_(True), date_match)
+                    .where(ExternalContextEvent.is_active.is_(True))
                     .order_by(ExternalContextEvent.date_start.desc())
                 ).all()
 
-                diag_counts["calendar"]["candidates"] = len(events)
-
                 for event in events:
-                    # Filter events by display rules
-                    requires_supporting = False
-                    
-                    # Summers season and long seasonal periods require supporting window or query trends
-                    if event.event_type == "seasonal_period" or "season" in event.event_code:
-                        requires_supporting = True
-                    
-                    # Metadata override if present
-                    meta = event.metadata_json or {}
-                    if "requires_supporting_signal" in meta:
-                        requires_supporting = bool(meta["requires_supporting_signal"])
-
-                    is_valid = True
-                    
-                    if requires_supporting:
-                        # Check if within start/end transition window
-                        near_start = abs((report_date - event.date_start).days) <= self.settings.calendar_transition_window_days
-                        near_end = abs((report_date - event.date_end).days) <= self.settings.calendar_transition_window_days
-                        
-                        # Check category search demand validation if categories are configured
-                        has_matching_demand = False
-                        if event.category:
-                            matching_p1 = [p for p in candidates_p1 if p.category == event.category and p.data_status == "ok"]
-                            if matching_p1:
-                                has_matching_demand = True
-
-                        if not (near_start or near_end or has_matching_demand):
-                            is_valid = False
-
-                    # Exclude generic disclaimers
-                    desc = event.description or ""
-                    if not desc or "прямое влияние" in desc or "контекстный фактор" in desc:
-                        # Exclude empty or meaningless comments
-                        is_valid = False
-
-                    if not is_valid:
-                        diag_counts["calendar"]["excluded"] += 1
+                    # Calendar freshness: active from date_start - 3 days to date_end + 2 days
+                    start_window = event.date_start - timedelta(days=3)
+                    end_window = event.date_end + timedelta(days=2)
+                    if not (start_window <= report_date <= end_window):
+                        diag_details.append({
+                            "source": "internal_calendar",
+                            "event_code": event.event_code,
+                            "excluded_reason": "outside_event_window",
+                            "date_start": event.date_start.isoformat(),
+                            "date_end": event.date_end.isoformat(),
+                        })
                         continue
+
+                    desc = event.description or event.title
+                    fresh_until = event.date_end + timedelta(days=2)
 
                     signal = ExternalContextSignalResponse(
                         source="internal_calendar",
@@ -262,6 +223,10 @@ class ExternalContextService:
                         description=desc,
                         date_start=event.date_start,
                         date_end=event.date_end,
+                        period_start=event.date_start,
+                        period_end=event.date_end,
+                        published_at=event.date_start,
+                        fresh_until=fresh_until,
                         region=event.region,
                         category=event.category,
                         impact_direction=event.impact_direction,
@@ -273,59 +238,54 @@ class ExternalContextService:
                         data_status="ok",
                     )
                     candidates_p2.append(signal)
-                    diag_counts["calendar"]["selected"] += 1
-            except SQLAlchemyError as exc:
+            except SQLAlchemyError:
                 sources_status["calendar"] = "error"
 
         # ----------------------------------------------------
-        # 3. P3: Consumer Sentiment Logic
+        # 3. P3: Consumer Sentiment Index (CBR)
         # ----------------------------------------------------
         if self.settings.external_consumer_sentiment_enabled and sources_status["consumer_sentiment"] != "disabled":
             try:
-                db_metrics = self.session.scalars(
+                metrics = self.session.scalars(
                     select(ExternalContextMetric)
                     .where(
                         ExternalContextMetric.source == "cbr",
-                        ExternalContextMetric.metric_code.in_([
-                            "consumer_sentiment_index", "expectations_index", "current_state_index", "inflation_expectations"
-                        ])
+                        ExternalContextMetric.metric_code == "consumer_sentiment_index",
                     )
                     .order_by(ExternalContextMetric.period_end.desc())
                 ).all()
 
-                diag_counts["consumer_sentiment"]["candidates"] = len(db_metrics)
+                for metric in metrics[:1]:  # Latest metric only
+                    pub_date = metric.published_at.date() if metric.published_at else metric.period_end
+                    days_diff = (report_date - pub_date).days
+                    fresh_until = pub_date + timedelta(days=7)
 
-                # Keep only latest unique codes to avoid duplicates
-                seen_codes = set()
-                latest_metrics = []
-                for m in db_metrics:
-                    if m.metric_code not in seen_codes:
-                        seen_codes.add(m.metric_code)
-                        latest_metrics.append(m)
-
-                for metric in latest_metrics:
-                    # Apply consumer signal display days limit
-                    days_diff = (report_date - metric.period_end).days
-                    if days_diff > self.settings.consumer_signal_display_days:
-                        diag_counts["consumer_sentiment"]["excluded"] += 1
+                    # Freshness window: 0 to 7 days after published_at
+                    if not (0 <= days_diff <= 7):
+                        diag_details.append({
+                            "source": "cbr",
+                            "metric_code": metric.metric_code,
+                            "excluded_reason": "outside_7day_freshness_window",
+                            "days_diff": days_diff,
+                            "published_at": pub_date.isoformat(),
+                        })
                         continue
 
-                    # Filter index value changes
-                    change_pct = metric.change_pct or Decimal("0")
-                    
-                    interpretation = ""
                     val_str = _format_decimal(metric.value, 1)
-                    change_str = _format_decimal(change_pct, 1)
-                    
-                    if metric.metric_code == "consumer_sentiment_index":
-                        if change_pct < 0:
-                            interpretation = f"Индекс потребительских настроений снизился до {val_str} пунктов, что может ограничивать общий потребительский спрос."
+                    prev_val = metric.previous_value
+                    change_val = metric.change_value if metric.change_value is not None else (
+                        metric.value - prev_val if (metric.value is not None and prev_val is not None) else None
+                    )
+
+                    if prev_val is not None:
+                        if change_val is not None and change_val > 0:
+                            short_interpretation = f"Индекс потребительских настроений вырос до {val_str} пункта."
+                        elif change_val is not None and change_val < 0:
+                            short_interpretation = f"Индекс потребительских настроений снизился до {val_str} пункта."
                         else:
-                            interpretation = f"Индекс потребительских настроений увеличился до {val_str} пунктов."
-                    elif metric.metric_code == "inflation_expectations":
-                        interpretation = f"Инфляционные ожидания населения составили {val_str}% (изменение на {change_str} п.п.)."
+                            short_interpretation = f"Индекс потребительских настроений составил {val_str} пункта."
                     else:
-                        interpretation = f"{metric.metric_name} составил {val_str} пунктов."
+                        short_interpretation = f"Индекс потребительских настроений составил {val_str} пункта."
 
                     signal = ExternalContextSignalResponse(
                         source="cbr",
@@ -335,134 +295,111 @@ class ExternalContextService:
                         period_start=metric.period_start,
                         period_end=metric.period_end,
                         value=metric.value,
-                        previous_value=metric.previous_value,
-                        change_pct=change_pct,
+                        current_value=metric.value,
+                        previous_value=prev_val,
+                        change_value=change_val,
+                        change_pct=metric.change_pct,
+                        published_at=pub_date,
+                        fresh_until=fresh_until,
+                        neutral_level=Decimal("100.0"),
                         relevance="medium",
                         confidence_level="context_only",
-                        interpretation=interpretation,
+                        interpretation=short_interpretation,
                         source_reference=metric.source_reference or "CBR",
                         data_status=metric.data_status,
                     )
                     candidates_p3.append(signal)
-                    diag_counts["consumer_sentiment"]["selected"] += 1
-            except SQLAlchemyError as exc:
+            except SQLAlchemyError:
                 sources_status["consumer_sentiment"] = "error"
 
         # ----------------------------------------------------
-        # 4. P4: Macroeconomic Background Logic
+        # 4. P4: Annual Inflation (Rosstat / CBR)
         # ----------------------------------------------------
         if self.settings.external_macro_enabled and sources_status["macro"] != "disabled":
             try:
-                db_metrics = self.session.scalars(
+                metrics = self.session.scalars(
                     select(ExternalContextMetric)
                     .where(
                         ExternalContextMetric.source.in_(["rosstat", "cbr"]),
-                        ExternalContextMetric.metric_code.in_([
-                            "inflation_rate", "clothing_inflation_rate", "real_disposable_income", "retail_trade_turnover", "cbr_key_rate"
-                        ])
+                        ExternalContextMetric.metric_code == "inflation_rate",
                     )
                     .order_by(ExternalContextMetric.period_end.desc())
                 ).all()
 
-                diag_counts["macro"]["candidates"] = len(db_metrics)
+                for metric in metrics[:1]:  # Latest metric only
+                    pub_date = metric.published_at.date() if metric.published_at else metric.period_end
+                    days_diff = (report_date - pub_date).days
+                    fresh_until = pub_date + timedelta(days=7)
 
-                seen_codes = set()
-                latest_metrics = []
-                for m in db_metrics:
-                    if m.metric_code not in seen_codes:
-                        seen_codes.add(m.metric_code)
-                        latest_metrics.append(m)
-
-                for metric in latest_metrics:
-                    # Apply display limit (except Key Rate which acts as static background)
-                    if metric.metric_code != "cbr_key_rate":
-                        days_diff = (report_date - metric.period_end).days
-                        if days_diff > self.settings.macro_signal_display_days:
-                            diag_counts["macro"]["excluded"] += 1
-                            continue
+                    # Freshness window: 0 to 7 days after published_at
+                    if not (0 <= days_diff <= 7):
+                        diag_details.append({
+                            "source": metric.source,
+                            "metric_code": metric.metric_code,
+                            "excluded_reason": "outside_7day_freshness_window",
+                            "days_diff": days_diff,
+                            "published_at": pub_date.isoformat(),
+                        })
+                        continue
 
                     val_str = _format_decimal(metric.value, 1)
-                    interpretation = ""
-                    
-                    if metric.metric_code == "cbr_key_rate":
-                        interpretation = f"Ключевая ставка ЦБ РФ составляет {val_str}%, выступая общим финансовым фоном."
-                    elif metric.metric_code == "clothing_inflation_rate":
-                        interpretation = f"Инфляция в категории одежды и текстиля зафиксирована на уровне {val_str}%."
-                    elif metric.metric_code == "inflation_rate":
-                        interpretation = f"Годовая инфляция составила {val_str}%."
+                    prev_val = metric.previous_value
+
+                    if prev_val is not None:
+                        if metric.value is not None and metric.value > prev_val:
+                            short_interpretation = f"Годовая инфляция ускорилась до {val_str}%."
+                        elif metric.value is not None and metric.value < prev_val:
+                            short_interpretation = f"Годовая инфляция замедлилась до {val_str}%."
+                        else:
+                            short_interpretation = f"Годовая инфляция составила {val_str}%."
                     else:
-                        interpretation = f"Показатель {metric.metric_name} составил {val_str}%."
+                        short_interpretation = f"Годовая инфляция составила {val_str}%."
 
                     signal = ExternalContextSignalResponse(
-                        source="macro",
+                        source=metric.source,
                         signal_type="macro_index",
                         metric_code=metric.metric_code,
                         title=metric.metric_name,
                         period_start=metric.period_start,
                         period_end=metric.period_end,
                         value=metric.value,
-                        previous_value=metric.previous_value,
+                        current_value=metric.value,
+                        previous_value=prev_val,
+                        change_value=metric.value - prev_val if (metric.value is not None and prev_val is not None) else None,
                         change_pct=metric.change_pct,
+                        published_at=pub_date,
+                        fresh_until=fresh_until,
+                        neutral_level=None,
                         relevance="low",
                         confidence_level="context_only",
-                        interpretation=interpretation,
+                        interpretation=short_interpretation,
                         source_reference=metric.source_reference or "Rosstat",
                         data_status=metric.data_status,
                     )
                     candidates_p4.append(signal)
-                    diag_counts["macro"]["selected"] += 1
-            except SQLAlchemyError as exc:
+            except SQLAlchemyError:
                 sources_status["macro"] = "error"
 
         # ----------------------------------------------------
-        # 5. Signal Selection and Priority
+        # 5. Selection with Priority & Cap (max 2 signals)
         # ----------------------------------------------------
-        selected_signals = []
+        selected_signals: list[ExternalContextSignalResponse] = []
 
-        # We select AT MOST 1 signal from each priority bucket (P1, P2, P3, P4)
-        # Filters: in main report, only show signal if relevance is high/medium OR it's CBR Key Rate,
-        # and data_status is 'ok'.
-        
-        # P1 Search Demand
-        p1_selected = [s for s in candidates_p1 if s.relevance == "high" and s.data_status == "ok"]
-        if p1_selected:
-            selected_signals.append(p1_selected[0])
+        for bucket in (candidates_p1, candidates_p2, candidates_p3, candidates_p4):
+            for signal in bucket:
+                if len(selected_signals) >= max_signals:
+                    break
+                selected_signals.append(signal)
+            if len(selected_signals) >= max_signals:
+                break
 
-        # P2 Calendar
-        p2_selected = [s for s in candidates_p2 if s.data_status == "ok"]
-        if p2_selected:
-            selected_signals.append(p2_selected[0])
+        status = "OK" if selected_signals else "EMPTY"
 
-        # P3 Consumer Sentiment
-        p3_selected = [s for s in candidates_p3 if s.data_status == "ok"]
-        if p3_selected:
-            selected_signals.append(p3_selected[0])
-
-        # P4 Macro Background
-        p4_selected = [s for s in candidates_p4 if s.data_status == "ok"]
-        if p4_selected:
-            selected_signals.append(p4_selected[0])
-
-        # Limit to max_signals (4)
-        selected_signals = selected_signals[:max_signals]
-
-        # Compute general status
-        any_errors = any(v == "error" for v in sources_status.values())
-        any_ok = any(v == "ok" for v in sources_status.values())
-        status = "PARTIAL" if (any_errors and any_ok) else ("OK" if selected_signals else "EMPTY")
-        if all(v == "disabled" for v in sources_status.values()):
-            status = "DISABLED"
-
-        # Format diagnostics dict
         diagnostics = {
-            "candidate_count": sum(c["candidates"] for c in diag_counts.values()),
+            "candidate_evaluations": diag_details,
             "selected_count": len(selected_signals),
-            "sources_diagnostics": diag_counts,
-            "applied_thresholds": {
-                "search_demand_min_change_pct": self.settings.search_demand_min_change_pct,
-                "consumer_sentiment_min_change_pct": self.settings.consumer_sentiment_min_change_pct,
-                "macro_min_change_pct": self.settings.macro_min_change_pct,
-            }
+            "max_signals": max_signals,
+            "sentiment_neutral_level": "Индекс находится относительно нейтрального уровня 100, где значение выше 100 указывает на более позитивные потребительские настроения.",
         }
 
         return ExternalContextResponse(

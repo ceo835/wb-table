@@ -35,8 +35,13 @@ class ExternalContextSignalResponse(BaseModel):
     region: str | None = None
     category: str | None = None
     value: Decimal | None = None
+    current_value: Decimal | None = None
     previous_value: Decimal | None = None
+    change_value: Decimal | None = None
     change_pct: Decimal | None = None
+    published_at: date | None = None
+    fresh_until: date | None = None
+    neutral_level: Decimal | None = None
     impact_direction: Literal["positive", "negative", "mixed", "neutral"] | None = "neutral"
     impact_strength: Literal["low", "medium", "high"] | None = "medium"
     confidence: Literal["low", "medium", "high"] | None = "medium"

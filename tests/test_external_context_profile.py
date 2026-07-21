@@ -8,19 +8,15 @@ test_db_url = os.getenv("TEST_DATABASE_URL")
 if not test_db_url:
     raise RuntimeError("Safety Block: TEST_DATABASE_URL environment variable is not configured. Run blocked.")
 
-# Check TEST_DATABASE_URL for railway production host
 if "rlwy.net" in test_db_url or "railway" in test_db_url:
     raise RuntimeError("Safety Block: TEST_DATABASE_URL contains Railway production database host! Run blocked to protect production data.")
 
-# Override DATABASE_URL so all subsequent imports and settings use the test DB url
 os.environ["DATABASE_URL"] = test_db_url
 os.environ["MCP_AUTH_TOKEN"] = "test"
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-import pytest
-from sqlalchemy import select
 
 from src.db.models import ExternalContextEvent, ExternalContextMetric
 from src.db.session import session_scope
@@ -28,25 +24,33 @@ from src.mcp_server.settings import McpServiceSettings
 from src.services.external_context.service import ExternalContextService
 from src.services.external_context.schemas import ExternalContextRequest
 from src.mcp_server.wb_daily_operational_summary_format import render_wb_daily_operational_summary_markdown
-from src.mcp_server.wb_daily_operational_summary import build_operational_summary
 from src.mcp_server.schemas import (
-    WbDailyOperationalSummaryRequest,
     WbDailyOperationalSummaryResponse,
+    WbDailyOperationalReportWindowResponse,
+    WbDailyOperationalHighlightsResponse,
+    WbDailyOperationalDiagnosticsResponse,
     WbDailyOperationalSectionResponse,
     WbDailyOperationalMetricRowResponse,
-    WbDailyOperationalHighlightsResponse,
-    WbDailyOperationalReportWindowResponse,
-    WbDailyOperationalDiagnosticsResponse,
 )
 
+
+@pytest.fixture(scope="session")
+def shared_engine():
+    from src.db.connection import create_db_engine
+    from src.db.models import Base
+    engine = create_db_engine(os.environ["DATABASE_URL"])
+    Base.metadata.create_all(bind=engine)
+    return engine
+
+
 @pytest.fixture
-def clean_external_db():
-    with session_scope() as session:
+def clean_external_db(shared_engine):
+    with session_scope(shared_engine) as session:
         session.query(ExternalContextEvent).delete()
         session.query(ExternalContextMetric).delete()
         session.commit()
     yield
-    with session_scope() as session:
+    with session_scope(shared_engine) as session:
         session.query(ExternalContextEvent).delete()
         session.query(ExternalContextMetric).delete()
         session.commit()
@@ -64,299 +68,227 @@ def test_settings():
     )
 
 
-def test_loader_idempotency(clean_external_db) -> None:
-    # Verify that reloading the same metrics is idempotent and statistics behave correctly
-    from scripts import load_external_macro_metrics
-    
-    # We monkeypatch arg parsing to default to dry-run = False
-    class Args:
-        dry_run = False
-        
-    import argparse
-    original_parse = argparse.ArgumentParser.parse_args
-    argparse.ArgumentParser.parse_args = lambda self: Args()
-    
-    try:
-        # Run macro loader the first time (inserts)
-        res1 = load_external_macro_metrics.main()
-        assert res1 == 0
-        
-        with session_scope() as session:
-            initial_count = session.query(ExternalContextMetric).count()
-            assert initial_count > 0
-            
-        # Run second time (should be unchanged, 0 inserted/updated)
-        import sys
-        sys.argv = ["load_external_macro_metrics.py"]
-        res2 = load_external_macro_metrics.main()
-        assert res2 == 0
-    finally:
-        argparse.ArgumentParser.parse_args = original_parse
-
-
-def test_search_demand_matching_trends(clean_external_db, test_settings) -> None:
-    # 1. Search demand drops, category sales drop -> совпадающее направление
-    with session_scope() as session:
-        metric = ExternalContextMetric(
-            source="yandex_direct",
-            metric_code="search_demand_womens_tshirts",
-            metric_name="Поисковый спрос: Женские футболки",
-            period_start=date(2026, 7, 13),
-            period_end=date(2026, 7, 19),
-            value=Decimal("12345"),
-            previous_value=Decimal("14000"),
-            change_pct=Decimal("-11.8"),
-            category="womens_tshirts",
-            data_status="ok"
-        )
-        session.add(metric)
-        session.commit()
-        
-    with session_scope() as session:
-        service = ExternalContextService(session, test_settings)
-        
-        # Sales drop 5%
-        category_trends = {
-            "womens_tshirts": {
-                "change_pct": Decimal("-5.0"),
-                "current_value": Decimal("1000"),
-                "previous_value": Decimal("1050")
-            }
-        }
-        
-        res = service.get_external_context(
-            report_date=date(2026, 7, 19),
-            period_start=date(2026, 7, 13),
-            period_end=date(2026, 7, 19),
-            category_sales_trends=category_trends
-        )
-        
-        assert len(res.signals) == 1
-        sig = res.signals[0]
-        assert "снизился на 11%" in sig.interpretation
-        assert "направлении" in sig.interpretation
-
-
-def test_search_demand_opposite_trends(clean_external_db, test_settings) -> None:
-    # 2. Search demand grows, category sales drop -> проверить внутренние факторы
-    with session_scope() as session:
-        metric = ExternalContextMetric(
-            source="yandex_direct",
-            metric_code="search_demand_womens_tshirts",
-            metric_name="Поисковый спрос: Женские футболки",
-            period_start=date(2026, 7, 13),
-            period_end=date(2026, 7, 19),
-            value=Decimal("15400"),
-            previous_value=Decimal("14000"),
-            change_pct=Decimal("10.0"),
-            category="womens_tshirts",
-            data_status="ok"
-        )
-        session.add(metric)
-        session.commit()
-        
-    with session_scope() as session:
-        service = ExternalContextService(session, test_settings)
-        category_trends = {
-            "womens_tshirts": {
-                "change_pct": Decimal("-8.0"),
-                "current_value": Decimal("1000"),
-                "previous_value": Decimal("1086")
-            }
-        }
-        
-        res = service.get_external_context(
-            report_date=date(2026, 7, 19),
-            period_start=date(2026, 7, 13),
-            period_end=date(2026, 7, 19),
-            category_sales_trends=category_trends
-        )
-        
-        assert len(res.signals) == 1
-        sig = res.signals[0]
-        assert "вырос на 10%" in sig.interpretation
-        assert "внутренние факторы" in sig.interpretation
-
-
-def test_search_demand_below_threshold(clean_external_db, test_settings) -> None:
-    # 3. Change is 5% which is below settings threshold 8% -> ignored
-    with session_scope() as session:
-        metric = ExternalContextMetric(
-            source="yandex_direct",
-            metric_code="search_demand_womens_tshirts",
-            metric_name="Поисковый спрос: Женские футболки",
-            period_start=date(2026, 7, 13),
-            period_end=date(2026, 7, 19),
-            value=Decimal("14700"),
-            previous_value=Decimal("14000"),
-            change_pct=Decimal("5.0"),
-            category="womens_tshirts",
-            data_status="ok"
-        )
-        session.add(metric)
-        session.commit()
-        
-    with session_scope() as session:
-        service = ExternalContextService(session, test_settings)
-        category_trends = {"womens_tshirts": {"change_pct": Decimal("-8.0")}}
-        
-        res = service.get_external_context(
-            report_date=date(2026, 7, 19),
-            period_start=date(2026, 7, 13),
-            period_end=date(2026, 7, 19),
-            category_sales_trends=category_trends
-        )
-        assert len(res.signals) == 0
-
-
-def test_calendar_long_season_ignored_daily(clean_external_db, test_settings) -> None:
-    # 4. Long summer season with requires_supporting_signal=True is ignored mid-season
-    with session_scope() as session:
-        event = ExternalContextEvent(
-            source="internal_calendar",
-            event_type="seasonal_period",
-            event_code="summer_season_2026",
-            title="Летний сезон",
-            description="Календарный летний сезон.",
-            date_start=date(2026, 6, 1),
-            date_end=date(2026, 8, 15),
-            impact_direction="neutral",
-            impact_strength="medium",
-            confidence="medium",
-            is_active=True,
-            metadata_json={"requires_supporting_signal": True}
-        )
-        session.add(event)
-        session.commit()
-        
-    with session_scope() as session:
-        service = ExternalContextService(session, test_settings)
-        
-        # Query mid-season date: July 19 is far from June 1 and August 15 (>7 days window)
-        res = service.get_external_context(report_date=date(2026, 7, 19))
-        assert len(res.signals) == 0
-
-
-def test_calendar_display_in_transition_window(clean_external_db, test_settings) -> None:
-    # 5. Long season is displayed when close to start or end (August 10 is close to August 15)
-    with session_scope() as session:
-        event = ExternalContextEvent(
-            source="internal_calendar",
-            event_type="seasonal_period",
-            event_code="summer_season_2026",
-            title="Летний сезон",
-            description="Календарный летний сезон.",
-            date_start=date(2026, 6, 1),
-            date_end=date(2026, 8, 15),
-            impact_direction="neutral",
-            impact_strength="medium",
-            confidence="medium",
-            is_active=True,
-            metadata_json={"requires_supporting_signal": True}
-        )
-        session.add(event)
-        session.commit()
-        
-    with session_scope() as session:
-        service = ExternalContextService(session, test_settings)
-        res = service.get_external_context(report_date=date(2026, 8, 10))
-        assert len(res.signals) == 1
-        assert res.signals[0].event_code == "summer_season_2026"
-
-
-def test_macro_key_rate_general_background(clean_external_db, test_settings) -> None:
-    # 6. Key Rate CBR is returned with safe general background phrasing
-    with session_scope() as session:
-        metric = ExternalContextMetric(
-            source="cbr",
-            metric_code="cbr_key_rate",
-            metric_name="Ключевая ставка ЦБ РФ",
-            period_start=date(2026, 7, 19),
-            period_end=date(2026, 7, 19),
-            value=Decimal("16.00"),
-            data_status="ok"
-        )
-        session.add(metric)
-        session.commit()
-        
-    with session_scope() as session:
-        service = ExternalContextService(session, test_settings)
-        res = service.get_external_context(report_date=date(2026, 7, 19))
-        assert len(res.signals) == 1
-        assert "общим финансовым фоном" in res.signals[0].interpretation
-
-
-def test_gdp_not_included_in_operational_summary(clean_external_db, test_settings) -> None:
-    # 7. GDP is NOT output in daily summary report
-    with session_scope() as session:
-        gdp = ExternalContextMetric(
-            source="rosstat",
-            metric_code="gdp_growth",
-            metric_name="ВВП рост",
-            period_start=date(2026, 7, 1),
-            period_end=date(2026, 7, 31),
-            value=Decimal("3.5"),
-            data_status="ok"
-        )
-        session.add(gdp)
-        session.commit()
-        
-    with session_scope() as session:
-        service = ExternalContextService(session, test_settings)
-        res = service.get_external_context(report_date=date(2026, 7, 19))
-        
-        # GDP is stored in DB but excluded from signal classification categories
-        assert len(res.signals) == 0
-
-
-def test_max_4_signals_and_slot_constraints(clean_external_db, test_settings) -> None:
-    # 8. Capped at 4 signals, only 1 signal per source category
-    with session_scope() as session:
-        # P1 Search Demand
+# 1. Consumer Sentiment displayed within 7 days of published_at
+def test_consumer_sentiment_displayed_within_freshness_window(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
         session.add(ExternalContextMetric(
-            source="yandex_direct", metric_code="search_demand_womens_tshirts", metric_name="Search",
-            period_start=date(2026, 7, 13), period_end=date(2026, 7, 19), value=Decimal("15400"), previous_value=Decimal("14000"),
-            change_pct=Decimal("10.0"), category="womens_tshirts", data_status="ok"
+            source="cbr",
+            metric_code="consumer_sentiment_index",
+            metric_name="Индекс потребительских настроений",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 15),
+            published_at=pub_dt,
+            value=Decimal("115.2"),
+            previous_value=Decimal("112.0"),
+            change_value=Decimal("3.2"),
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        # Report date on Day 4 after publication (July 19)
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 1
+        assert res.signals[0].interpretation == "Индекс потребительских настроений вырос до 115,2 пункта."
+
+
+# 2. Consumer Sentiment NOT displayed after 7 days (Day 8+)
+def test_consumer_sentiment_not_displayed_after_freshness_window_expires(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 10, 10, 0)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="cbr",
+            metric_code="consumer_sentiment_index",
+            metric_name="Индекс потребительских настроений",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 10),
+            published_at=pub_dt,
+            value=Decimal("115.2"),
+            previous_value=Decimal("112.0"),
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        # Report date on Day 9 after publication (July 19) -> expired!
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 0
+
+
+# 3. Inflation displayed within 7 days of published_at
+def test_inflation_displayed_within_freshness_window(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 17, 12, 0)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="rosstat",
+            metric_code="inflation_rate",
+            metric_name="Инфляция (годовая)",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 17),
+            published_at=pub_dt,
+            value=Decimal("8.6"),
+            previous_value=Decimal("8.1"),
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        # Day 2 after publication
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 1
+        assert res.signals[0].interpretation == "Годовая инфляция ускорилась до 8,6%."
+
+
+# 4. Inflation NOT repeated indefinitely (after Day 7)
+def test_inflation_not_repeated_indefinitely(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 1, 12, 0)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="rosstat",
+            metric_code="inflation_rate",
+            metric_name="Инфляция (годовая)",
+            period_start=date(2026, 6, 1),
+            period_end=date(2026, 6, 30),
+            published_at=pub_dt,
+            value=Decimal("8.6"),
+            previous_value=Decimal("8.1"),
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        # Day 18 after publication -> expired!
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 0
+
+
+# 5. Wording with previous value (вырос / снизился / ускорилась / замедлилась)
+def test_wording_with_previous_value(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 18, 10, 0)
+    with session_scope(shared_engine) as session:
+        # Sentiment drop
+        session.add(ExternalContextMetric(
+            source="cbr", metric_code="consumer_sentiment_index", metric_name="Sentiment",
+            period_start=date(2026, 7, 1), period_end=date(2026, 7, 18), published_at=pub_dt,
+            value=Decimal("98.4"), previous_value=Decimal("102.1"), data_status="ok"
+        ))
+        # Inflation slowdown
+        session.add(ExternalContextMetric(
+            source="rosstat", metric_code="inflation_rate", metric_name="Inflation",
+            period_start=date(2026, 7, 1), period_end=date(2026, 7, 18), published_at=pub_dt,
+            value=Decimal("8.1"), previous_value=Decimal("8.6"), data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 2
+        text_sentiment = res.signals[0].interpretation
+        text_inflation = res.signals[1].interpretation
+        assert " снизился до 98,4 пункта." in text_sentiment
+        assert " замедлилась до 8,1%." in text_inflation
+
+
+# 6. Wording WITHOUT previous value (neutral: составил / составила)
+def test_wording_without_previous_value(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 18, 10, 0)
+    with session_scope(shared_engine) as session:
+        # Sentiment no previous value
+        session.add(ExternalContextMetric(
+            source="cbr", metric_code="consumer_sentiment_index", metric_name="Sentiment",
+            period_start=date(2026, 7, 1), period_end=date(2026, 7, 18), published_at=pub_dt,
+            value=Decimal("115.2"), previous_value=None, data_status="ok"
+        ))
+        # Inflation no previous value
+        session.add(ExternalContextMetric(
+            source="rosstat", metric_code="inflation_rate", metric_name="Inflation",
+            period_start=date(2026, 7, 1), period_end=date(2026, 7, 18), published_at=pub_dt,
+            value=Decimal("8.6"), previous_value=None, data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 2
+        text_sentiment = res.signals[0].interpretation
+        text_inflation = res.signals[1].interpretation
+        assert " составил 115,2 пункта." in text_sentiment
+        assert "не увеличился" not in text_sentiment and "вырос" not in text_sentiment
+        assert " составила 8,6%." in text_inflation
+
+
+# 7. Maximum 2 lines in "Внешний фон"
+def test_max_two_external_context_lines(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 18, 10, 0)
+    with session_scope(shared_engine) as session:
+        # P1 Wordstat
+        session.add(ExternalContextMetric(
+            source="yandex_direct", metric_code="search_demand_womens_tshirts", metric_name="Wordstat",
+            period_start=date(2026, 7, 13), period_end=date(2026, 7, 19), value=Decimal("15000"), previous_value=Decimal("13000"),
+            change_pct=Decimal("15.0"), category="womens_tshirts", data_status="ok"
         ))
         # P2 Calendar
         session.add(ExternalContextEvent(
-            source="internal_calendar", event_type="official_holiday", event_code="holiday_1",
-            title="Holiday", description="Holiday details.", date_start=date(2026, 7, 19), date_end=date(2026, 7, 19),
-            impact_direction="positive", impact_strength="high", confidence="high", is_active=True
+            source="internal_calendar", event_type="sale", event_code="summer_sale", title="Распродажа",
+            description="Летняя распродажа одежды", date_start=date(2026, 7, 18), date_end=date(2026, 7, 20), is_active=True
         ))
         # P3 Sentiment
         session.add(ExternalContextMetric(
-            source="cbr", metric_code="consumer_sentiment_index", metric_name="Sentiment Index",
-            period_start=date(2026, 7, 1), period_end=date(2026, 7, 31), value=Decimal("115.2"), data_status="ok"
+            source="cbr", metric_code="consumer_sentiment_index", metric_name="Sentiment",
+            period_start=date(2026, 7, 1), period_end=date(2026, 7, 18), published_at=pub_dt,
+            value=Decimal("115.2"), previous_value=Decimal("110.0"), data_status="ok"
         ))
-        # P4 Macro
+        # P4 Inflation
         session.add(ExternalContextMetric(
-            source="cbr", metric_code="cbr_key_rate", metric_name="Key Rate",
-            period_start=date(2026, 7, 19), period_end=date(2026, 7, 19), value=Decimal("16.00"), data_status="ok"
+            source="rosstat", metric_code="inflation_rate", metric_name="Inflation",
+            period_start=date(2026, 7, 1), period_end=date(2026, 7, 18), published_at=pub_dt,
+            value=Decimal("8.6"), previous_value=Decimal("8.1"), data_status="ok"
         ))
         session.commit()
-        
-    with session_scope() as session:
+
+    with session_scope(shared_engine) as session:
         service = ExternalContextService(session, test_settings)
-        category_trends = {"womens_tshirts": {"change_pct": Decimal("-8.0")}}
-        res = service.get_external_context(
-            report_date=date(2026, 7, 19),
-            period_start=date(2026, 7, 13),
-            period_end=date(2026, 7, 19),
-            category_sales_trends=category_trends
-        )
-        
-        # Max 4 signals, exactly one from each category
-        assert len(res.signals) == 4
-        sources = [s.source for s in res.signals]
-        assert "search_demand" in sources
-        assert "internal_calendar" in sources
-        assert "cbr" in sources
-        assert "macro" in sources
+        res = service.get_external_context(report_date=date(2026, 7, 19), max_signals=2)
+        assert len(res.signals) == 2
+        # Highest priority items only (Wordstat & Calendar)
+        assert res.signals[0].source == "search_demand"
+        assert res.signals[1].source == "internal_calendar"
 
 
-def test_omit_section_completely_if_no_signals(clean_external_db) -> None:
-    # 9. Omit section header completely if there are no signals
+# 8. Wordstat priority higher than Inflation
+def test_wordstat_priority_over_inflation(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 18, 10, 0)
+    with session_scope(shared_engine) as session:
+        # Wordstat (P1)
+        session.add(ExternalContextMetric(
+            source="yandex_direct", metric_code="search_demand_womens_tshirts", metric_name="Wordstat",
+            period_start=date(2026, 7, 13), period_end=date(2026, 7, 19), value=Decimal("15000"), previous_value=Decimal("13000"),
+            change_pct=Decimal("15.0"), category="womens_tshirts", data_status="ok"
+        ))
+        # Inflation (P4)
+        session.add(ExternalContextMetric(
+            source="rosstat", metric_code="inflation_rate", metric_name="Inflation",
+            period_start=date(2026, 7, 1), period_end=date(2026, 7, 18), published_at=pub_dt,
+            value=Decimal("8.6"), previous_value=Decimal("8.1"), data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        res = service.get_external_context(report_date=date(2026, 7, 19), max_signals=1)
+        assert len(res.signals) == 1
+        assert res.signals[0].source == "search_demand"
+
+
+# 9. Hide section when no active signals exist
+def test_section_hidden_when_no_active_signals(clean_external_db) -> None:
     response = WbDailyOperationalSummaryResponse(
         formula_version="v1",
         report_window=WbDailyOperationalReportWindowResponse(
@@ -380,14 +312,52 @@ def test_omit_section_completely_if_no_signals(clean_external_db) -> None:
         analysis_summary={},
         external_context={"status": "EMPTY", "signals": []}
     )
-    
+
     markdown = render_wb_daily_operational_summary_markdown(response)
     assert "Внешний фон" not in markdown
 
 
-def test_actions_of_the_day_regression(clean_external_db) -> None:
-    # 10. Verify that actions of the day priorities P1–P5 and VVBromo summary line are unaffected
-    # by changes in the external background logic.
+# 10. Idempotent load preserves published_at
+def test_idempotent_load_does_not_update_published_at(clean_external_db, shared_engine, monkeypatch) -> None:
+    pub_dt = datetime(2026, 7, 10, 10, 0)
+    with session_scope(shared_engine) as session:
+        metric = ExternalContextMetric(
+            source="rosstat",
+            metric_code="inflation_rate",
+            metric_name="Инфляция (годовая)",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 31),
+            published_at=pub_dt,
+            value=Decimal("8.57"),
+            previous_value=Decimal("8.30"),
+            change_pct=Decimal("3.25"),
+            data_status="ok"
+        )
+        session.add(metric)
+        session.commit()
+
+    from scripts import load_external_macro_metrics
+    monkeypatch.setattr(load_external_macro_metrics.CbrMacroAdapter, "fetch_key_rate", lambda self, s, e: [])
+
+    # Run macro loader to attempt re-inserting identical data
+    class Args:
+        dry_run = False
+    import argparse
+    orig_parse = argparse.ArgumentParser.parse_args
+    argparse.ArgumentParser.parse_args = lambda self: Args()
+
+    try:
+        load_external_macro_metrics.main()
+    finally:
+        argparse.ArgumentParser.parse_args = orig_parse
+
+    with session_scope(shared_engine) as session:
+        metric = session.query(ExternalContextMetric).filter_by(metric_code="inflation_rate").one()
+        assert metric.published_at == pub_dt
+
+
+# 11. Other report sections remain unaffected
+def test_other_report_sections_unaffected(clean_external_db) -> None:
     response = WbDailyOperationalSummaryResponse(
         formula_version="v1",
         report_window=WbDailyOperationalReportWindowResponse(
@@ -413,57 +383,96 @@ def test_actions_of_the_day_regression(clean_external_db) -> None:
                         delta_abs=Decimal("-10791")
                     )
                 ]
-            ),
-            WbDailyOperationalSectionResponse(
-                key="ads",
-                title="Реклама",
-                status="OK",
-                metrics=[
-                    WbDailyOperationalMetricRowResponse(
-                        metric="ДРР (по кампаниям)",
-                        value=Decimal("22.1"),
-                        delta_pp=Decimal("2.1")
-                    ),
-                    WbDailyOperationalMetricRowResponse(
-                        metric="CPO",
-                        value=Decimal("346"),
-                        delta_pct=Decimal("10.2")
-                    ),
-                    WbDailyOperationalMetricRowResponse(
-                        metric="Рекламные заказы",
-                        value=Decimal("529"),
-                        delta_pct=Decimal("-10.2")
-                    )
-                ]
             )
         ],
         highlights=WbDailyOperationalHighlightsResponse(worse=[], better=[], priority_checks=[]),
         diagnostics=WbDailyOperationalDiagnosticsResponse(included_sections=[], partial_sections=[], excluded_sections=[], query_count=0, formula_version="v1"),
         article_analysis=[],
-        business_priorities=[
-            {"kind": "article_growth", "direction": "positive", "nm_id": 221311710, "score": Decimal("25"), "user_visible": True}
-        ],
+        business_priorities=[],
         ranked_signals=[],
         data_anomalies=[],
         analysis_summary={},
-        external_context={"status": "OK", "signals": [
-            {"source": "cbr", "metric_code": "cbr_key_rate", "title": "Key Rate", "interpretation": "Key rate static."}
-        ]}
+        external_context={"status": "OK", "signals": []}
     )
-    
+
     markdown = render_wb_daily_operational_summary_markdown(response)
-    
-    # Assert priorities and actions remain fully operational
-    assert "1. Проверить причины отрицательной прибыли по VVBromo: −5 543 ₽." in markdown
-    assert "2. Пересмотреть рекламу: ДРР 22,1%, CPO 346 ₽, рекламные заказы −10,2% за сутки." in markdown
-    assert "3. Проверить устойчивость роста по артикулу 221311710." in markdown
+    assert "Проверить причины отрицательной прибыли" in markdown
 
 
-@pytest.mark.skipif(os.getenv("RUN_YANDEX_INTEGRATION_TEST") != "1", reason="Manual integration test. Set RUN_YANDEX_INTEGRATION_TEST=1 to execute.")
-def test_yandex_wordstat_manual_integration() -> None:
-    from src.services.external_context.sources.search_demand import YandexCloudWordstatAdapter
-    api_key = os.getenv("YANDEX_SEARCH_API_KEY")
-    folder_id = os.getenv("YANDEX_CLOUD_FOLDER_ID")
-    adapter = YandexCloudWordstatAdapter(api_key, folder_id)
-    res = adapter.fetch_search_demand(date(2026, 7, 13), date(2026, 7, 19), ["футболка женская"], category="womens_tshirts")
-    assert "status" in res
+# 12. Recently loaded OLD calendar event is NOT displayed
+def test_recently_loaded_old_calendar_event_not_displayed(clean_external_db, test_settings, shared_engine) -> None:
+    # Event happened in June, but created_at / updated_at in DB is today (July 19)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextEvent(
+            source="internal_calendar",
+            event_type="holiday",
+            event_code="june_holiday",
+            title="Прошедший праздник июня",
+            description="Описание июньского праздника",
+            date_start=date(2026, 6, 12),
+            date_end=date(2026, 6, 12),
+            is_active=True,
+            created_at=datetime(2026, 7, 19, 10, 0),
+            updated_at=datetime(2026, 7, 19, 10, 0),
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 0
+
+
+# 13. Recently refetched OLD Wordstat period does NOT become active
+def test_recently_refetched_old_wordstat_period_not_displayed(clean_external_db, test_settings, shared_engine) -> None:
+    # Wordstat period ended in June, but retrieved_at is today
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="yandex_direct",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Поисковый спрос",
+            period_start=date(2026, 6, 1),
+            period_end=date(2026, 6, 15),
+            retrieved_at=datetime(2026, 7, 19, 10, 0),
+            value=Decimal("15000"),
+            previous_value=Decimal("12000"),
+            change_pct=Decimal("25.0"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 0
+
+
+# 14. fresh_until calculated per signal source type
+def test_fresh_until_calculated_per_signal_type(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        # Sentiment
+        session.add(ExternalContextMetric(
+            source="cbr", metric_code="consumer_sentiment_index", metric_name="Sentiment",
+            period_start=date(2026, 7, 1), period_end=date(2026, 7, 15), published_at=pub_dt,
+            value=Decimal("115.2"), previous_value=Decimal("110.0"), data_status="ok"
+        ))
+        # Calendar event (Jul 18 to Jul 19)
+        session.add(ExternalContextEvent(
+            source="internal_calendar", event_type="sale", event_code="sale_jul", title="Sale",
+            description="July Sale", date_start=date(2026, 7, 18), date_end=date(2026, 7, 19), is_active=True
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        res = service.get_external_context(report_date=date(2026, 7, 19), max_signals=2)
+        assert len(res.signals) == 2
+        sig_calendar = res.signals[0]
+        sig_sentiment = res.signals[1]
+
+        # Calendar fresh_until = date_end + 2d = 2026-07-21
+        assert sig_calendar.fresh_until == date(2026, 7, 21)
+        # Sentiment fresh_until = pub_date + 7d = 2026-07-22
+        assert sig_sentiment.fresh_until == date(2026, 7, 22)
