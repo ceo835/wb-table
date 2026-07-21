@@ -150,6 +150,34 @@ def _run_ozon_price_snapshot_sync(_run_date: date) -> dict[str, Any]:
     return summary
 
 
+def _run_macro_metrics_sync(_run_date: date) -> dict[str, Any]:
+    from scripts.load_external_macro_metrics import main as run_macro
+    import sys
+    orig_argv = sys.argv
+    sys.argv = ["load_external_macro_metrics.py"]
+    try:
+        exit_code = run_macro()
+        return {"success": exit_code == 0, "status": "success" if exit_code == 0 else "failed"}
+    except Exception as e:
+        return {"success": False, "status": "failed", "error": str(e)}
+    finally:
+        sys.argv = orig_argv
+
+
+def _run_consumer_sentiment_sync(_run_date: date) -> dict[str, Any]:
+    from scripts.load_external_consumer_sentiment import main as run_sentiment
+    import sys
+    orig_argv = sys.argv
+    sys.argv = ["load_external_consumer_sentiment.py"]
+    try:
+        exit_code = run_sentiment()
+        return {"success": exit_code == 0, "status": "success" if exit_code == 0 else "failed"}
+    except Exception as e:
+        return {"success": False, "status": "failed", "error": str(e)}
+    finally:
+        sys.argv = orig_argv
+
+
 def execute_daily_refresh_once(
     *,
     run_date: date | None = None,
@@ -183,6 +211,8 @@ def build_worker_job_slots(
     vvbromo_runner: Callable[[date], dict[str, Any]] | None = None,
     ivan_stock_runner: Callable[[date], dict[str, Any]] | None = None,
     ozon_runner: Callable[[date], dict[str, Any]] | None = None,
+    macro_runner: Callable[[date], dict[str, Any]] | None = None,
+    sentiment_runner: Callable[[date], dict[str, Any]] | None = None,
 ) -> list[WorkerJobSlot]:
     return [
         WorkerJobSlot(
@@ -211,6 +241,24 @@ def build_worker_job_slots(
             minute_msk=0,
             run_date_mode="yesterday_msk",
             runner=dashboard_runner or _default_runner,
+        ),
+        WorkerJobSlot(
+            guard_job_name="macro_metrics_sync__1200_msk",
+            job_name="macro_metrics_sync",
+            slot_label="1200_msk",
+            hour_msk=12,
+            minute_msk=0,
+            run_date_mode="today_msk",
+            runner=macro_runner or _run_macro_metrics_sync,
+        ),
+        WorkerJobSlot(
+            guard_job_name="consumer_sentiment_sync__1300_msk",
+            job_name="consumer_sentiment_sync",
+            slot_label="1300_msk",
+            hour_msk=13,
+            minute_msk=0,
+            run_date_mode="today_msk",
+            runner=sentiment_runner or _run_consumer_sentiment_sync,
         ),
         WorkerJobSlot(
             guard_job_name=IVAN_STOCK_GUARD_JOB_NAME,

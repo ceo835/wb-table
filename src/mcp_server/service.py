@@ -1060,26 +1060,26 @@ class PostgresMcpRepository:
 
     def get_wb_daily_operational_summary(self, payload: WbDailyOperationalSummaryRequest) -> WbDailyOperationalSummaryResponse:
         with self.readonly_session() as session:
-            context_enabled = self.settings.external_context_enabled and self.settings.external_calendar_enabled
+            context_enabled = self.settings.external_context_enabled
             return build_operational_summary(
                 session,
                 payload,
-                external_context_service=ExternalContextService(session) if context_enabled else None,
+                external_context_service=ExternalContextService(session, self.settings) if context_enabled else None,
                 external_context_enabled=context_enabled,
                 external_context_max_signals=self.settings.external_context_max_signals,
             )
 
     def get_wb_external_context(self, payload: ExternalContextRequest) -> ExternalContextResponse:
-        if not (self.settings.external_context_enabled and self.settings.external_calendar_enabled):
+        if not self.settings.external_context_enabled:
             return ExternalContextResponse(
                 report_date=payload.report_date,
                 period_start=payload.period_start,
                 period_end=payload.period_end,
                 status="DISABLED",
-                diagnostics={"reason": "external context or calendar source is disabled"},
+                diagnostics={"reason": "external context is disabled"},
             )
         with self.readonly_session() as session:
-            return ExternalContextService(session).get_external_context(
+            return ExternalContextService(session, self.settings).get_external_context(
                 report_date=payload.report_date,
                 period_start=payload.period_start,
                 period_end=payload.period_end,

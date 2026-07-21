@@ -777,6 +777,42 @@ def build_scenario_section(
     return WbDailyOperationalSectionResponse(key="scenario", title=SECTION_TITLES["scenario"], status="OK", summary=summary, notes=["\u0420\u0430\u0437\u0434\u0435\u043b \u043d\u0435 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430 \u043e\u0431\u043e\u0440\u043e\u0442\u0430 \u0438\u043b\u0438 \u043f\u0440\u0438\u0431\u044b\u043b\u0438 \u0438 \u043e\u043f\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043d\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b."])
 
 
+def _calculate_category_sales_trends(extended_context: dict[str, Any], window: Any) -> dict[str, dict[str, Any]]:
+    from src.services.external_context.category_config import CATEGORIES_CONFIG
+    from decimal import Decimal
+    
+    trends = {}
+    article_rows = extended_context.get("article_context") or []
+    
+    for cat in CATEGORIES_CONFIG:
+        code = cat["category_code"]
+        subjects = set(cat["related_subjects"])
+        
+        current_sum = Decimal("0")
+        previous_sum = Decimal("0")
+        
+        for row in article_rows:
+            subj = row.get("subject")
+            if subj in subjects:
+                row_date = row.get("report_date")
+                order_sum = Decimal(str(row.get("order_sum") or "0"))
+                if window.trend_current_from <= row_date <= window.trend_current_to:
+                    current_sum += order_sum
+                elif window.trend_previous_from <= row_date <= window.trend_previous_to:
+                    previous_sum += order_sum
+                    
+        change_pct = Decimal("0")
+        if previous_sum > 0:
+            change_pct = ((current_sum - previous_sum) / previous_sum) * 100
+            
+        trends[code] = {
+            "current_value": current_sum,
+            "previous_value": previous_sum,
+            "change_pct": change_pct
+        }
+    return trends
+
+
 def build_operational_summary(
     session: Session,
     payload: WbDailyOperationalSummaryRequest,
@@ -830,15 +866,17 @@ def build_operational_summary(
 
     external_context: dict[str, Any] = {}
     if external_context_enabled and external_context_service is not None:
+        category_trends = _calculate_category_sales_trends(extended_context, window)
         external_context = _run_safe_additional_block(
             stage_timings=stage_timings,
             stage_name="external_context",
-            source_table="external_context_event",
+            source_table="external_context_event + external_context_metric",
             builder=lambda: external_context_service.get_external_context(
                 report_date=window.report_date,
                 period_start=window.trend_current_from,
                 period_end=window.trend_current_to,
                 max_signals=external_context_max_signals,
+                category_sales_trends=category_trends,
             ).model_dump(mode="json"),
         )
 

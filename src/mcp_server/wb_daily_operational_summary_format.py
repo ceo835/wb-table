@@ -822,21 +822,26 @@ def _collect_quality_warnings(response: WbDailyOperationalSummaryResponse, *, li
     return warnings
 
 
-def _build_external_context_lines(response: WbDailyOperationalSummaryResponse, *, limit: int = 3) -> list[str]:
+def _build_external_context_lines(response: WbDailyOperationalSummaryResponse, *, limit: int = 4) -> list[str]:
     context = response.external_context or {}
+    # Only show ok and partial status data in main report
     if context.get("status") not in {"OK", "PARTIAL"}:
         return []
     lines: list[str] = []
-    for signal in (context.get("signals") or [])[:limit]:
+    signals = context.get("signals") or []
+    for signal in signals[:limit]:
         if not isinstance(signal, dict):
             continue
-        title = " ".join(str(signal.get("title") or signal.get("event_type") or "").split()).strip()
-        if not title:
-            continue
-        start = _format_date(signal.get("date_start"))
-        end = _format_date(signal.get("date_end"))
-        period = start if start == end else f"{start}–{end}"
-        lines.append(f"- {title} ({period}) — контекстный фактор; прямое влияние на продажи не подтверждено.")
+        # Use interpretation prepared by service
+        text = signal.get("interpretation") or signal.get("description")
+        if not text:
+            # Fallback format
+            title = str(signal.get("title") or "").strip()
+            if not title:
+                continue
+            text = f"{title} — контекстный фактор."
+        
+        lines.append(f"— {text}")
     return lines[:limit]
 
 

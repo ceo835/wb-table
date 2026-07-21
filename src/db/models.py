@@ -9,6 +9,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -1337,7 +1338,54 @@ class ExternalContextEvent(Base):
     metadata_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
+
+class ExternalContextMetric(Base):
+    __tablename__ = "external_context_metric"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "metric_code",
+            "period_start",
+            "period_end",
+            "region",
+            "category",
+            "query_text",
+            name="uq_external_context_metric_identity",
+        ),
+        Index("idx_external_context_metric_source", "source"),
+        Index("idx_external_context_metric_code", "metric_code"),
+        Index("idx_external_context_metric_dates", "period_start", "period_end"),
+        Index("idx_external_context_metric_category", "category"),
+        Index("idx_external_context_metric_region", "region"),
+        Index("idx_external_context_metric_status", "data_status"),
+        CheckConstraint("period_end >= period_start", name="ck_external_context_metric_period_order"),
+        CheckConstraint("data_status in ('ok', 'partial', 'stale', 'unavailable', 'error')", name="ck_external_context_metric_data_status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    metric_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    region: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    query_text: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    value: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    previous_value: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    change_value: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    change_pct: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data_status: Mapped[str] = mapped_column(String(32), nullable=False, default="ok", server_default="ok")
+    metadata_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 

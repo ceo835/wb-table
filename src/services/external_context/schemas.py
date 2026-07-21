@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Any, Literal
+from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -21,20 +22,29 @@ class ExternalContextSignalResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: str
-    event_type: str
-    event_code: str
+    signal_type: str | None = None
+    metric_code: str | None = None
+    event_type: str | None = None
+    event_code: str | None = None
     title: str
     description: str | None = None
-    date_start: date
-    date_end: date
+    date_start: date | None = None
+    date_end: date | None = None
+    period_start: date | None = None
+    period_end: date | None = None
     region: str | None = None
     category: str | None = None
-    impact_direction: Literal["positive", "negative", "mixed", "neutral"]
-    impact_strength: Literal["low", "medium", "high"]
-    confidence: Literal["low", "medium", "high"]
-    confidence_level: Literal["context_only", "insufficient_data"]
+    value: Decimal | None = None
+    previous_value: Decimal | None = None
+    change_pct: Decimal | None = None
+    impact_direction: Literal["positive", "negative", "mixed", "neutral"] | None = "neutral"
+    impact_strength: Literal["low", "medium", "high"] | None = "medium"
+    confidence: Literal["low", "medium", "high"] | None = "medium"
+    relevance: str | None = None
+    confidence_level: Literal["context_only", "insufficient_data"] | None = "context_only"
     interpretation: str | None = None
     source_reference: str | None = None
+    data_status: str | None = "ok"
 
 
 class ExternalContextResponse(BaseModel):
@@ -47,3 +57,4 @@ class ExternalContextResponse(BaseModel):
     signals: list[ExternalContextSignalResponse] = Field(default_factory=list)
     applied_filters: dict[str, Any] = Field(default_factory=dict)
     diagnostics: dict[str, Any] = Field(default_factory=dict)
+    sources_status: dict[str, str] = Field(default_factory=dict)
