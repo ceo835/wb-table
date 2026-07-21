@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from src.services.external_context.service import (
     _wordstat_display_decision,
     wordstat_release_key,
+    _record_wordstat_display,
 )
 
 
@@ -15,6 +16,10 @@ class _ScalarSession:
     def scalar(self, _statement):
         return self.state
 
+
+class _MutableSession(_ScalarSession):
+    def add(self, state):
+        self.state = state
 
 def _metric(retrieved_at: datetime, period_start=date(2026, 7, 13), period_end=date(2026, 7, 19)):
     return SimpleNamespace(
@@ -102,3 +107,32 @@ def test_retrieval_timestamp_is_part_of_wordstat_release_key():
     refetched = _metric(datetime(2026, 7, 20, 10, 0))
 
     assert wordstat_release_key(first) != wordstat_release_key(refetched)
+
+def test_historical_replay_after_later_delivery_is_stable_and_does_not_mutate_state():
+    metric = _metric(datetime(2026, 7, 19, 10, 0))
+    session = _MutableSession()
+
+    first = _wordstat_display_decision(session, metric, date(2026, 7, 19), Decimal("5"), "matching")
+    assert first["should_show"] is True
+    _record_wordstat_display(session, metric, date(2026, 7, 19), Decimal("5"), "matching")
+
+    next_day = _wordstat_display_decision(session, metric, date(2026, 7, 20), Decimal("8"), "matching")
+    assert next_day["should_show"] is False
+
+    replay = _wordstat_display_decision(session, metric, date(2026, 7, 19), Decimal("5"), "matching")
+    assert replay == first
+    assert replay["is_historical_replay"] is True
+    assert session.state.last_shown_report_date == date(2026, 7, 19)
+
+
+def test_historical_replay_does_not_rewind_state_after_later_delivery():
+    metric = _metric(datetime(2026, 7, 19, 10, 0))
+    session = _MutableSession()
+    _record_wordstat_display(session, metric, date(2026, 7, 19), Decimal("5"), "matching")
+    _record_wordstat_display(session, metric, date(2026, 7, 20), Decimal("20"), "matching")
+
+    replay = _wordstat_display_decision(session, metric, date(2026, 7, 19), Decimal("5"), "matching")
+    assert replay["should_show"] is True
+    _record_wordstat_display(session, metric, date(2026, 7, 19), Decimal("5"), "matching")
+    assert session.state.last_shown_report_date == date(2026, 7, 20)
+    assert session.state.last_wb_change_pct == Decimal("20")

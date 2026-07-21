@@ -79,11 +79,14 @@ def _wordstat_display_decision(
             ExternalContextWordstatDisplay.wordstat_release_key == release_key
         )
     )
+    first_shown_report_date = state.first_shown_report_date if state else available_date
     base = {
         "wordstat_release_key": release_key,
-        "first_shown_report_date": state.first_shown_report_date if state else available_date,
-        "is_new_release": state is None,
+        "first_shown_report_date": first_shown_report_date,
+        "current_report_date": report_date,
+        "is_new_release": report_date == first_shown_report_date,
         "is_repeat_suppressed": False,
+        "is_historical_replay": report_date <= first_shown_report_date,
         "repeat_reason": None,
         "should_show": True,
     }
@@ -94,6 +97,7 @@ def _wordstat_display_decision(
         if report_date > available_date:
             base.update(
                 is_new_release=False,
+                is_historical_replay=False,
                 is_repeat_suppressed=True,
                 should_show=False,
                 repeat_reason="release_available_before_state_tracking",
@@ -101,9 +105,9 @@ def _wordstat_display_decision(
         else:
             base["repeat_reason"] = "new_wordstat_release"
         return base
-    if state.first_shown_report_date == report_date:
-        base["is_new_release"] = False
-        base["repeat_reason"] = "same_report_date"
+    if report_date <= state.first_shown_report_date:
+        # Historical replays are deterministic and never mutate delivery state.
+        base["repeat_reason"] = "new_wordstat_release"
         return base
 
     current_direction = _wordstat_wb_direction(wb_change_pct)
@@ -155,6 +159,8 @@ def _record_wordstat_display(
             last_wb_direction=wb_direction,
             last_comparison_direction=comparison_direction,
         ))
+        return
+    if report_date <= state.first_shown_report_date:
         return
     state.last_shown_report_date = report_date
     state.last_wb_change_pct = wb_change_pct
@@ -384,6 +390,8 @@ class ExternalContextService:
                         "is_new_release": release_decision["is_new_release"],
                         "is_repeat_suppressed": release_decision["is_repeat_suppressed"],
                         "repeat_reason": release_decision["repeat_reason"],
+                        "current_report_date": report_date.isoformat(),
+                        "is_historical_replay": release_decision["is_historical_replay"],
                     })
 
                     if is_selectable:
@@ -415,6 +423,8 @@ class ExternalContextService:
                             is_new_release=release_decision["is_new_release"],
                             is_repeat_suppressed=False,
                             repeat_reason=release_decision["repeat_reason"],
+                            current_report_date=report_date,
+                            is_historical_replay=release_decision["is_historical_replay"],
                         )
                         candidates_p1.append(signal)
 

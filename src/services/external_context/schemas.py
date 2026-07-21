@@ -57,6 +57,8 @@ class ExternalContextSignalResponse(BaseModel):
     is_new_release: bool | None = None
     is_repeat_suppressed: bool = False
     repeat_reason: str | None = None
+    current_report_date: date | None = None
+    is_historical_replay: bool = False
 
 
 class ExternalContextResponse(BaseModel):
