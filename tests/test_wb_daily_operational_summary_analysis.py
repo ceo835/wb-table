@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
@@ -9,6 +9,9 @@ from src.mcp_server.schemas import (
     WbDailyOperationalReportWindowResponse,
     WbDailyOperationalSourceFreshnessResponse,
     WbDailyOperationalSummaryResponse,
+    WbDailyOperationalMetricRowResponse,
+    WbDailyOperationalSectionResponse,
+    WbDailyOperationalTableResponse,
 )
 from src.mcp_server.wb_daily_operational_summary_analysis import (
     _merge_business_priorities,
@@ -936,3 +939,214 @@ def test_highlights_priority_checks_use_short_actions_not_full_narratives() -> N
 
     assert highlights.priority_checks == ["????????? ?????? ???????? 1."]
     assert "??????? 1 ??? ?????? ???????" not in highlights.priority_checks[0]
+
+
+def _build_test_metric(metric: str, value: Any = None, previous_value: Any = None, delta_abs: Any = None, delta_pct: Decimal | None = None, delta_pp: Decimal | None = None, trend_7d_pct: Decimal | None = None, trend_7d_pp: Decimal | None = None) -> WbDailyOperationalMetricRowResponse:
+    return WbDailyOperationalMetricRowResponse(
+        metric=metric,
+        value=value,
+        previous_value=previous_value,
+        delta_abs=delta_abs,
+        delta_pct=delta_pct,
+        delta_pp=delta_pp,
+        trend_7d_pct=trend_7d_pct,
+        trend_7d_pp=trend_7d_pp,
+    )
+
+
+def _build_test_section(key: str, metrics: list[WbDailyOperationalMetricRowResponse], tables: list[WbDailyOperationalTableResponse] = None) -> WbDailyOperationalSectionResponse:
+    return WbDailyOperationalSectionResponse(
+        key=key,
+        title=key.upper(),
+        status="OK",
+        summary=[],
+        metrics=metrics,
+        tables=tables or [],
+    )
+
+
+def _build_mock_mcp_response(
+    report_date: date,
+    *,
+    profit_val: Decimal | None = None,
+    profit_delta: Decimal | None = None,
+    profit_trend: Decimal | None = None,
+    drr_val: Decimal | None = None,
+    drr_delta: Decimal | None = None,
+    cpo_val: Decimal | None = None,
+    cpo_delta: Decimal | None = None,
+    ad_orders_change: Decimal | None = None,
+    ad_spend_change: Decimal | None = None,
+    turnover_change: Decimal | None = None,
+    turnover_trend: Decimal | None = None,
+    orders_change: Decimal | None = None,
+    orders_trend: Decimal | None = None,
+    business_priorities: list[dict[str, Any]] = None,
+    stock_table_rows: list[dict[str, Any]] = None,
+) -> WbDailyOperationalSummaryResponse:
+    compare_date = report_date - timedelta(days=1)
+    
+    sections = []
+    
+    # Overview section
+    overview_metrics = []
+    if turnover_change is not None:
+        overview_metrics.append(_build_test_metric("Оборот заказов", value=Decimal("100000"), previous_value=Decimal("90000"), delta_pct=turnover_change, trend_7d_pct=turnover_trend))
+    if orders_change is not None:
+        overview_metrics.append(_build_test_metric("Заказы", value=Decimal("100"), previous_value=Decimal("90"), delta_pct=orders_change, trend_7d_pct=orders_trend))
+    if ad_spend_change is not None:
+        overview_metrics.append(_build_test_metric("Фактические рекламные списания", value=Decimal("15000"), previous_value=Decimal("14000"), delta_pct=ad_spend_change))
+    sections.append(_build_test_section("overview", overview_metrics))
+    
+    # Profit section
+    if profit_val is not None or profit_delta is not None or profit_trend is not None:
+        sections.append(_build_test_section("profit", [
+            _build_test_metric("Операционная прибыль", value=profit_val, delta_abs=profit_delta, trend_7d_pct=profit_trend)
+        ]))
+        
+    # Ads section
+    ads_metrics = []
+    if drr_val is not None:
+        ads_metrics.append(_build_test_metric("ДРР (по кампаниям)", value=drr_val, delta_pp=drr_delta))
+    if cpo_val is not None:
+        ads_metrics.append(_build_test_metric("CPO", value=cpo_val, delta_pct=cpo_delta))
+    if ad_orders_change is not None:
+        ads_metrics.append(_build_test_metric("Рекламные заказы", value=Decimal("50"), delta_pct=ad_orders_change))
+    if ad_spend_change is not None:
+        ads_metrics.append(_build_test_metric("Расход по статистике кампаний", value=Decimal("20000"), delta_pct=ad_spend_change))
+    
+    # Stock section
+    stock_tables = []
+    if stock_table_rows is not None:
+        stock_tables.append(WbDailyOperationalTableResponse(
+            title="Складские риски",
+            columns=["Артикул", "Артикул продавца", "Товар", "Склад", "Остаток", "Средние заказы 7д", "Оценка запаса", "Риск"],
+            rows=stock_table_rows
+        ))
+    sections.append(_build_test_section("ads", ads_metrics))
+    sections.append(_build_test_section("stock", [], tables=stock_tables))
+    
+    return WbDailyOperationalSummaryResponse(
+        formula_version="v1",
+        report_window=WbDailyOperationalReportWindowResponse(
+            report_date=report_date,
+            compare_date=compare_date,
+            trend_current_from=report_date - timedelta(days=6),
+            trend_current_to=report_date,
+            trend_previous_from=report_date - timedelta(days=13),
+            trend_previous_to=report_date - timedelta(days=7),
+            report_date_source="requested",
+        ),
+        requested_options={"mode": "full", "diagnostic": False, "top_n": 5},
+        source_freshness=[WbDailyOperationalSourceFreshnessResponse(source="mart_total_report", max_date=report_date, status="OK", lag_days=0)],
+        sections=sections,
+        highlights=WbDailyOperationalHighlightsResponse(worse=[], better=[], priority_checks=[]),
+        diagnostics=WbDailyOperationalDiagnosticsResponse(included_sections=[], partial_sections=[], excluded_sections=[], query_count=0, formula_version="v1"),
+        article_analysis=[],
+        business_priorities=business_priorities or [],
+        ranked_signals=business_priorities or [],
+        data_anomalies=[],
+        analysis_summary={},
+    )
+
+
+def test_actions_prioritization_negative_profit_and_ads() -> None:
+    # 1. P1 Negative profit and P2 advertising worsening are present.
+    response = _build_mock_mcp_response(
+        date(2026, 7, 19),
+        profit_val=Decimal("-5543"),
+        drr_val=Decimal("22.1"),
+        drr_delta=Decimal("2.1"),
+        cpo_val=Decimal("346"),
+        cpo_delta=Decimal("15.5"),
+        ad_orders_change=Decimal("-10.2"),
+        ad_spend_change=Decimal("5.0"),
+        business_priorities=[
+            {"kind": "article_growth", "direction": "positive", "nm_id": 221311710, "score": Decimal("25"), "user_visible": True}
+        ]
+    )
+    
+    markdown = render_wb_daily_operational_summary_markdown(response)
+    
+    # Assert actions are present and prioritized
+    assert "1. Проверить причины отрицательной прибыли по VVBromo: −5 543 ₽." in markdown
+    assert "2. Пересмотреть рекламу: ДРР 22,1%, CPO 346 ₽, рекламные заказы −10,2% за сутки." in markdown
+    assert "3. Проверить устойчивость роста по артикулу 221311710." in markdown
+
+
+def test_actions_prioritization_stock_score_competition() -> None:
+    # Stock risk with supply <= 3 should get a boost and beat growth
+    business_priorities = [
+        {"kind": "stock", "direction": "negative", "nm_id": 1111, "score": Decimal("10"), "user_visible": True},
+        {"kind": "article_growth", "direction": "positive", "nm_id": 221311710, "score": Decimal("25"), "user_visible": True}
+    ]
+    stock_rows = [
+        {"Артикул": "1111", "Оценка запаса": "2 дн."}
+    ]
+    
+    response = _build_mock_mcp_response(
+        date(2026, 7, 19),
+        profit_val=Decimal("-5543"),
+        drr_val=Decimal("22.1"),
+        drr_delta=Decimal("2.1"),
+        cpo_val=Decimal("346"),
+        cpo_delta=Decimal("15.5"),
+        ad_orders_change=Decimal("-10.2"),
+        ad_spend_change=Decimal("5.0"),
+        business_priorities=business_priorities,
+        stock_table_rows=stock_rows
+    )
+    
+    markdown = render_wb_daily_operational_summary_markdown(response)
+    
+    # Since days of supply <= 3, the score of 1111 is boosted by 100 to 110, which beats 25 (growth).
+    assert "3. Проверить остатки 1111: запас 2 дня." in markdown
+    assert "221311710" not in markdown.split("## Действия на день")[1]
+
+
+def test_actions_prioritization_dynamic_analytical_summary_line_synthetic_date() -> None:
+    # Test on a synthetic date date(2026, 8, 20) with matching criteria
+    response = _build_mock_mcp_response(
+        date(2026, 8, 20),
+        turnover_change=Decimal("5.0"),     # daily grew
+        turnover_trend=Decimal("-3.0"),     # weekly trend negative
+        ad_spend_change=Decimal("2.0"),     # spend grew or stable
+        ad_orders_change=Decimal("-5.0"),   # ad orders down
+        profit_val=Decimal("-2000"),        # profit negative
+        business_priorities=[]
+    )
+    
+    markdown = render_wb_daily_operational_summary_markdown(response)
+    
+    # Verify analytical line is present
+    expected_line = (
+        "Продажи восстановились относительно предыдущего дня, но недельная динамика остаётся отрицательной; "
+        "рост рекламных расходов не дал сопоставимого роста рекламных заказов, поэтому прибыль по VVBromo "
+        "осталась отрицательной."
+    )
+    assert expected_line in markdown
+
+
+def test_actions_prioritization_negative_scenarios_no_actions_or_summary_line() -> None:
+    # Positive profit, positive trend, no ad orders drop: no actions and no analytical summary line
+    response = _build_mock_mcp_response(
+        date(2026, 8, 20),
+        turnover_change=Decimal("5.0"),     # daily grew
+        turnover_trend=Decimal("3.0"),      # weekly trend positive (NOT negative!)
+        ad_spend_change=Decimal("-2.0"),
+        ad_orders_change=Decimal("5.0"),    # ad orders grew (NOT down!)
+        profit_val=Decimal("12000"),        # profit positive
+        business_priorities=[]
+    )
+    
+    markdown = render_wb_daily_operational_summary_markdown(response)
+    
+    expected_line = (
+        "Продажи восстановились относительно предыдущего дня, но недельная динамика остаётся отрицательной; "
+        "рост рекламных расходов не дал сопоставимого роста рекламных заказов, поэтому прибыль по VVBromo "
+        "осталась отрицательной."
+    )
+    # Check that neither P1, P2 nor the summary line are present
+    assert expected_line not in markdown
+    assert "Проверить причины отрицательной прибыли" not in markdown
+    assert "Пересмотреть рекламу" not in markdown

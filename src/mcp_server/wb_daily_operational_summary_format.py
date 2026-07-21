@@ -343,58 +343,188 @@ def _is_user_visible(signal: dict[str, Any]) -> bool:
     return bool(signal.get("user_visible", True))
 
 
+def _format_action_number(val: Any, decimals: int = 0) -> str:
+    if val is None:
+        return "н/д"
+    try:
+        dec = Decimal(str(val))
+    except Exception:
+        return str(val)
+    quant = Decimal("1") if decimals == 0 else Decimal("1." + ("0" * decimals))
+    dec = dec.quantize(quant)
+    text = f"{dec:,.{decimals}f}"
+    return text.replace(",", " ").replace(".", ",").replace("-", "−")
+
+
+def _format_action_currency(val: Any) -> str:
+    if val is None:
+        return "н/д"
+    return f"{_format_action_number(val, 0)} ₽"
+
+
+def _format_action_percent(val: Any, decimals: int = 1) -> str:
+    if val is None:
+        return "н/д"
+    try:
+        val_str = str(val).replace("%", "").strip()
+        dec = Decimal(val_str)
+        return f"{_format_action_number(dec, decimals)}%"
+    except Exception:
+        return f"{_format_action_number(val, decimals)}%"
+
+
+def _get_days_of_supply_from_stock_table(response: WbDailyOperationalSummaryResponse, nm_id: Any) -> int | None:
+    stock_section = _find_section(response, "stock")
+    if stock_section is None or not stock_section.tables:
+        return None
+    for table in stock_section.tables:
+        if table.title == "Складские риски":
+            for row in table.rows:
+                if str(row.get("Артикул")) == str(nm_id):
+                    val_str = str(row.get("Оценка запаса") or "")
+                    match = re.search(r'\d+', val_str)
+                    if match:
+                        return int(match.group(0))
+    return None
+
+
 def _build_actions(response: WbDailyOperationalSummaryResponse, *, limit: int) -> list[str]:
-    actions: list[str] = []
-    seen: set[str] = set()
-    signal_by_key = {
-        (signal.get("entity_type"), signal.get("entity_id"), signal.get("nm_id"), signal.get("advert_id"), signal.get("search_query")): signal
-        for signal in response.business_priorities
-        if isinstance(signal, dict)
-    }
-    priority_narratives = response.analysis_summary.get("priority_narratives") or []
-    for item in priority_narratives:
-        action = " ".join(str(item.get("action") or "").split()).strip()
-        if not action:
-            continue
-        key = (item.get("entity_type"), item.get("entity_id"), item.get("nm_id"), item.get("advert_id"), item.get("search_query"))
-        signal = signal_by_key.get(key) or {}
-        reason = _signal_reason(signal)
-        line = action.rstrip(".")
-        if reason:
-            line = f"{line}: {reason}"
-        normalized = line.lower()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        actions.append(line.rstrip(".") + ".")
-        if len(actions) >= limit:
-            return actions
+    # P1 Profit candidate
+    profit = _first_metric(response, "Операционная прибыль", "profit")
+    profit_cand = None
+    if profit is not None:
+        profit_val = _as_decimal(profit.value)
+        profit_delta = _as_decimal(profit.delta_abs)
+        profit_trend = _as_decimal(profit.trend_7d_pct if profit.trend_7d_pct is not None else profit.trend_7d_pp)
+        
+        is_p1_active = False
+        text = ""
+        if profit_val is not None and profit_val < 0:
+            is_p1_active = True
+            text = f"Проверить причины отрицательной прибыли по VVBromo: {_format_action_currency(profit_val)}."
+        elif profit_delta is not None and profit_delta < -1000:
+            is_p1_active = True
+            text = f"Проверить причины снижения прибыли по VVBromo: на {_format_action_currency(profit_delta)}."
+        elif profit_trend is not None and profit_trend < -10:
+            is_p1_active = True
+            text = "Проверить причины падения прибыли по VVBromo к предыдущей неделе."
+            
+        if is_p1_active and text:
+            profit_cand = {
+                "category": "P1",
+                "score": Decimal("1000"),
+                "text": text
+            }
+
+    # P2 Ads candidate
+    drr_metric = _first_metric(response, "ДРР (по кампаниям)", "ads")
+    if drr_metric is None:
+        drr_metric = _first_metric(response, "Доля расходов по кампаниям от оборота", "ads")
+    cpo_metric = _first_metric(response, "CPO", "ads")
+    ad_orders_metric = _first_metric(response, "Рекламные заказы", "ads")
+    ad_spend_metric = _first_metric(response, "Расход по статистике кампаний", "ads")
+    
+    drr_val = _as_decimal(drr_metric.value) if drr_metric is not None else None
+    drr_delta_pp = _as_decimal(drr_metric.delta_pp) if drr_metric is not None else None
+    cpo_val = _as_decimal(cpo_metric.value) if cpo_metric is not None else None
+    cpo_delta_pct = _as_decimal(cpo_metric.delta_pct) if cpo_metric is not None else None
+    cpo_delta_abs = _as_decimal(cpo_metric.delta_abs) if cpo_metric is not None else None
+    ad_orders_delta_pct = _as_decimal(ad_orders_metric.delta_pct) if ad_orders_metric is not None else None
+    ad_spend_delta_pct = _as_decimal(ad_spend_metric.delta_pct) if ad_spend_metric is not None else None
+    
+    drr_worse = drr_delta_pp is not None and drr_delta_pp > 0
+    cpo_worse = (cpo_delta_pct is not None and cpo_delta_pct > 0) or (cpo_delta_abs is not None and cpo_delta_abs > 0)
+    ad_orders_worse = ad_orders_delta_pct is not None and ad_orders_delta_pct < 0
+    
+    spend_preservation_worse = False
+    if ad_spend_delta_pct is not None and ad_spend_delta_pct >= -10:
+        if ad_orders_delta_pct is None or ad_orders_delta_pct <= ad_spend_delta_pct - 5:
+            spend_preservation_worse = True
+            
+    worsening_count = sum([drr_worse, cpo_worse, ad_orders_worse, spend_preservation_worse])
+    
+    ads_cand = None
+    if worsening_count >= 2:
+        parts = []
+        if drr_val is not None:
+            parts.append(f"ДРР {_format_action_percent(drr_val)}")
+        if cpo_val is not None:
+            parts.append(f"CPO {_format_action_currency(cpo_val)}")
+        if ad_orders_delta_pct is not None:
+            parts.append(f"рекламные заказы {_format_action_percent(ad_orders_delta_pct)} за сутки")
+            
+        if parts:
+            text = f"Пересмотреть рекламу: {', '.join(parts)}."
+            ads_cand = {
+                "category": "P2",
+                "score": Decimal("900"),
+                "text": text
+            }
+
+    # P3, P4, P5 candidates from response.business_priorities
+    p3_cand = None
+    p4_cand = None
+    p5_cand = None
+    
     for signal in response.business_priorities:
         if not isinstance(signal, dict) or not _is_user_visible(signal):
             continue
-        action = str(((signal.get("check") or {}).get("text") if isinstance(signal.get("check"), dict) else None) or signal.get("recommended_check") or "").strip()
-        if not action:
+        kind = signal.get("kind")
+        direction = signal.get("direction")
+        nm_id = signal.get("nm_id")
+        if nm_id is None:
             continue
-        line = action.rstrip(".")
-        reason = _signal_reason(signal)
-        if reason:
-            line = f"{line}: {reason}"
-        normalized = line.lower()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        actions.append(line.rstrip(".") + ".")
-        if len(actions) >= limit:
-            return actions
-    for text in response.highlights.priority_checks:
-        normalized = " ".join(str(text).split()).lower()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        actions.append(str(text).strip().rstrip(".") + ".")
-        if len(actions) >= limit:
+            
+        score = Decimal(str(signal.get("score") or "0"))
+        
+        if kind == "stock":
+            days = _get_days_of_supply_from_stock_table(response, nm_id)
+            adj_score = score + (Decimal("100") if (days is not None and days <= 3) else Decimal("0"))
+            if p3_cand is None or adj_score > p3_cand["score"]:
+                days_str = _format_days_supply(days) if days is not None else None
+                text = f"Проверить остатки {nm_id}: запас {days_str}." if days_str else f"Проверить дефицит и остатки по артикулу {nm_id}."
+                p3_cand = {"category": "P3", "score": adj_score, "text": text, "nm_id": nm_id}
+                
+        elif direction == "negative" and kind in {"large_turnover_loss", "traffic", "search", "price"}:
+            if p4_cand is None or score > p4_cand["score"]:
+                query = signal.get("search_query")
+                if kind == "search" and query:
+                    text = f"Проверить видимость в поиске артикула {nm_id} по запросу «{query}»."
+                else:
+                    text = f"Выявить причины снижения продаж по артикулу {nm_id}."
+                p4_cand = {"category": "P4", "score": score, "text": text, "nm_id": nm_id}
+                
+        elif direction == "positive" and kind in {"article_growth", "large_turnover_growth"}:
+            if p5_cand is None or score > p5_cand["score"]:
+                text = f"Проверить устойчивость роста по артикулу {nm_id}."
+                p5_cand = {"category": "P5", "score": score, "text": text, "nm_id": nm_id}
+
+    # Select actions
+    selected_actions = []
+    
+    # P1 and P2 are higher priority and selected first
+    if profit_cand is not None:
+        selected_actions.append(profit_cand)
+    if ads_cand is not None:
+        selected_actions.append(ads_cand)
+        
+    # Remaining slots filled by competing P3, P4, P5 by score
+    competing_candidates = []
+    if p3_cand is not None:
+        competing_candidates.append(p3_cand)
+    if p4_cand is not None:
+        competing_candidates.append(p4_cand)
+    if p5_cand is not None:
+        competing_candidates.append(p5_cand)
+        
+    competing_candidates.sort(key=lambda x: x["score"], reverse=True)
+    
+    for cand in competing_candidates:
+        if len(selected_actions) >= limit:
             break
-    return actions
+        selected_actions.append(cand)
+        
+    return [act["text"] for act in selected_actions]
 
 
 def _build_day_summary(response: WbDailyOperationalSummaryResponse) -> list[str]:
@@ -428,7 +558,69 @@ def _build_day_summary(response: WbDailyOperationalSummaryResponse) -> list[str]
         lines.append(
             f"Основной положительный вклад по товарам: артикул {row.get('Артикул')}, {_short_text(row.get('Товар'), limit=48)} — {row.get('Изм. оборота')}."
         )
-    return lines[:5] or ["Выраженных отклонений по ключевым метрикам не обнаружено."]
+
+    # Standard lines limit
+    result = lines[:5] if len(lines) > 5 else lines
+
+    # Condition-based analytical line
+    ad_spend = _first_metric(response, "Фактические рекламные списания", "overview")
+    if ad_spend is None:
+        ad_spend = _first_metric(response, "Расход по статистике кампаний", "ads")
+    ad_orders = _first_metric(response, "Рекламные заказы", "ads")
+
+    turnover_grew = turnover is not None and (
+        (turnover.delta_pct is not None and turnover.delta_pct > 0) or
+        (turnover.delta_abs is not None and turnover.delta_abs > 0)
+    )
+    orders_grew = orders is not None and (
+        (orders.delta_pct is not None and orders.delta_pct > 0) or
+        (orders.delta_abs is not None and orders.delta_abs > 0)
+    )
+    cond_1 = turnover_grew or orders_grew
+
+    turnover_trend_neg = turnover is not None and (
+        (turnover.trend_7d_pct is not None and turnover.trend_7d_pct < 0) or
+        (turnover.trend_7d_pp is not None and turnover.trend_7d_pp < 0)
+    )
+    orders_trend_neg = orders is not None and (
+        (orders.trend_7d_pct is not None and orders.trend_7d_pct < 0) or
+        (orders.trend_7d_pp is not None and orders.trend_7d_pp < 0)
+    )
+    cond_2 = turnover_trend_neg or orders_trend_neg
+
+    ad_spend_change_pct = None
+    if ad_spend is not None:
+        if ad_spend.delta_pct is not None:
+            ad_spend_change_pct = ad_spend.delta_pct
+        elif ad_spend.delta_abs is not None and ad_spend.previous_value not in (None, 0, Decimal("0")):
+            ad_spend_change_pct = (Decimal(str(ad_spend.delta_abs)) / Decimal(str(ad_spend.previous_value))) * 100
+    
+    cond_3 = ad_spend is not None and (ad_spend_change_pct is None or ad_spend_change_pct >= -10)
+
+    ad_orders_change_pct = None
+    if ad_orders is not None:
+        if ad_orders.delta_pct is not None:
+            ad_orders_change_pct = ad_orders.delta_pct
+        elif ad_orders.delta_abs is not None and ad_orders.previous_value not in (None, 0, Decimal("0")):
+            ad_orders_change_pct = (Decimal(str(ad_orders.delta_abs)) / Decimal(str(ad_orders.previous_value))) * 100
+
+    cond_4 = ad_orders is not None and ad_orders_change_pct is not None and ad_orders_change_pct < 0
+
+    profit_val = _as_decimal(profit.value) if profit is not None else None
+    profit_delta = _as_decimal(profit.delta_abs) if profit is not None else None
+    cond_5 = profit is not None and (
+        (profit_val is not None and profit_val < 0) or
+        (profit_delta is not None and profit_delta < 0)
+    )
+
+    if cond_1 and cond_2 and cond_3 and cond_4 and cond_5:
+        result.append(
+            "Продажи восстановились относительно предыдущего дня, но недельная динамика остаётся отрицательной; "
+            "рост рекламных расходов не дал сопоставимого роста рекламных заказов, поэтому прибыль по VVBromo "
+            "осталась отрицательной."
+        )
+
+    return result or ["Выраженных отклонений по ключевым метрикам не обнаружено."]
 
 
 def _build_key_metrics(response: WbDailyOperationalSummaryResponse) -> list[WbDailyOperationalMetricRowResponse]:
