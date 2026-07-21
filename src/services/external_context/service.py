@@ -31,6 +31,14 @@ def _format_decimal(val: Any, decimals: int = 1) -> str:
         return str(val).replace("-", "−")
 
 
+CAT_DATIVE_LOWER = {
+    "womens_underwear": "женскому белью",
+    "childrens_underwear": "детскому белью",
+    "womens_tshirts": "женским футболкам",
+    "childrens_tshirts": "детским футболкам",
+}
+
+
 class ExternalContextService:
     def __init__(self, session: Session, settings: McpServiceSettings | None = None):
         self.session = session
@@ -155,34 +163,92 @@ class ExternalContextService:
                         continue
 
                     cat_title = cat_cfg["category_title"]
-                    direction_str = "вырос" if change_pct > 0 else "снизился"
-                    short_interpretation = f"Поисковый спрос на {cat_title.lower()} {direction_str} на {abs(int(change_pct))}%."
+                    cat_dative = CAT_DATIVE_LOWER.get(cat_code, cat_title.lower())
+
+                    # Check category sales trend matching ONLY for the SAME category
+                    sales_trend = category_sales_trends.get(cat_code) if (category_sales_trends and isinstance(category_sales_trends, dict)) else None
+                    comparison_available = sales_trend is not None
+                    wb_change_pct = Decimal(str(sales_trend.get("change_pct"))) if (comparison_available and sales_trend.get("change_pct") is not None) else None
+
+                    comparison_direction = None
+                    selection_reason = None
+                    is_selectable = False
+
+                    if comparison_available and wb_change_pct is not None:
+                        if (change_pct > 0 and wb_change_pct > 0) or (change_pct < 0 and wb_change_pct < 0):
+                            comparison_direction = "matching"
+                            relevance = "medium"
+                            is_selectable = True
+                            selection_reason = "category_matched_same_direction"
+                            if change_pct > 0:
+                                short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} и продажи категории на WB растут одновременно."
+                            else:
+                                short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} и продажи категории на WB снижаются одновременно."
+                        else:
+                            comparison_direction = "divergent"
+                            relevance = "high"
+                            is_selectable = True
+                            selection_reason = "category_matched_divergent_direction"
+                            if change_pct > 0 and wb_change_pct < 0:
+                                short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} вырос на {abs(int(change_pct))}%, при этом поисковые заказы категории на WB снизились на {abs(int(wb_change_pct))}%."
+                            else:
+                                short_interpretation = f"Продажи категории {cat_title.lower()} на WB растут на {abs(int(wb_change_pct))}% вопреки снижению внешнего поискового интереса в Яндексе на {abs(int(change_pct))}%."
+                    else:
+                        comparison_direction = "standalone"
+                        # Without WB category comparison: only selectable for main report if strong change >= 25.0%
+                        if abs(float(change_pct)) >= 25.0:
+                            relevance = "medium"
+                            is_selectable = True
+                            selection_reason = "standalone_strong_change"
+                            dir_str = "вырос" if change_pct > 0 else "снизился"
+                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} {dir_str} на {abs(int(change_pct))}%."
+                        else:
+                            relevance = "low"
+                            is_selectable = False
+                            selection_reason = "standalone_normal_change_diagnostic_only"
+                            dir_str = "вырос" if change_pct > 0 else "снизился"
+                            short_interpretation = f"Внешний поисковый интерес в Яндексе к {cat_dative} {dir_str} на {abs(int(change_pct))}%."
+
                     fresh_until = metric.period_end + timedelta(days=7)
                     pub_date = metric.published_at.date() if metric.published_at else metric.period_end
 
-                    signal = ExternalContextSignalResponse(
-                        source="search_demand",
-                        signal_type="demand_change",
-                        metric_code=metric.metric_code,
-                        title=f"Поисковый спрос: {cat_title}",
-                        period_start=metric.period_start,
-                        period_end=metric.period_end,
-                        value=val,
-                        current_value=val,
-                        previous_value=prev_val,
-                        change_value=val - prev_val if (val is not None and prev_val is not None) else None,
-                        change_pct=change_pct,
-                        published_at=pub_date,
-                        fresh_until=fresh_until,
-                        neutral_level=None,
-                        category=cat_code,
-                        relevance="high",
-                        confidence_level="context_only",
-                        interpretation=short_interpretation,
-                        source_reference=metric.source_reference or "Yandex Wordstat",
-                        data_status=metric.data_status,
-                    )
-                    candidates_p1.append(signal)
+                    diag_details.append({
+                        "source": "search_demand",
+                        "metric_code": metric.metric_code,
+                        "wordstat_category": cat_code,
+                        "wb_category": cat_code if comparison_available else None,
+                        "external_change_pct": float(change_pct),
+                        "wb_change_pct": float(wb_change_pct) if wb_change_pct is not None else None,
+                        "comparison_available": comparison_available,
+                        "comparison_direction": comparison_direction,
+                        "selection_reason": selection_reason,
+                        "is_selectable": is_selectable,
+                    })
+
+                    if is_selectable:
+                        signal = ExternalContextSignalResponse(
+                            source="search_demand",
+                            signal_type="demand_change",
+                            metric_code=metric.metric_code,
+                            title=f"Поисковый спрос: {cat_title}",
+                            period_start=metric.period_start,
+                            period_end=metric.period_end,
+                            value=val,
+                            current_value=val,
+                            previous_value=prev_val,
+                            change_value=val - prev_val if (val is not None and prev_val is not None) else None,
+                            change_pct=change_pct,
+                            published_at=pub_date,
+                            fresh_until=fresh_until,
+                            neutral_level=None,
+                            category=cat_code,
+                            relevance=relevance,
+                            confidence_level="context_only",
+                            interpretation=short_interpretation,
+                            source_reference=metric.source_reference or "Yandex Wordstat",
+                            data_status=metric.data_status,
+                        )
+                        candidates_p1.append(signal)
             except SQLAlchemyError:
                 sources_status["search_demand"] = "error"
 
@@ -213,6 +279,13 @@ class ExternalContextService:
 
                     desc = event.description or event.title
                     fresh_until = event.date_end + timedelta(days=2)
+
+                    diag_details.append({
+                        "source": "internal_calendar",
+                        "event_code": event.event_code,
+                        "is_selectable": True,
+                        "selection_reason": "active_calendar_event",
+                    })
 
                     signal = ExternalContextSignalResponse(
                         source="internal_calendar",
@@ -260,14 +333,24 @@ class ExternalContextService:
                     days_diff = (report_date - pub_date).days
                     fresh_until = pub_date + timedelta(days=7)
 
-                    # Freshness window: 0 to 7 days after published_at
-                    if not (0 <= days_diff <= 7):
+                    if pub_date > report_date:
+                        diag_details.append({
+                            "source": "cbr",
+                            "metric_code": metric.metric_code,
+                            "excluded_reason": "published_after_report_date",
+                            "days_diff": days_diff,
+                            "published_at": pub_date.isoformat(),
+                            "is_selectable": False,
+                        })
+                        continue
+                    elif days_diff > 7:
                         diag_details.append({
                             "source": "cbr",
                             "metric_code": metric.metric_code,
                             "excluded_reason": "outside_7day_freshness_window",
                             "days_diff": days_diff,
                             "published_at": pub_date.isoformat(),
+                            "is_selectable": False,
                         })
                         continue
 
@@ -286,6 +369,13 @@ class ExternalContextService:
                             short_interpretation = f"Индекс потребительских настроений составил {val_str} пункта."
                     else:
                         short_interpretation = f"Индекс потребительских настроений составил {val_str} пункта."
+
+                    diag_details.append({
+                        "source": "cbr",
+                        "metric_code": metric.metric_code,
+                        "is_selectable": True,
+                        "selection_reason": "valid_fresh_sentiment_index",
+                    })
 
                     signal = ExternalContextSignalResponse(
                         source="cbr",
@@ -331,14 +421,24 @@ class ExternalContextService:
                     days_diff = (report_date - pub_date).days
                     fresh_until = pub_date + timedelta(days=7)
 
-                    # Freshness window: 0 to 7 days after published_at
-                    if not (0 <= days_diff <= 7):
+                    if pub_date > report_date:
+                        diag_details.append({
+                            "source": metric.source,
+                            "metric_code": metric.metric_code,
+                            "excluded_reason": "published_after_report_date",
+                            "days_diff": days_diff,
+                            "published_at": pub_date.isoformat(),
+                            "is_selectable": False,
+                        })
+                        continue
+                    elif days_diff > 7:
                         diag_details.append({
                             "source": metric.source,
                             "metric_code": metric.metric_code,
                             "excluded_reason": "outside_7day_freshness_window",
                             "days_diff": days_diff,
                             "published_at": pub_date.isoformat(),
+                            "is_selectable": False,
                         })
                         continue
 
@@ -354,6 +454,13 @@ class ExternalContextService:
                             short_interpretation = f"Годовая инфляция составила {val_str}%."
                     else:
                         short_interpretation = f"Годовая инфляция составила {val_str}%."
+
+                    diag_details.append({
+                        "source": metric.source,
+                        "metric_code": metric.metric_code,
+                        "is_selectable": True,
+                        "selection_reason": "valid_fresh_inflation_rate",
+                    })
 
                     signal = ExternalContextSignalResponse(
                         source=metric.source,
@@ -393,12 +500,63 @@ class ExternalContextService:
             if len(selected_signals) >= max_signals:
                 break
 
-        status = "OK" if selected_signals else "EMPTY"
+        # Compute refined status for search_demand
+        if self.settings.external_search_demand_enabled and sources_status["search_demand"] != "disabled":
+            if "db_metrics" in locals() and db_metrics:
+                has_real = any(m.value and m.value > 0 or (m.change_pct is not None and m.change_pct != Decimal("0")) for m in db_metrics)
+                if has_real:
+                    sources_status["search_demand"] = "ok"
+                else:
+                    sources_status["search_demand"] = "placeholder"
+
+        # Compute status and external_context_status
+        all_unavailable_or_error = all(v in {"error", "unavailable", "disabled"} for v in sources_status.values()) and any(v in {"error", "unavailable"} for v in sources_status.values())
+
+        if selected_signals:
+            external_context_status = "signals_available"
+            status = "OK"
+        elif all_unavailable_or_error:
+            external_context_status = "sources_unavailable"
+            status = "UNAVAILABLE"
+        else:
+            external_context_status = "no_significant_signals"
+            status = "EMPTY"
+
+        # Collect last_successful_update for sources
+        sources_checked = {}
+        for src_key, src_stat in sources_status.items():
+            sources_checked[src_key] = {
+                "status": src_stat,
+                "last_successful_update": report_date.isoformat() if src_stat == "ok" else None,
+            }
+
+        # Build selection_details and exclusion_reasons
+        selected_metric_codes = {s.metric_code or s.event_code or s.title for s in selected_signals}
+        selection_details: list[dict[str, Any]] = []
+        exclusion_reasons: list[dict[str, Any]] = []
+
+        for item in diag_details:
+            is_sel = item.get("is_selectable", False)
+            code = item.get("metric_code") or item.get("event_code") or item.get("source")
+            if is_sel and code in selected_metric_codes:
+                selection_details.append(item)
+            else:
+                exclusion_reasons.append(item)
+
+        candidate_count = len(diag_details)
+        selected_count = len(selected_signals)
+        excluded_count = candidate_count - selected_count
 
         diagnostics = {
+            "sources_checked": sources_checked,
+            "candidate_count": candidate_count,
+            "selected_count": selected_count,
+            "excluded_count": excluded_count,
             "candidate_evaluations": diag_details,
-            "selected_count": len(selected_signals),
+            "selection_details": selection_details,
+            "exclusion_reasons": exclusion_reasons,
             "max_signals": max_signals,
+            "external_context_status": external_context_status,
             "sentiment_neutral_level": "Индекс находится относительно нейтрального уровня 100, где значение выше 100 указывает на более позитивные потребительские настроения.",
         }
 
@@ -407,6 +565,7 @@ class ExternalContextService:
             period_start=resolved_period_start,
             period_end=resolved_period_end,
             status=status,
+            external_context_status=external_context_status,
             signals=selected_signals,
             applied_filters=applied_filters,
             diagnostics=diagnostics,

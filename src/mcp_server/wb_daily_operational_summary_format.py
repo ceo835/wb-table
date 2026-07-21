@@ -824,25 +824,29 @@ def _collect_quality_warnings(response: WbDailyOperationalSummaryResponse, *, li
 
 def _build_external_context_lines(response: WbDailyOperationalSummaryResponse, *, limit: int = 2) -> list[str]:
     context = response.external_context or {}
-    # Only show ok and partial status data in main report
-    if context.get("status") not in {"OK", "PARTIAL"}:
-        return []
-    lines: list[str] = []
+    ext_status = context.get("external_context_status")
+    main_status = context.get("status")
+
+    if ext_status == "sources_unavailable" or main_status in {"UNAVAILABLE", "DISABLED"}:
+        return ["— Внешние данные временно недоступны."]
+
     signals = context.get("signals") or []
-    for signal in signals[:limit]:
-        if not isinstance(signal, dict):
-            continue
-        # Use interpretation prepared by service
-        text = signal.get("interpretation") or signal.get("description")
-        if not text:
-            # Fallback format
-            title = str(signal.get("title") or "").strip()
-            if not title:
+    if ext_status == "signals_available" or (main_status == "OK" and signals):
+        lines: list[str] = []
+        for signal in signals[:limit]:
+            if not isinstance(signal, dict):
                 continue
-            text = f"{title} — контекстный фактор."
-        
-        lines.append(f"— {text}")
-    return lines[:limit]
+            text = signal.get("interpretation") or signal.get("description")
+            if not text:
+                title = str(signal.get("title") or "").strip()
+                if not title:
+                    continue
+                text = f"{title} — контекстный фактор."
+            lines.append(f"— {text}")
+        if lines:
+            return lines[:limit]
+
+    return ["— Значимых новых внешних сигналов на дату отчёта нет."]
 
 
 def render_wb_daily_operational_summary_markdown(response: WbDailyOperationalSummaryResponse) -> str:

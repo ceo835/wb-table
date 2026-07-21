@@ -40,11 +40,11 @@ class YandexCloudWordstatAdapter:
         }
 
         from datetime import timedelta
-        duration_days = (period_end - period_start).days + 1
-        prev_period_start = period_start - timedelta(days=duration_days)
-        prev_period_end = period_end - timedelta(days=duration_days)
-        # Simple date math for ISO strings
-        from_date_str = f"{period_start.isoformat()}T00:00:00Z"
+        # Ensure period_start is a Monday
+        monday_start = period_start - timedelta(days=period_start.weekday())
+        prev_monday = monday_start - timedelta(days=7)
+
+        from_date_str = f"{prev_monday.isoformat()}T00:00:00Z"
         to_date_str = f"{period_end.isoformat()}T23:59:59Z"
 
         results = []
@@ -74,7 +74,7 @@ class YandexCloudWordstatAdapter:
 
                 if response.status_code == 200:
                     res_json = response.json()
-                    dynamics = res_json.get("dynamics", []) or res_json.get("points", []) or []
+                    dynamics = res_json.get("results", []) or res_json.get("dynamics", []) or res_json.get("points", []) or []
                     
                     val_curr = Decimal("0")
                     val_prev = Decimal("0")

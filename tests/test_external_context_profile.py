@@ -255,9 +255,10 @@ def test_max_two_external_context_lines(clean_external_db, test_settings, shared
 
     with session_scope(shared_engine) as session:
         service = ExternalContextService(session, test_settings)
-        res = service.get_external_context(report_date=date(2026, 7, 19), max_signals=2)
+        cat_trends = {"womens_tshirts": {"change_pct": Decimal("-8.0")}}
+        res = service.get_external_context(report_date=date(2026, 7, 19), max_signals=2, category_sales_trends=cat_trends)
         assert len(res.signals) == 2
-        # Highest priority items only (Wordstat & Calendar)
+        # Highest priority items only (Category-matched Wordstat & Calendar)
         assert res.signals[0].source == "search_demand"
         assert res.signals[1].source == "internal_calendar"
 
@@ -282,13 +283,14 @@ def test_wordstat_priority_over_inflation(clean_external_db, test_settings, shar
 
     with session_scope(shared_engine) as session:
         service = ExternalContextService(session, test_settings)
-        res = service.get_external_context(report_date=date(2026, 7, 19), max_signals=1)
+        cat_trends = {"womens_tshirts": {"change_pct": Decimal("-8.0")}}
+        res = service.get_external_context(report_date=date(2026, 7, 19), max_signals=1, category_sales_trends=cat_trends)
         assert len(res.signals) == 1
         assert res.signals[0].source == "search_demand"
 
 
-# 9. Hide section when no active signals exist
-def test_section_hidden_when_no_active_signals(clean_external_db) -> None:
+# 9. No significant signals displays neutral line
+def test_no_significant_signals_displays_neutral_line(clean_external_db) -> None:
     response = WbDailyOperationalSummaryResponse(
         formula_version="v1",
         report_window=WbDailyOperationalReportWindowResponse(
@@ -310,11 +312,42 @@ def test_section_hidden_when_no_active_signals(clean_external_db) -> None:
         ranked_signals=[],
         data_anomalies=[],
         analysis_summary={},
-        external_context={"status": "EMPTY", "signals": []}
+        external_context={"status": "EMPTY", "external_context_status": "no_significant_signals", "signals": []}
     )
 
     markdown = render_wb_daily_operational_summary_markdown(response)
-    assert "Внешний фон" not in markdown
+    assert "## Внешний фон" in markdown
+    assert "— Значимых новых внешних сигналов на дату отчёта нет." in markdown
+
+
+def test_sources_unavailable_displays_unavailable_line(clean_external_db) -> None:
+    response = WbDailyOperationalSummaryResponse(
+        formula_version="v1",
+        report_window=WbDailyOperationalReportWindowResponse(
+            report_date=date(2026, 7, 19),
+            compare_date=date(2026, 7, 18),
+            trend_current_from=date(2026, 7, 13),
+            trend_current_to=date(2026, 7, 19),
+            trend_previous_from=date(2026, 7, 6),
+            trend_previous_to=date(2026, 7, 12),
+            report_date_source="requested",
+        ),
+        requested_options={"mode": "full"},
+        source_freshness=[],
+        sections=[],
+        highlights=WbDailyOperationalHighlightsResponse(worse=[], better=[], priority_checks=[]),
+        diagnostics=WbDailyOperationalDiagnosticsResponse(included_sections=[], partial_sections=[], excluded_sections=[], query_count=0, formula_version="v1"),
+        article_analysis=[],
+        business_priorities=[],
+        ranked_signals=[],
+        data_anomalies=[],
+        analysis_summary={},
+        external_context={"status": "UNAVAILABLE", "external_context_status": "sources_unavailable", "signals": []}
+    )
+
+    markdown = render_wb_daily_operational_summary_markdown(response)
+    assert "## Внешний фон" in markdown
+    assert "— Внешние данные временно недоступны." in markdown
 
 
 # 10. Idempotent load preserves published_at
@@ -476,3 +509,131 @@ def test_fresh_until_calculated_per_signal_type(clean_external_db, test_settings
         assert sig_calendar.fresh_until == date(2026, 7, 21)
         # Sentiment fresh_until = pub_date + 7d = 2026-07-22
         assert sig_sentiment.fresh_until == date(2026, 7, 22)
+
+
+# 15. Wordstat without category matching and <25% change stays in diagnostic, not in top signals
+def test_wordstat_unmatched_normal_change_stays_in_diagnostic(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="yandex_direct",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Wordstat",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("15000"),
+            previous_value=Decimal("13000"),
+            change_pct=Decimal("15.0"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        # Without category_sales_trends
+        res = service.get_external_context(report_date=date(2026, 7, 19), diagnostic=True)
+        # Main signals do not include this normal standalone Wordstat change
+        assert len(res.signals) == 0
+        # But diagnostic details contain it with is_selectable=False
+        wordstat_diags = [d for d in res.diagnostics.get("exclusion_reasons", []) if d.get("wordstat_category") == "womens_tshirts"]
+        assert len(wordstat_diags) == 1
+        assert wordstat_diags[0]["is_selectable"] is False
+        assert wordstat_diags[0]["selection_reason"] == "standalone_normal_change_diagnostic_only"
+
+
+# 16. Wordstat wording contains 'в Яндексе'
+def test_wordstat_phrasing_contains_yandex(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="yandex_direct",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Wordstat",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("15000"),
+            previous_value=Decimal("10000"),
+            change_pct=Decimal("50.0"),  # strong change >= 25.0%
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        res = service.get_external_context(report_date=date(2026, 7, 19))
+        assert len(res.signals) == 1
+        assert "в Яндексе" in res.signals[0].interpretation
+        assert "Внешний поисковый интерес в Яндексе к женским футболкам вырос на 50%." == res.signals[0].interpretation
+
+
+# 17. Category comparison strictly uses same category, not general store turnover
+def test_wordstat_category_comparison_strict_same_category(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="yandex_direct",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Wordstat",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("15000"),
+            previous_value=Decimal("13000"),
+            change_pct=Decimal("15.0"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        # Passing category_sales_trends for DIFFERENT category ('womens_underwear') or total store
+        cat_trends_other = {"womens_underwear": {"change_pct": Decimal("-10.0")}, "total_store": {"change_pct": Decimal("-20.0")}}
+        res_other = service.get_external_context(report_date=date(2026, 7, 19), category_sales_trends=cat_trends_other, diagnostic=True)
+        # Since 'womens_tshirts' is NOT in cat_trends_other, it is NOT category matched
+        assert len(res_other.signals) == 0
+
+        # Now pass matching category 'womens_tshirts'
+        cat_trends_matched = {"womens_tshirts": {"change_pct": Decimal("-8.0")}}
+        res_matched = service.get_external_context(report_date=date(2026, 7, 19), category_sales_trends=cat_trends_matched, diagnostic=True)
+        assert len(res_matched.signals) == 1
+        assert "при этом поисковые заказы категории на WB снизились на 8%." in res_matched.signals[0].interpretation
+
+
+# 18. Future published_at handling (exclusion reason published_after_report_date, status unaffected)
+def test_future_published_at_not_selected(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 31, 10, 0)  # Future publication relative to report_date 2026-07-19
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="cbr",
+            metric_code="consumer_sentiment_index",
+            metric_name="Sentiment",
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 31),
+            published_at=pub_dt,
+            value=Decimal("115.2"),
+            previous_value=Decimal("110.0"),
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        # Report date on 2026-07-19 -> publication is in the future (2026-07-31)
+        res = service.get_external_context(report_date=date(2026, 7, 19), diagnostic=True)
+        assert len(res.signals) == 0
+        assert res.external_context_status == "no_significant_signals"
+        
+        ex_reasons = res.diagnostics.get("exclusion_reasons", [])
+        cbr_ex = [x for x in ex_reasons if x.get("metric_code") == "consumer_sentiment_index"]
+        assert len(cbr_ex) == 1
+        assert cbr_ex[0]["excluded_reason"] == "published_after_report_date"
+
+        # On publication date (2026-07-31), standard 7-day window applies and signal IS selected
+        res_pub_day = service.get_external_context(report_date=date(2026, 7, 31), diagnostic=True)
+        assert len(res_pub_day.signals) == 1
+        assert res_pub_day.external_context_status == "signals_available"

@@ -16,6 +16,7 @@ from src.db.session import session_scope
 from src.db.models import Base, ExternalContextMetric, ExternalContextEvent
 from src.services.external_context.service import ExternalContextService
 from src.mcp_server.wb_daily_operational_summary_format import _build_external_context_lines
+from src.mcp_server.schemas import WbDailyOperationalSummaryResponse
 
 def run_demo():
     engine = create_db_engine("sqlite:///:memory:")
@@ -79,39 +80,49 @@ def run_demo():
     with session_scope(engine) as session:
         service = ExternalContextService(session)
 
-        # 1. Day 0 of publication (15.07.2026)
-        res_d0 = service.get_external_context(date(2026, 7, 15), diagnostic=True)
-        print("=== 1. Дата публикации (15.07.2026) ===")
+        # 1. Signals available with category-matched Wordstat
+        cat_trends = {"womens_tshirts": {"change_pct": Decimal("-8.0")}}
+        res_d0 = service.get_external_context(date(2026, 7, 15), category_sales_trends=cat_trends, diagnostic=True)
+        print("=== 1. Сигналы есть (signals_available) ===")
+        print("External Context Status:", res_d0.external_context_status)
         print("Сигналы:", [s.interpretation for s in res_d0.signals])
 
-        # 2. Day +1 (16.07.2026)
-        res_d1 = service.get_external_context(date(2026, 7, 16))
-        print("\n=== 2. Следующий день (16.07.2026) ===")
-        print("Сигналы:", [s.interpretation for s in res_d1.signals])
-
-        # 3. Day +7 after publication (22.07.2026)
-        res_d7 = service.get_external_context(date(2026, 7, 22))
-        print("\n=== 3. 7-й день после публикации (22.07.2026) ===")
-        print("Сигналы:", [s.interpretation for s in res_d7.signals])
-
-        # 4. Day +8 after publication (23.07.2026) - window expired
-        res_d8 = service.get_external_context(date(2026, 7, 23))
-        print("\n=== 4. 8-й день после публикации (23.07.2026) - окно истекло ===")
+        # 2. No significant signals
+        res_d8 = service.get_external_context(date(2026, 7, 23), diagnostic=True)
+        print("\n=== 2. Новых значимых сигналов нет (no_significant_signals) ===")
+        print("External Context Status:", res_d8.external_context_status)
         print("Сигналы:", [s.interpretation for s in res_d8.signals])
-        print("Статус сводки:", res_d8.status)
+        from src.mcp_server.schemas import WbDailyOperationalReportWindowResponse, WbDailyOperationalHighlightsResponse, WbDailyOperationalDiagnosticsResponse
+        resp_obj = WbDailyOperationalSummaryResponse(
+            formula_version="v1",
+            report_window=WbDailyOperationalReportWindowResponse(
+                report_date=date(2026, 7, 23),
+                compare_date=date(2026, 7, 22),
+                trend_current_from=date(2026, 7, 17),
+                trend_current_to=date(2026, 7, 23),
+                trend_previous_from=date(2026, 7, 10),
+                trend_previous_to=date(2026, 7, 16),
+                report_date_source="requested"
+            ),
+            requested_options={"mode": "full"},
+            source_freshness=[],
+            sections=[],
+            highlights=WbDailyOperationalHighlightsResponse(worse=[], better=[], priority_checks=[]),
+            diagnostics=WbDailyOperationalDiagnosticsResponse(included_sections=[], partial_sections=[], excluded_sections=[], query_count=0, formula_version="v1"),
+            article_analysis=[],
+            business_priorities=[],
+            ranked_signals=[],
+            data_anomalies=[],
+            analysis_summary={},
+            external_context=res_d8.model_dump()
+        )
+        print("Строки отчёта:", _build_external_context_lines(resp_obj))
 
-        # 5. Diagnostic query detail for Sentiment Index 115.2
-        print("\n=== 5. Structured Payload & Diagnostic Detail (Индекс 115,2 пункта) ===")
-        sig_sentiment = res_d0.signals[0]
-        print("Metric Code:", sig_sentiment.metric_code)
-        print("Current Value:", sig_sentiment.current_value)
-        print("Previous Value:", sig_sentiment.previous_value)
-        print("Change Value:", sig_sentiment.change_value)
-        print("Published At:", sig_sentiment.published_at)
-        print("Fresh Until:", sig_sentiment.fresh_until)
-        print("Neutral Level:", sig_sentiment.neutral_level)
-        print("Interpretation:", sig_sentiment.interpretation)
-        print("Diagnostics:", res_d0.diagnostics)
+        # 3. Diagnostic Detail
+        print("\n=== 3. Structured Diagnostics ===")
+        print("Sources Checked:", res_d0.diagnostics.get("sources_checked"))
+        print("Candidate Count:", res_d0.diagnostics.get("candidate_count"))
+        print("Excluded Count:", res_d0.diagnostics.get("excluded_count"))
 
 if __name__ == "__main__":
     run_demo()
