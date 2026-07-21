@@ -777,38 +777,60 @@ def build_scenario_section(
     return WbDailyOperationalSectionResponse(key="scenario", title=SECTION_TITLES["scenario"], status="OK", summary=summary, notes=["\u0420\u0430\u0437\u0434\u0435\u043b \u043d\u0435 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430 \u043e\u0431\u043e\u0440\u043e\u0442\u0430 \u0438\u043b\u0438 \u043f\u0440\u0438\u0431\u044b\u043b\u0438 \u0438 \u043e\u043f\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043d\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b."])
 
 
-def _calculate_category_sales_trends(extended_context: dict[str, Any], window: Any) -> dict[str, dict[str, Any]]:
+def _calculate_category_sales_trends(session: Session, window: Any) -> dict[str, dict[str, Any]]:
     from src.services.external_context.category_config import CATEGORIES_CONFIG
     from decimal import Decimal
-    
+    from sqlalchemy import text
+
+    sql = text("""
+        select
+            subject,
+            sum(case when report_date >= :cur_from and report_date <= :cur_to then order_count else 0 end) as current_orders,
+            sum(case when report_date >= :prev_from and report_date <= :prev_to then order_count else 0 end) as previous_orders
+        from mart_total_report
+        where report_date >= :prev_from and report_date <= :cur_to
+        group by subject
+    """)
+
+    rows = session.execute(sql, {
+        "cur_from": window.trend_current_from,
+        "cur_to": window.trend_current_to,
+        "prev_from": window.trend_previous_from,
+        "prev_to": window.trend_previous_to,
+    }).mappings().all()
+
+    subject_orders = {
+        row["subject"]: {
+            "current_orders": Decimal(str(row["current_orders"] or 0)),
+            "previous_orders": Decimal(str(row["previous_orders"] or 0)),
+        }
+        for row in rows if row["subject"] is not None
+    }
+
     trends = {}
-    article_rows = extended_context.get("article_context") or []
-    
     for cat in CATEGORIES_CONFIG:
         code = cat["category_code"]
-        subjects = set(cat["related_subjects"])
-        
-        current_sum = Decimal("0")
-        previous_sum = Decimal("0")
-        
-        for row in article_rows:
-            subj = row.get("subject")
-            if subj in subjects:
-                row_date = row.get("report_date")
-                order_sum = Decimal(str(row.get("order_sum") or "0"))
-                if window.trend_current_from <= row_date <= window.trend_current_to:
-                    current_sum += order_sum
-                elif window.trend_previous_from <= row_date <= window.trend_previous_to:
-                    previous_sum += order_sum
-                    
-        change_pct = Decimal("0")
-        if previous_sum > 0:
-            change_pct = ((current_sum - previous_sum) / previous_sum) * 100
-            
+        subjects = cat["related_subjects"]
+
+        cur_sum = Decimal("0")
+        prev_sum = Decimal("0")
+
+        for subj in subjects:
+            if subj in subject_orders:
+                cur_sum += subject_orders[subj]["current_orders"]
+                prev_sum += subject_orders[subj]["previous_orders"]
+
+        change_pct = None
+        if prev_sum > Decimal("0"):
+            change_pct = ((cur_sum - prev_sum) / prev_sum) * Decimal("100")
+
         trends[code] = {
-            "current_value": current_sum,
-            "previous_value": previous_sum,
-            "change_pct": change_pct
+            "subject": subjects[0] if len(subjects) == 1 else ", ".join(subjects),
+            "current_value": cur_sum,
+            "previous_value": prev_sum,
+            "current_orders": cur_sum,
+            "previous_orders": prev_sum,
+            "change_pct": change_pct,
         }
     return trends
 
@@ -866,7 +888,7 @@ def build_operational_summary(
 
     external_context: dict[str, Any] = {}
     if external_context_enabled and external_context_service is not None:
-        category_trends = _calculate_category_sales_trends(extended_context, window)
+        category_trends = _calculate_category_sales_trends(session, window)
         external_context = _run_safe_additional_block(
             stage_timings=stage_timings,
             stage_name="external_context",

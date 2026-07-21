@@ -32,8 +32,8 @@ def _format_decimal(val: Any, decimals: int = 1) -> str:
 
 
 CAT_DATIVE_LOWER = {
-    "womens_underwear": "женскому белью",
-    "childrens_underwear": "детскому белью",
+    "womens_underwear": "женским трусам",
+    "childrens_underwear": "детским трусам",
     "womens_tshirts": "женским футболкам",
     "childrens_tshirts": "детским футболкам",
 }
@@ -167,8 +167,8 @@ class ExternalContextService:
 
                     # Check category sales trend matching ONLY for the SAME category
                     sales_trend = category_sales_trends.get(cat_code) if (category_sales_trends and isinstance(category_sales_trends, dict)) else None
-                    comparison_available = sales_trend is not None
-                    wb_change_pct = Decimal(str(sales_trend.get("change_pct"))) if (comparison_available and sales_trend.get("change_pct") is not None) else None
+                    wb_change_pct = Decimal(str(sales_trend.get("change_pct"))) if (sales_trend and sales_trend.get("change_pct") is not None) else None
+                    comparison_available = wb_change_pct is not None
 
                     ext_change = float(change_pct)
                     ext_dir_word = "вырос" if ext_change > 0 else "снизился"

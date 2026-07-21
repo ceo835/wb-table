@@ -850,3 +850,62 @@ def test_four_fixed_categories_wordstat_loader_and_signals(clean_external_db, te
         # Weak change (childrens_underwear 5%) must be excluded
         assert not any(s.category == "childrens_underwear" for s in res.signals)
 
+
+# 21. Category with previous_orders = 0 and change_pct = None test for comparison_available = False
+def test_category_with_none_change_pct_diagnostic_flag(clean_external_db, test_settings, shared_engine) -> None:
+    pub_dt = datetime(2026, 7, 15, 10, 0)
+    with session_scope(shared_engine) as session:
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_childrens_tshirts",
+            metric_name="Поисковый спрос: Детские футболки",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("8537"),
+            previous_value=Decimal("6292"),
+            change_pct=Decimal("35.7"),
+            category="childrens_tshirts",
+            data_status="ok"
+        ))
+        session.add(ExternalContextMetric(
+            source="yandex_cloud_wordstat",
+            metric_code="search_demand_womens_tshirts",
+            metric_name="Поисковый спрос: Женские футболки",
+            period_start=date(2026, 7, 13),
+            period_end=date(2026, 7, 19),
+            published_at=pub_dt,
+            value=Decimal("59069"),
+            previous_value=Decimal("42759"),
+            change_pct=Decimal("38.1"),
+            category="womens_tshirts",
+            data_status="ok"
+        ))
+        session.commit()
+
+    with session_scope(shared_engine) as session:
+        service = ExternalContextService(session, test_settings)
+        # childrens_tshirts has previous_orders = 0 and change_pct = None
+        # womens_tshirts has previous_orders = 3809 and change_pct = -26.59
+        cat_trends = {
+            "childrens_tshirts": {"subject": "Футболки детские", "current_orders": Decimal("0"), "previous_orders": Decimal("0"), "change_pct": None},
+            "womens_tshirts": {"subject": "Футболки", "current_orders": Decimal("2796"), "previous_orders": Decimal("3809"), "change_pct": Decimal("-26.59")},
+        }
+
+        res = service.get_external_context(report_date=date(2026, 7, 19), category_sales_trends=cat_trends, diagnostic=True)
+
+        diags = {d["wordstat_category"]: d for d in res.diagnostics.get("candidate_evaluations", []) if "wordstat_category" in d}
+
+        # childrens_tshirts: wb_change_pct is None -> comparison_available = False, comparison_direction = "standalone"
+        child_diag = diags["childrens_tshirts"]
+        assert child_diag["wb_change_pct"] is None
+        assert child_diag["comparison_available"] is False
+        assert child_diag["comparison_direction"] == "standalone"
+
+        # womens_tshirts: wb_change_pct is numeric -> comparison_available = True
+        women_diag = diags["womens_tshirts"]
+        assert women_diag["wb_change_pct"] == -26.59
+        assert women_diag["comparison_available"] is True
+        assert women_diag["comparison_direction"] == "divergent"
+
+
