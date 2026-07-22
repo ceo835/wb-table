@@ -61,6 +61,14 @@ from src.db.models import (
     FactWbStatisticsOrderSizeDay,
     FactOzonPriceSnapshot,
 )
+from src.services.dashboard_milestones import (
+    DEFAULT_MILESTONE_TYPE,
+    MILESTONE_TYPES,
+    create_milestone,
+    deactivate_milestone,
+    list_milestones,
+    update_milestone,
+)
 from src.db.product_query_group_backfill import (
     QUERY_GROUP_UNKNOWN,
     QUERY_GROUP_VALUES as PRODUCT_QUERY_GROUP_VALUES,
@@ -8790,6 +8798,152 @@ def build_user_friendly_chart(
     return alt.layer(*layers).resolve_scale(color="shared").properties(height=320)
 
 
+def build_milestones_altair_layer(milestones: list[dict[str, Any]]) -> alt.Chart | None:
+    if not milestones:
+        return None
+    rows = []
+    for m in milestones:
+        rows.append({
+            "milestone_date": pd.to_datetime(m["milestone_date"]),
+            "milestone_type_label": m.get("milestone_type_label") or m.get("milestone_type", ""),
+            "title": m.get("title", ""),
+            "comment": m.get("comment") or "—",
+            "milestone_type": m.get("milestone_type", ""),
+        })
+    df_m = pd.DataFrame(rows)
+    if df_m.empty:
+        return None
+
+    color_scale = alt.Scale(
+        domain=["price_discount", "advertising", "stock_supply", "content", "technical", "other"],
+        range=["#d97706", "#ec4899", "#10b981", "#8b5cf6", "#ef4444", "#6b7280"],
+    )
+
+    milestone_rules = alt.Chart(df_m).mark_rule(
+        strokeDash=[4, 4],
+        strokeWidth=2,
+    ).encode(
+        x=alt.X("milestone_date:T"),
+        color=alt.Color("milestone_type:N", scale=color_scale, legend=alt.Legend(title="Тип вехи")),
+        tooltip=[
+            alt.Tooltip("milestone_date:T", title="Дата вехи", format="%d.%m.%Y"),
+            alt.Tooltip("milestone_type_label:N", title="Тип вехи"),
+            alt.Tooltip("title:N", title="Название"),
+            alt.Tooltip("comment:N", title="Комментарий"),
+        ],
+    )
+    return milestone_rules
+
+
+def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
+    st.markdown("#### Управление вехами")
+    min_date = (
+        chart_df["report_date"].dropna().min()
+        if "report_date" in chart_df.columns and not chart_df["report_date"].dropna().empty
+        else datetime.now().date()
+    )
+    max_date = (
+        chart_df["report_date"].dropna().max()
+        if "report_date" in chart_df.columns and not chart_df["report_date"].dropna().empty
+        else datetime.now().date()
+    )
+
+    with st.expander("➕ Добавить веху", expanded=False):
+        with st.form(key="add_milestone_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                new_date = st.date_input("Дата вехи", value=max_date)
+                new_type = st.selectbox(
+                    "Тип вехи",
+                    options=list(MILESTONE_TYPES.keys()),
+                    format_func=lambda x: MILESTONE_TYPES[x],
+                    index=0,
+                )
+            with c2:
+                new_title = st.text_input("Название вехи", placeholder="Например, Снижение цены на 10%")
+                new_comment = st.text_input("Комментарий (необязательно)", placeholder="Детали изменения...")
+            submitted = st.form_submit_button("Сохранить веху")
+            if submitted:
+                if not new_title.strip():
+                    st.error("Укажите название вехи!")
+                else:
+                    try:
+                        create_milestone(
+                            milestone_date=new_date,
+                            milestone_type=new_type,
+                            title=new_title,
+                            comment=new_comment,
+                        )
+                        st.success("Веха сохранена!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка при сохранении: {e}")
+
+    try:
+        period_milestones = list_milestones(date_from=min_date, date_to=max_date, include_inactive=False)
+    except Exception:
+        logger.exception("Не удалось загрузить вехи кабинета для блока управления")
+        period_milestones = []
+
+    if not period_milestones:
+        st.caption("За выбранный период вех нет.")
+    else:
+        for m in period_milestones:
+            m_id = m["id"]
+            m_date_str = m["milestone_date"].strftime("%d.%m.%Y")
+            m_type_label = m["milestone_type_label"]
+            m_title = m["title"]
+            m_comment = f" ({m['comment']})" if m.get("comment") else ""
+
+            col_info, col_edit, col_hide = st.columns([6, 1, 1])
+            with col_info:
+                st.markdown(f"**{m_date_str}** — **[{m_type_label}]** {m_title}{m_comment}")
+            with col_edit:
+                if st.button("Изменить", key=f"edit_btn_m_{m_id}"):
+                    st.session_state[f"editing_m_{m_id}"] = not st.session_state.get(f"editing_m_{m_id}", False)
+            with col_hide:
+                if st.button("Скрыть", key=f"hide_btn_m_{m_id}"):
+                    deactivate_milestone(m_id)
+                    st.rerun()
+
+            if st.session_state.get(f"editing_m_{m_id}", False):
+                with st.form(key=f"edit_m_form_{m_id}"):
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        edit_date = st.date_input("Дата вехи", value=m["milestone_date"], key=f"edit_date_{m_id}")
+                        type_keys = list(MILESTONE_TYPES.keys())
+                        type_idx = type_keys.index(m["milestone_type"]) if m["milestone_type"] in type_keys else 0
+                        edit_type = st.selectbox(
+                            "Тип вехи",
+                            options=type_keys,
+                            format_func=lambda x: MILESTONE_TYPES[x],
+                            index=type_idx,
+                            key=f"edit_type_{m_id}",
+                        )
+                    with ec2:
+                        edit_title = st.text_input("Название", value=m["title"], key=f"edit_title_{m_id}")
+                        edit_comment = st.text_input("Комментарий", value=m.get("comment") or "", key=f"edit_comment_{m_id}")
+
+                    save_edit = st.form_submit_button("Сохранить изменения")
+                    if save_edit:
+                        if not edit_title.strip():
+                            st.error("Название не может быть пустым!")
+                        else:
+                            try:
+                                update_milestone(
+                                    milestone_id=m_id,
+                                    milestone_date=edit_date,
+                                    milestone_type=edit_type,
+                                    title=edit_title,
+                                    comment=edit_comment,
+                                )
+                                st.session_state[f"editing_m_{m_id}"] = False
+                                st.success("Изменения сохранены!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Ошибка при обновлении: {e}")
+
+
 def format_chart_kpi_value(value: float | None, digits: int = 1, suffix: str = "") -> str:
     if value is None or pd.isna(value):
         return "—"
@@ -9067,176 +9221,6 @@ def load_dim_product_size_from_db(nm_ids: tuple[int, ...], cache_buster: str | N
         if column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
     return df
-
-
-def render_charts_tab(
-    filtered: pd.DataFrame,
-    preselected_product_label: str | None,
-    option_map: dict[str, dict[str, object]],
-) -> None:
-    st.subheader("Корзины и эффективность")
-    st.caption("Динамика корзин, стоимости корзины и CPO по выбранному периоду.")
-
-    aggregation_level = st.radio("Уровень агрегации", options=["Кабинет", "Артикул"], horizontal=True)
-    selected_product_label = preselected_product_label
-    if aggregation_level == "Артикул":
-        product_options = list(option_map.keys())
-        if not product_options:
-            st.info("Нет данных за выбранный период.")
-            return
-        default_index = product_options.index(preselected_product_label) if preselected_product_label in product_options else 0
-        selected_product_label = st.selectbox("Артикул", options=product_options, index=default_index)
-
-    scope_rows, context = build_chart_scope_rows(filtered, aggregation_level, selected_product_label, option_map)
-    chart_df = build_chart_metrics_by_date(scope_rows)
-    if chart_df.empty:
-        st.info("Нет данных за выбранный период.")
-        return
-
-    st.caption(
-        "Важно: рекламные корзины и рекламные заказы могут быть доступны только до позавчера. "
-        "Поэтому стоимость корзины РК и CPO РК считаются только по датам с подтверждённой рекламной статистикой. "
-        "Итоговые корзины, итоговые заказы и расходы могут отображаться за вчера."
-    )
-
-    if aggregation_level == "Кабинет":
-        st.info("Графики построены по сумме всех товаров, попавших в текущие фильтры периода.")
-    else:
-        article_caption = f"{fmt_text(context.get('supplier_article'))} | {fmt_text(context.get('nm_id'))} | {fmt_text(context.get('title'))}"
-        st.caption(f"Выбранный товар: {article_caption}")
-
-    period_summary = build_chart_period_summary(chart_df)
-    total_carts = period_summary["total_carts"]
-    ad_carts = period_summary["ad_carts"]
-    total_orders = period_summary["total_orders"]
-    ad_orders = period_summary["ad_orders"]
-    ad_spend = period_summary["ad_spend_total"]
-    total_cart_cost = period_summary["total_cart_cost"]
-    ad_cart_cost = period_summary["ad_cart_cost"]
-    total_cpo = period_summary["total_cpo"]
-    ad_cpo = period_summary["ad_cpo"]
-
-    kpi_cols = st.columns(6)
-    with kpi_cols[0]:
-        render_chart_kpi_card(label="Итоговые корзины", value=total_carts, digits=0)
-    with kpi_cols[1]:
-        render_chart_kpi_card(label="Корзины РК", value=ad_carts, digits=0)
-    with kpi_cols[2]:
-        render_chart_kpi_card(
-            label="Стоимость корзины ИТОГО",
-            value=total_cart_cost,
-            digits=1,
-            suffix=" руб.",
-            threshold=CHART_THRESHOLD_CART_COST,
-        )
-    with kpi_cols[3]:
-        if ad_cart_cost is None and (period_summary["has_lagged_ad_attribution"] or period_summary["has_partial_ad_attribution"]):
-            reason = "Корзины РК ещё не доступны" if period_summary["has_lagged_ad_attribution"] else "Рекламные данные частичные"
-            render_not_applicable_kpi_card(label="Стоимость корзины РК", reason=reason)
-        else:
-            render_chart_kpi_card(
-                label="Стоимость корзины РК",
-                value=ad_cart_cost,
-                digits=1,
-                suffix=" руб.",
-                threshold=CHART_THRESHOLD_CART_COST,
-            )
-    with kpi_cols[4]:
-        render_chart_kpi_card(
-            label="CPO ИТОГО",
-            value=total_cpo,
-            digits=1,
-            suffix=" руб.",
-            threshold=CHART_THRESHOLD_CPO,
-        )
-    with kpi_cols[5]:
-        if ad_cpo is None and (period_summary["has_lagged_ad_attribution"] or period_summary["has_partial_ad_attribution"]):
-            reason = "Заказы РК ещё не доступны" if period_summary["has_lagged_ad_attribution"] else "Рекламные данные частичные"
-            render_not_applicable_kpi_card(label="CPO РК", reason=reason)
-        else:
-            render_chart_kpi_card(
-                label="CPO РК",
-                value=ad_cpo,
-                digits=1,
-                suffix=" руб.",
-                threshold=CHART_THRESHOLD_CPO,
-            )
-    st.caption(
-        format_ad_kpi_period_caption(
-            period_summary.get("ad_kpi_period_start"),
-            period_summary.get("ad_kpi_period_end"),
-        )
-    )
-
-    latest_report_date = chart_df["report_date"].dropna().max() if "report_date" in chart_df.columns else None
-    if latest_report_date and latest_report_date > (datetime.now().date() - timedelta(days=2)):
-        st.warning("Корзины РК за последние 1–2 дня могут быть неполными.")
-
-    st.markdown("### Динамика корзин")
-    st.caption("Итоговые корзины и корзины из рекламы по дням.")
-    carts_chart = build_user_friendly_chart(
-        chart_df=chart_df,
-        series_map={"cart_count": "Итоговые корзины", "ad_atbs_total": "Корзины РК"},
-        y_title="Корзины, шт.",
-        tooltip_value_title="Значение, шт.",
-        value_format=".0f",
-        line_colors=["#2563eb", "#f97316"],
-    )
-    if carts_chart is None:
-        st.info("Нет данных за выбранный период.")
-    else:
-        st.altair_chart(carts_chart, width="stretch")
-
-    st.markdown("### Стоимость корзины")
-    st.caption("Сколько рублей рекламного расхода приходится на одну корзину.")
-    cart_cost_chart = build_user_friendly_chart(
-        chart_df=chart_df,
-        series_map={"total_cart_cost": "Стоимость корзины ИТОГО", "ad_cart_cost": "Стоимость корзины РК"},
-        y_title="Стоимость, руб.",
-        tooltip_value_title="Стоимость, руб.",
-        value_format=".1f",
-        line_colors=["#0f766e", "#f59e0b"],
-        threshold=CHART_THRESHOLD_CART_COST,
-        threshold_label="Порог 35 руб.",
-    )
-    if cart_cost_chart is None:
-        st.info("Нет данных за выбранный период.")
-    else:
-        st.altair_chart(cart_cost_chart, width="stretch")
-
-    st.markdown("### CPO")
-    st.caption("Стоимость одного заказа.")
-    cpo_chart = build_user_friendly_chart(
-        chart_df=chart_df,
-        series_map={"total_cpo": "CPO ИТОГО", "ad_cpo": "CPO РК"},
-        y_title="CPO, руб.",
-        tooltip_value_title="CPO, руб.",
-        value_format=".1f",
-        line_colors=["#7c3aed", "#ef4444"],
-        threshold=CHART_THRESHOLD_CPO,
-        threshold_label="Порог 150 руб.",
-    )
-    if cpo_chart is None:
-        st.info("Нет данных за выбранный период.")
-    else:
-        st.altair_chart(cpo_chart, width="stretch")
-
-    st.markdown("### Превышения порогов")
-    breaches_df = build_threshold_breaches_table(chart_df, context)
-    if breaches_df.empty:
-        st.success("Превышений по выбранному периоду нет.")
-    else:
-        safe_st_dataframe(
-            breaches_df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Дата": st.column_config.DateColumn("Дата"),
-                "Артикул WB": st.column_config.NumberColumn("Артикул WB", format="%d"),
-                "Значение": st.column_config.NumberColumn("Значение", format="%.1f"),
-                "Порог": st.column_config.NumberColumn("Порог", format="%.1f"),
-            },
-        )
 
 
 def render_not_applicable_kpi_card(*, label: str, reason: str = "Не применяется") -> None:
@@ -9688,6 +9672,19 @@ def render_efficiency_charts(
     elif period_summary["has_partial_ad_attribution"]:
         st.caption("Статус рекламной атрибуции: AD_DATA_PARTIAL")
 
+    show_milestones = True
+    milestones_list = []
+    if aggregation_level == CHART_LEVEL_CABINET:
+        show_milestones = st.toggle("Показывать вехи", value=True, key="toggle_show_milestones")
+        if show_milestones and "report_date" in chart_df.columns and not chart_df["report_date"].dropna().empty:
+            min_date = chart_df["report_date"].dropna().min()
+            max_date = chart_df["report_date"].dropna().max()
+            try:
+                milestones_list = list_milestones(date_from=min_date, date_to=max_date, include_inactive=False)
+            except Exception:
+                logger.exception("Не удалось загрузить вехи кабинета для графика")
+                milestones_list = []
+
     st.markdown("### Динамика корзин")
     st.caption(
         "Итоговые корзины и корзины из рекламы по дням."
@@ -9705,7 +9702,14 @@ def render_efficiency_charts(
     if carts_chart is None:
         st.info("Нет данных за выбранный период.")
     else:
+        if aggregation_level == CHART_LEVEL_CABINET and show_milestones and milestones_list:
+            m_layer = build_milestones_altair_layer(milestones_list)
+            if m_layer is not None:
+                carts_chart = alt.layer(carts_chart, m_layer).resolve_scale(color="independent")
         st.altair_chart(carts_chart, width="stretch")
+
+    if aggregation_level == CHART_LEVEL_CABINET:
+        render_milestones_management_block(chart_df)
 
     st.markdown("### Стоимость корзины")
     st.caption(
