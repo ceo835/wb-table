@@ -8810,10 +8810,15 @@ MILESTONE_TYPE_COLORS: dict[str, str] = {
 
 def build_milestones_altair_layer(
     milestones: list[dict[str, Any]],
-    y_pos: float = 100.0,
+    max_y_val: float = 10.0,
 ) -> alt.Chart | None:
     if not milestones:
         return None
+
+    y_diamond = max_y_val * 1.035
+    y_tick_start = max_y_val * 1.00
+    y_tick_end = max_y_val * 1.025
+
     rows = []
     for m in milestones:
         label = m.get("milestone_type_label") or m.get("milestone_type", "")
@@ -8823,7 +8828,9 @@ def build_milestones_altair_layer(
             "title": m.get("title", ""),
             "comment": m.get("comment") or "—",
             "milestone_type": m.get("milestone_type", ""),
-            "y_pos": y_pos,
+            "y_diamond": y_diamond,
+            "y_tick_start": y_tick_start,
+            "y_tick_end": y_tick_end,
         })
     df_m = pd.DataFrame(rows)
     if df_m.empty:
@@ -8837,13 +8844,23 @@ def build_milestones_altair_layer(
         range=range_colors,
     )
 
+    indicator_ticks = alt.Chart(df_m).mark_rule(
+        strokeDash=[2, 2],
+        strokeWidth=1.5,
+    ).encode(
+        x=alt.X("milestone_date:T"),
+        y=alt.Y("y_tick_start:Q"),
+        y2=alt.Y2("y_tick_end:Q"),
+        color=alt.Color("milestone_type_label:N", scale=color_scale, legend=None),
+    )
+
     milestone_points = alt.Chart(df_m).mark_point(
         filled=True,
-        size=150,
+        size=140,
         shape="diamond",
     ).encode(
         x=alt.X("milestone_date:T"),
-        y=alt.Y("y_pos:Q"),
+        y=alt.Y("y_diamond:Q"),
         color=alt.Color("milestone_type_label:N", scale=color_scale, legend=alt.Legend(title="Тип вехи")),
         tooltip=[
             alt.Tooltip("milestone_date:T", title="Дата вехи", format="%d.%m.%Y"),
@@ -8852,7 +8869,7 @@ def build_milestones_altair_layer(
             alt.Tooltip("comment:N", title="Комментарий"),
         ],
     )
-    return milestone_points
+    return alt.layer(indicator_ticks, milestone_points)
 
 
 def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
@@ -9733,8 +9750,7 @@ def render_efficiency_charts(
                 a_max = pd.to_numeric(chart_df["ad_atbs_total"], errors="coerce").max()
                 if not pd.isna(a_max) and float(a_max) > max_y_val:
                     max_y_val = float(a_max)
-            y_marker_pos = max_y_val * 1.05
-            m_layer = build_milestones_altair_layer(milestones_list, y_pos=y_marker_pos)
+            m_layer = build_milestones_altair_layer(milestones_list, max_y_val=max_y_val)
             if m_layer is not None:
                 carts_chart = alt.layer(carts_chart, m_layer).resolve_scale(color="independent")
         st.altair_chart(carts_chart, width="stretch")

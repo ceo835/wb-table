@@ -156,14 +156,24 @@ def test_dynamic_legend_and_marker_layer():
         },
     ]
 
-    chart = build_milestones_altair_layer(milestones, y_pos=150.0)
+    chart = build_milestones_altair_layer(milestones, max_y_val=150.0)
     assert chart is not None
     chart_dict = chart.to_dict()
-    assert chart_dict["mark"]["type"] == "point"
-    assert chart_dict["mark"]["shape"] == "diamond"
-    assert chart_dict["mark"]["filled"] is True
+    assert "layer" in chart_dict
+    assert len(chart_dict["layer"]) == 2
 
-    color_scale = chart_dict["encoding"]["color"]["scale"]
+    # Layer 0: Short indicator ticks
+    tick_layer = chart_dict["layer"][0]
+    assert tick_layer["mark"]["type"] == "rule"
+    assert tick_layer["mark"]["strokeDash"] == [2, 2]
+
+    # Layer 1: Diamond markers
+    point_layer = chart_dict["layer"][1]
+    assert point_layer["mark"]["type"] == "point"
+    assert point_layer["mark"]["shape"] == "diamond"
+    assert point_layer["mark"]["filled"] is True
+
+    color_scale = point_layer["encoding"]["color"]["scale"]
     assert color_scale["domain"] == ["Цена / скидка", "Реклама"]
     assert "Поставка / остатки" not in color_scale["domain"]
     assert "Карточка / контент" not in color_scale["domain"]
