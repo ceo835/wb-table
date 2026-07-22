@@ -14,6 +14,7 @@ from src.db.connection import (
 )
 from src.db.models import (
     ApiLoadLog,
+    DashboardMilestone,
     DimCampaign,
     DimDate,
     DimProduct,
@@ -53,6 +54,7 @@ def test_db_models_import():
     assert SettingsLostProfitWarehouseArea.__tablename__ == "settings_lost_profit_warehouse_areas"
     assert SettingsLostProfitQueryGroupCoefficient.__tablename__ == "settings_lost_profit_query_group_coefficients"
     assert DimProductSize.__tablename__ == "dim_product_size"
+    assert DashboardMilestone.__tablename__ == "dashboard_milestones"
 
 
 def test_db_metadata_contains_expected_tables():
@@ -84,6 +86,7 @@ def test_db_metadata_contains_expected_tables():
         "fact_ivan_ads_wide_day",
         "fact_card_comparison_metric",
         "mart_total_report",
+        "dashboard_milestones",
     }
     assert expected_tables.issubset(set(Base.metadata.tables))
 
