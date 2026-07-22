@@ -9725,19 +9725,6 @@ def render_efficiency_charts(
         if not is_conversion_level
         else "Корзины РК по выбранному типу WB / конверсии."
     )
-    m_layer = None
-    if aggregation_level == CHART_LEVEL_CABINET and show_milestones and milestones_list:
-        max_y_val = 10.0
-        if "cart_count" in chart_df.columns:
-            c_max = pd.to_numeric(chart_df["cart_count"], errors="coerce").max()
-            if not pd.isna(c_max) and float(c_max) > max_y_val:
-                max_y_val = float(c_max)
-        if "ad_atbs_total" in chart_df.columns:
-            a_max = pd.to_numeric(chart_df["ad_atbs_total"], errors="coerce").max()
-            if not pd.isna(a_max) and float(a_max) > max_y_val:
-                max_y_val = float(a_max)
-        m_layer = build_milestones_altair_layer(milestones_list, max_y_val=max_y_val)
-
     carts_chart = build_user_friendly_chart(
         chart_df=chart_df,
         series_map=build_ad_carts_chart_series_map(is_conversion_level=is_conversion_level),
@@ -9745,11 +9732,23 @@ def render_efficiency_charts(
         tooltip_value_title="Значение, шт.",
         value_format=".0f",
         line_colors=["#2563eb", "#f97316"],
-        extra_layer=m_layer,
     )
     if carts_chart is None:
         st.info("Нет данных за выбранный период.")
     else:
+        if aggregation_level == CHART_LEVEL_CABINET and show_milestones and milestones_list:
+            max_y_val = 10.0
+            if "cart_count" in chart_df.columns:
+                c_max = pd.to_numeric(chart_df["cart_count"], errors="coerce").max()
+                if not pd.isna(c_max) and float(c_max) > max_y_val:
+                    max_y_val = float(c_max)
+            if "ad_atbs_total" in chart_df.columns:
+                a_max = pd.to_numeric(chart_df["ad_atbs_total"], errors="coerce").max()
+                if not pd.isna(a_max) and float(a_max) > max_y_val:
+                    max_y_val = float(a_max)
+            m_layer = build_milestones_altair_layer(milestones_list, max_y_val=max_y_val)
+            if m_layer is not None:
+                carts_chart = alt.layer(carts_chart, m_layer).resolve_scale(color="independent")
         st.altair_chart(carts_chart, width="stretch")
 
     if aggregation_level == CHART_LEVEL_CABINET:
