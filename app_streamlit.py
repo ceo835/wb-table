@@ -8816,8 +8816,6 @@ def build_milestones_altair_layer(
         return None
 
     y_diamond = max_y_val * 1.035
-    y_tick_start = max_y_val * 1.00
-    y_tick_end = max_y_val * 1.025
 
     rows = []
     for m in milestones:
@@ -8829,8 +8827,6 @@ def build_milestones_altair_layer(
             "comment": m.get("comment") or "—",
             "milestone_type": m.get("milestone_type", ""),
             "y_diamond": y_diamond,
-            "y_tick_start": y_tick_start,
-            "y_tick_end": y_tick_end,
         })
     df_m = pd.DataFrame(rows)
     if df_m.empty:
@@ -8845,12 +8841,11 @@ def build_milestones_altair_layer(
     )
 
     indicator_ticks = alt.Chart(df_m).mark_rule(
-        strokeDash=[2, 2],
+        strokeDash=[3, 3],
         strokeWidth=1.5,
     ).encode(
         x=alt.X("milestone_date:T"),
-        y=alt.Y("y_tick_start:Q"),
-        y2=alt.Y2("y_tick_end:Q"),
+        y=alt.Y("y_diamond:Q"),
         color=alt.Color("milestone_type_label:N", scale=color_scale, legend=None),
     )
 

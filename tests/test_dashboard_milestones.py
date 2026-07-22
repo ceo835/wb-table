@@ -162,10 +162,10 @@ def test_dynamic_legend_and_marker_layer():
     assert "layer" in chart_dict
     assert len(chart_dict["layer"]) == 2
 
-    # Layer 0: Short indicator ticks
+    # Layer 0: Vertical indicator rule
     tick_layer = chart_dict["layer"][0]
     assert tick_layer["mark"]["type"] == "rule"
-    assert tick_layer["mark"]["strokeDash"] == [2, 2]
+    assert tick_layer["mark"]["strokeDash"] == [3, 3]
 
     # Layer 1: Diamond markers
     point_layer = chart_dict["layer"][1]
