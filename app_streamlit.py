@@ -8296,6 +8296,83 @@ def apply_product_bands(filtered: pd.DataFrame) -> pd.DataFrame:
     return enriched.merge(band_df[["nm_id", "band_name"]], on="nm_id", how="left")
 
 
+def build_user_friendly_chart(
+    chart_df: pd.DataFrame,
+    series_map: dict[str, str],
+    y_title: str,
+    tooltip_value_title: str,
+    value_format: str,
+    line_colors: list[str],
+    threshold: float | None = None,
+    threshold_label: str | None = None,
+    extra_layer: alt.Chart | None = None,
+) -> alt.Chart | None:
+    series_df = build_chart_series_dataframe(chart_df, series_map, threshold=threshold)
+    if series_df.empty:
+        return None
+
+    base = alt.Chart(series_df).encode(
+        x=alt.X(
+            "report_date:T",
+            title="Дата",
+            axis=alt.Axis(format="%d.%m", labelAngle=0, tickCount=min(max(len(chart_df), 2), 10)),
+        ),
+        y=alt.Y(
+            "value:Q",
+            title=y_title,
+            axis=alt.Axis(format=value_format),
+            scale=alt.Scale(zero=True, nice=True),
+        ),
+        color=alt.Color(
+            "series:N",
+            title="Показатель",
+            scale=alt.Scale(domain=list(series_map.values()), range=line_colors[: len(series_map)]),
+        ),
+        tooltip=[
+            alt.Tooltip("report_date:T", title="Дата", format="%d.%m.%Y"),
+            alt.Tooltip("series:N", title="Показатель"),
+            alt.Tooltip("value:Q", title=tooltip_value_title, format=value_format),
+        ],
+    )
+
+    layers: list[alt.Chart] = [
+        base.mark_line(strokeWidth=3),
+        base.mark_circle(size=55),
+    ]
+
+    if extra_layer is not None:
+        layers.append(extra_layer)
+
+    if threshold is not None and threshold_label:
+        threshold_df = pd.DataFrame({"threshold": [threshold], "label": [threshold_label]})
+        layers.append(
+            alt.Chart(threshold_df).mark_rule(color="#dc2626", strokeDash=[6, 4]).encode(y="threshold:Q")
+        )
+        layers.append(
+            alt.Chart(threshold_df)
+            .mark_text(color="#dc2626", align="left", dx=8, dy=-6, fontSize=12)
+            .encode(x=alt.value(8), y="threshold:Q", text="label:N")
+        )
+        alert_df = series_df[series_df["is_alert"]].copy()
+        if not alert_df.empty:
+            layers.append(
+                alt.Chart(alert_df)
+                .mark_circle(size=90, color="#dc2626")
+                .encode(
+                    x=alt.X("report_date:T", title="Дата", axis=alt.Axis(format="%d.%m", labelAngle=0)),
+                    y=alt.Y("value:Q", title=y_title, axis=alt.Axis(format=value_format)),
+                    tooltip=[
+                        alt.Tooltip("report_date:T", title="Дата", format="%d.%m.%Y"),
+                        alt.Tooltip("series:N", title="Показатель"),
+                        alt.Tooltip("value:Q", title=tooltip_value_title, format=value_format),
+                    ],
+                )
+            )
+
+    resolve_mode = "independent" if extra_layer is not None else "shared"
+    return alt.layer(*layers).resolve_scale(color=resolve_mode).properties(height=320)
+
+
 def build_group_summary_table(
     filtered: pd.DataFrame,
     *,
@@ -9719,6 +9796,19 @@ def render_efficiency_charts(
         if not is_conversion_level
         else "Корзины РК по выбранному типу WB / конверсии."
     )
+    m_layer = None
+    if aggregation_level == CHART_LEVEL_CABINET and show_milestones and milestones_list:
+        max_y_val = 10.0
+        if "cart_count" in chart_df.columns:
+            c_max = pd.to_numeric(chart_df["cart_count"], errors="coerce").max()
+            if not pd.isna(c_max) and float(c_max) > max_y_val:
+                max_y_val = float(c_max)
+        if "ad_atbs_total" in chart_df.columns:
+            a_max = pd.to_numeric(chart_df["ad_atbs_total"], errors="coerce").max()
+            if not pd.isna(a_max) and float(a_max) > max_y_val:
+                max_y_val = float(a_max)
+        m_layer = build_milestones_altair_layer(milestones_list, max_y_val=max_y_val)
+
     carts_chart = build_user_friendly_chart(
         chart_df=chart_df,
         series_map=build_ad_carts_chart_series_map(is_conversion_level=is_conversion_level),
@@ -9726,23 +9816,11 @@ def render_efficiency_charts(
         tooltip_value_title="Значение, шт.",
         value_format=".0f",
         line_colors=["#2563eb", "#f97316"],
+        extra_layer=m_layer,
     )
     if carts_chart is None:
         st.info("Нет данных за выбранный период.")
     else:
-        if aggregation_level == CHART_LEVEL_CABINET and show_milestones and milestones_list:
-            max_y_val = 10.0
-            if "cart_count" in chart_df.columns:
-                c_max = pd.to_numeric(chart_df["cart_count"], errors="coerce").max()
-                if not pd.isna(c_max) and float(c_max) > max_y_val:
-                    max_y_val = float(c_max)
-            if "ad_atbs_total" in chart_df.columns:
-                a_max = pd.to_numeric(chart_df["ad_atbs_total"], errors="coerce").max()
-                if not pd.isna(a_max) and float(a_max) > max_y_val:
-                    max_y_val = float(a_max)
-            m_layer = build_milestones_altair_layer(milestones_list, max_y_val=max_y_val)
-            if m_layer is not None:
-                carts_chart = alt.layer(carts_chart, m_layer).resolve_scale(color="independent")
         st.altair_chart(carts_chart, width="stretch")
 
     if aggregation_level == CHART_LEVEL_CABINET:
