@@ -1367,6 +1367,26 @@ class ExternalContextWordstatDisplay(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
+
+class DashboardMilestone(Base):
+    __tablename__ = "dashboard_milestones"
+    __table_args__ = (
+        Index("idx_dashboard_milestones_date", "milestone_date"),
+        Index("idx_dashboard_milestones_active_date", "is_active", "milestone_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    milestone_date: Mapped[date] = mapped_column(Date, nullable=False)
+    milestone_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
 class ExternalContextMetric(Base):
     __tablename__ = "external_context_metric"
     __table_args__ = (
