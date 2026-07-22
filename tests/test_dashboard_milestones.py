@@ -134,6 +134,43 @@ def test_empty_list_does_not_break_chart():
     assert build_milestones_altair_layer(None) is None
 
 
+def test_dynamic_legend_and_marker_layer():
+    milestones = [
+        {
+            "id": 1,
+            "milestone_date": date(2026, 7, 10),
+            "milestone_type": "price_discount",
+            "milestone_type_label": "Цена / скидка",
+            "title": "Скидка 10%",
+            "comment": None,
+            "is_active": True,
+        },
+        {
+            "id": 2,
+            "milestone_date": date(2026, 7, 15),
+            "milestone_type": "advertising",
+            "milestone_type_label": "Реклама",
+            "title": "Запуск автокампаний",
+            "comment": "Поиск + каталоги",
+            "is_active": True,
+        },
+    ]
+
+    chart = build_milestones_altair_layer(milestones, y_pos=150.0)
+    assert chart is not None
+    chart_dict = chart.to_dict()
+    assert chart_dict["mark"]["type"] == "point"
+    assert chart_dict["mark"]["shape"] == "diamond"
+    assert chart_dict["mark"]["filled"] is True
+
+    color_scale = chart_dict["encoding"]["color"]["scale"]
+    assert color_scale["domain"] == ["Цена / скидка", "Реклама"]
+    assert "Поставка / остатки" not in color_scale["domain"]
+    assert "Карточка / контент" not in color_scale["domain"]
+    assert "Техническая проблема" not in color_scale["domain"]
+    assert "Другое" not in color_scale["domain"]
+
+
 def test_ui_logic_article_aggregation_does_not_call_list_milestones():
     # Проверяем, что функция list_milestones вызывается только при уровне агрегации "Кабинет"
     with patch("src.services.dashboard_milestones.list_milestones") as mock_list:

@@ -8798,33 +8798,53 @@ def build_user_friendly_chart(
     return alt.layer(*layers).resolve_scale(color="shared").properties(height=320)
 
 
-def build_milestones_altair_layer(milestones: list[dict[str, Any]]) -> alt.Chart | None:
+MILESTONE_TYPE_COLORS: dict[str, str] = {
+    "Цена / скидка": "#d97706",
+    "Реклама": "#ec4899",
+    "Поставка / остатки": "#10b981",
+    "Карточка / контент": "#8b5cf6",
+    "Техническая проблема": "#ef4444",
+    "Другое": "#6b7280",
+}
+
+
+def build_milestones_altair_layer(
+    milestones: list[dict[str, Any]],
+    y_pos: float = 100.0,
+) -> alt.Chart | None:
     if not milestones:
         return None
     rows = []
     for m in milestones:
+        label = m.get("milestone_type_label") or m.get("milestone_type", "")
         rows.append({
             "milestone_date": pd.to_datetime(m["milestone_date"]),
-            "milestone_type_label": m.get("milestone_type_label") or m.get("milestone_type", ""),
+            "milestone_type_label": label,
             "title": m.get("title", ""),
             "comment": m.get("comment") or "—",
             "milestone_type": m.get("milestone_type", ""),
+            "y_pos": y_pos,
         })
     df_m = pd.DataFrame(rows)
     if df_m.empty:
         return None
 
+    present_labels = list(dict.fromkeys(df_m["milestone_type_label"].tolist()))
+    range_colors = [MILESTONE_TYPE_COLORS.get(label, "#6b7280") for label in present_labels]
+
     color_scale = alt.Scale(
-        domain=["price_discount", "advertising", "stock_supply", "content", "technical", "other"],
-        range=["#d97706", "#ec4899", "#10b981", "#8b5cf6", "#ef4444", "#6b7280"],
+        domain=present_labels,
+        range=range_colors,
     )
 
-    milestone_rules = alt.Chart(df_m).mark_rule(
-        strokeDash=[4, 4],
-        strokeWidth=2,
+    milestone_points = alt.Chart(df_m).mark_point(
+        filled=True,
+        size=150,
+        shape="diamond",
     ).encode(
         x=alt.X("milestone_date:T"),
-        color=alt.Color("milestone_type:N", scale=color_scale, legend=alt.Legend(title="Тип вехи")),
+        y=alt.Y("y_pos:Q"),
+        color=alt.Color("milestone_type_label:N", scale=color_scale, legend=alt.Legend(title="Тип вехи")),
         tooltip=[
             alt.Tooltip("milestone_date:T", title="Дата вехи", format="%d.%m.%Y"),
             alt.Tooltip("milestone_type_label:N", title="Тип вехи"),
@@ -8832,7 +8852,7 @@ def build_milestones_altair_layer(milestones: list[dict[str, Any]]) -> alt.Chart
             alt.Tooltip("comment:N", title="Комментарий"),
         ],
     )
-    return milestone_rules
+    return milestone_points
 
 
 def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
@@ -8848,7 +8868,7 @@ def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
         else datetime.now().date()
     )
 
-    with st.expander("➕ Добавить веху", expanded=False):
+    with st.expander("Добавить веху", expanded=False):
         with st.form(key="add_milestone_form"):
             c1, c2 = st.columns(2)
             with c1:
@@ -8879,69 +8899,70 @@ def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
                     except Exception as e:
                         st.error(f"Ошибка при сохранении: {e}")
 
-    try:
-        period_milestones = list_milestones(date_from=min_date, date_to=max_date, include_inactive=False)
-    except Exception:
-        logger.exception("Не удалось загрузить вехи кабинета для блока управления")
-        period_milestones = []
+    with st.expander("Список вех", expanded=False):
+        try:
+            period_milestones = list_milestones(date_from=min_date, date_to=max_date, include_inactive=False)
+        except Exception:
+            logger.exception("Не удалось загрузить вехи кабинета для блока управления")
+            period_milestones = []
 
-    if not period_milestones:
-        st.caption("За выбранный период вех нет.")
-    else:
-        for m in period_milestones:
-            m_id = m["id"]
-            m_date_str = m["milestone_date"].strftime("%d.%m.%Y")
-            m_type_label = m["milestone_type_label"]
-            m_title = m["title"]
-            m_comment = f" ({m['comment']})" if m.get("comment") else ""
+        if not period_milestones:
+            st.caption("В выбранном периоде вех нет.")
+        else:
+            for m in period_milestones:
+                m_id = m["id"]
+                m_date_str = m["milestone_date"].strftime("%d.%m.%Y")
+                m_type_label = m["milestone_type_label"]
+                m_title = m["title"]
+                m_comment = f" ({m['comment']})" if m.get("comment") else ""
 
-            col_info, col_edit, col_hide = st.columns([6, 1, 1])
-            with col_info:
-                st.markdown(f"**{m_date_str}** — **[{m_type_label}]** {m_title}{m_comment}")
-            with col_edit:
-                if st.button("Изменить", key=f"edit_btn_m_{m_id}"):
-                    st.session_state[f"editing_m_{m_id}"] = not st.session_state.get(f"editing_m_{m_id}", False)
-            with col_hide:
-                if st.button("Скрыть", key=f"hide_btn_m_{m_id}"):
-                    deactivate_milestone(m_id)
-                    st.rerun()
+                col_info, col_edit, col_hide = st.columns([6, 1, 1])
+                with col_info:
+                    st.markdown(f"**{m_date_str}** — **[{m_type_label}]** {m_title}{m_comment}")
+                with col_edit:
+                    if st.button("Изменить", key=f"edit_btn_m_{m_id}"):
+                        st.session_state[f"editing_m_{m_id}"] = not st.session_state.get(f"editing_m_{m_id}", False)
+                with col_hide:
+                    if st.button("Скрыть", key=f"hide_btn_m_{m_id}"):
+                        deactivate_milestone(m_id)
+                        st.rerun()
 
-            if st.session_state.get(f"editing_m_{m_id}", False):
-                with st.form(key=f"edit_m_form_{m_id}"):
-                    ec1, ec2 = st.columns(2)
-                    with ec1:
-                        edit_date = st.date_input("Дата вехи", value=m["milestone_date"], key=f"edit_date_{m_id}")
-                        type_keys = list(MILESTONE_TYPES.keys())
-                        type_idx = type_keys.index(m["milestone_type"]) if m["milestone_type"] in type_keys else 0
-                        edit_type = st.selectbox(
-                            "Тип вехи",
-                            options=type_keys,
-                            format_func=lambda x: MILESTONE_TYPES[x],
-                            index=type_idx,
-                            key=f"edit_type_{m_id}",
-                        )
-                    with ec2:
-                        edit_title = st.text_input("Название", value=m["title"], key=f"edit_title_{m_id}")
-                        edit_comment = st.text_input("Комментарий", value=m.get("comment") or "", key=f"edit_comment_{m_id}")
+                if st.session_state.get(f"editing_m_{m_id}", False):
+                    with st.form(key=f"edit_m_form_{m_id}"):
+                        ec1, ec2 = st.columns(2)
+                        with ec1:
+                            edit_date = st.date_input("Дата вехи", value=m["milestone_date"], key=f"edit_date_{m_id}")
+                            type_keys = list(MILESTONE_TYPES.keys())
+                            type_idx = type_keys.index(m["milestone_type"]) if m["milestone_type"] in type_keys else 0
+                            edit_type = st.selectbox(
+                                "Тип вехи",
+                                options=type_keys,
+                                format_func=lambda x: MILESTONE_TYPES[x],
+                                index=type_idx,
+                                key=f"edit_type_{m_id}",
+                            )
+                        with ec2:
+                            edit_title = st.text_input("Название", value=m["title"], key=f"edit_title_{m_id}")
+                            edit_comment = st.text_input("Комментарий", value=m.get("comment") or "", key=f"edit_comment_{m_id}")
 
-                    save_edit = st.form_submit_button("Сохранить изменения")
-                    if save_edit:
-                        if not edit_title.strip():
-                            st.error("Название не может быть пустым!")
-                        else:
-                            try:
-                                update_milestone(
-                                    milestone_id=m_id,
-                                    milestone_date=edit_date,
-                                    milestone_type=edit_type,
-                                    title=edit_title,
-                                    comment=edit_comment,
-                                )
-                                st.session_state[f"editing_m_{m_id}"] = False
-                                st.success("Изменения сохранены!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Ошибка при обновлении: {e}")
+                        save_edit = st.form_submit_button("Сохранить изменения")
+                        if save_edit:
+                            if not edit_title.strip():
+                                st.error("Название не может быть пустым!")
+                            else:
+                                try:
+                                    update_milestone(
+                                        milestone_id=m_id,
+                                        milestone_date=edit_date,
+                                        milestone_type=edit_type,
+                                        title=edit_title,
+                                        comment=edit_comment,
+                                    )
+                                    st.session_state[f"editing_m_{m_id}"] = False
+                                    st.success("Изменения сохранены!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Ошибка при обновлении: {e}")
 
 
 def format_chart_kpi_value(value: float | None, digits: int = 1, suffix: str = "") -> str:
@@ -9703,7 +9724,17 @@ def render_efficiency_charts(
         st.info("Нет данных за выбранный период.")
     else:
         if aggregation_level == CHART_LEVEL_CABINET and show_milestones and milestones_list:
-            m_layer = build_milestones_altair_layer(milestones_list)
+            max_y_val = 10.0
+            if "cart_count" in chart_df.columns:
+                c_max = pd.to_numeric(chart_df["cart_count"], errors="coerce").max()
+                if not pd.isna(c_max) and float(c_max) > max_y_val:
+                    max_y_val = float(c_max)
+            if "ad_atbs_total" in chart_df.columns:
+                a_max = pd.to_numeric(chart_df["ad_atbs_total"], errors="coerce").max()
+                if not pd.isna(a_max) and float(a_max) > max_y_val:
+                    max_y_val = float(a_max)
+            y_marker_pos = max_y_val * 1.05
+            m_layer = build_milestones_altair_layer(milestones_list, y_pos=y_marker_pos)
             if m_layer is not None:
                 carts_chart = alt.layer(carts_chart, m_layer).resolve_scale(color="independent")
         st.altair_chart(carts_chart, width="stretch")
