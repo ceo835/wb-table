@@ -9700,11 +9700,6 @@ def render_efficiency_charts(
         )
     )
 
-    if period_summary["has_lagged_ad_attribution"]:
-        st.caption("Статус рекламной атрибуции: AD_ATTRIBUTION_LAGGED")
-    elif period_summary["has_partial_ad_attribution"]:
-        st.caption("Статус рекламной атрибуции: AD_DATA_PARTIAL")
-
     show_milestones = True
     milestones_list = []
     if aggregation_level == CHART_LEVEL_CABINET:
@@ -9747,9 +9742,7 @@ def render_efficiency_charts(
                     max_y_val = float(a_max)
             m_layer = build_milestones_altair_layer(milestones_list, max_y_val=max_y_val)
             if m_layer is not None:
-                chart_children = list(carts_chart.layer) if hasattr(carts_chart, "layer") else [carts_chart]
-                milestone_children = list(m_layer.layer) if hasattr(m_layer, "layer") else [m_layer]
-                carts_chart = alt.layer(*chart_children, *milestone_children).resolve_scale(color="independent")
+                carts_chart = alt.layer(carts_chart, m_layer).resolve_scale(color="independent")
         st.altair_chart(carts_chart, width="stretch")
 
     if aggregation_level == CHART_LEVEL_CABINET:
