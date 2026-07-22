@@ -8735,7 +8735,6 @@ def build_user_friendly_chart(
     line_colors: list[str],
     threshold: float | None = None,
     threshold_label: str | None = None,
-    extra_layer: alt.Chart | None = None,
 ) -> alt.Chart | None:
     series_df = build_chart_series_dataframe(chart_df, series_map, threshold=threshold)
     if series_df.empty:
@@ -8770,9 +8769,6 @@ def build_user_friendly_chart(
         base.mark_circle(size=55),
     ]
 
-    if extra_layer is not None:
-        layers.append(extra_layer)
-
     if threshold is not None and threshold_label:
         threshold_df = pd.DataFrame({"threshold": [threshold], "label": [threshold_label]})
         layers.append(
@@ -8799,8 +8795,7 @@ def build_user_friendly_chart(
                 )
             )
 
-    resolve_mode = "independent" if extra_layer is not None else "shared"
-    return alt.layer(*layers).resolve_scale(color=resolve_mode).properties(height=320)
+    return alt.layer(*layers).resolve_scale(color="shared").properties(height=320)
 
 
 MILESTONE_TYPE_COLORS: dict[str, str] = {
@@ -8845,13 +8840,19 @@ def build_milestones_altair_layer(
         range=range_colors,
     )
 
+    color_encoding = alt.Color(
+        "milestone_type_label:N",
+        scale=color_scale,
+        legend=alt.Legend(title="Тип метки"),
+    )
+
     indicator_ticks = alt.Chart(df_m).mark_rule(
         strokeDash=[3, 3],
         strokeWidth=1.5,
     ).encode(
         x=alt.X("milestone_date:T"),
         y=alt.Y("y_diamond:Q"),
-        color=alt.Color("milestone_type_label:N", scale=color_scale, legend=None),
+        color=color_encoding,
     )
 
     milestone_points = alt.Chart(df_m).mark_point(
@@ -8861,7 +8862,7 @@ def build_milestones_altair_layer(
     ).encode(
         x=alt.X("milestone_date:T"),
         y=alt.Y("y_diamond:Q"),
-        color=alt.Color("milestone_type_label:N", scale=color_scale, legend=alt.Legend(title="Тип метки")),
+        color=color_encoding,
         tooltip=[
             alt.Tooltip("milestone_date:T", title="Дата метки", format="%d.%m.%Y"),
             alt.Tooltip("milestone_type_label:N", title="Тип метки"),
