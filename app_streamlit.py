@@ -8856,10 +8856,10 @@ def build_milestones_altair_layer(
     ).encode(
         x=alt.X("milestone_date:T"),
         y=alt.Y("y_diamond:Q"),
-        color=alt.Color("milestone_type_label:N", scale=color_scale, legend=alt.Legend(title="Тип вехи")),
+        color=alt.Color("milestone_type_label:N", scale=color_scale, legend=alt.Legend(title="Тип метки")),
         tooltip=[
-            alt.Tooltip("milestone_date:T", title="Дата вехи", format="%d.%m.%Y"),
-            alt.Tooltip("milestone_type_label:N", title="Тип вехи"),
+            alt.Tooltip("milestone_date:T", title="Дата метки", format="%d.%m.%Y"),
+            alt.Tooltip("milestone_type_label:N", title="Тип метки"),
             alt.Tooltip("title:N", title="Название"),
             alt.Tooltip("comment:N", title="Комментарий"),
         ],
@@ -8868,7 +8868,7 @@ def build_milestones_altair_layer(
 
 
 def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
-    st.markdown("#### Управление вехами")
+    st.markdown("#### Управление метками")
     min_date = (
         chart_df["report_date"].dropna().min()
         if "report_date" in chart_df.columns and not chart_df["report_date"].dropna().empty
@@ -8880,24 +8880,24 @@ def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
         else datetime.now().date()
     )
 
-    with st.expander("Добавить веху", expanded=False):
+    with st.expander("Добавить метку", expanded=False):
         with st.form(key="add_milestone_form"):
             c1, c2 = st.columns(2)
             with c1:
-                new_date = st.date_input("Дата вехи", value=max_date)
+                new_date = st.date_input("Дата метки", value=max_date)
                 new_type = st.selectbox(
-                    "Тип вехи",
+                    "Тип метки",
                     options=list(MILESTONE_TYPES.keys()),
                     format_func=lambda x: MILESTONE_TYPES[x],
                     index=0,
                 )
             with c2:
-                new_title = st.text_input("Название вехи", placeholder="Например, Снижение цены на 10%")
+                new_title = st.text_input("Название метки", placeholder="Например, Снижение цены на 10%")
                 new_comment = st.text_input("Комментарий (необязательно)", placeholder="Детали изменения...")
-            submitted = st.form_submit_button("Сохранить веху")
+            submitted = st.form_submit_button("Сохранить метку")
             if submitted:
                 if not new_title.strip():
-                    st.error("Укажите название вехи!")
+                    st.error("Укажите название метки!")
                 else:
                     try:
                         create_milestone(
@@ -8906,20 +8906,20 @@ def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
                             title=new_title,
                             comment=new_comment,
                         )
-                        st.success("Веха сохранена!")
+                        st.success("Метка сохранена!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Ошибка при сохранении: {e}")
 
-    with st.expander("Список вех", expanded=False):
+    with st.expander("Список меток", expanded=False):
         try:
             period_milestones = list_milestones(date_from=min_date, date_to=max_date, include_inactive=False)
         except Exception:
-            logger.exception("Не удалось загрузить вехи кабинета для блока управления")
+            logger.exception("Не удалось загрузить метку кабинета для блока управления")
             period_milestones = []
 
         if not period_milestones:
-            st.caption("В выбранном периоде вех нет.")
+            st.caption("В выбранном периоде меток нет.")
         else:
             for m in period_milestones:
                 m_id = m["id"]
@@ -8943,11 +8943,11 @@ def render_milestones_management_block(chart_df: pd.DataFrame) -> None:
                     with st.form(key=f"edit_m_form_{m_id}"):
                         ec1, ec2 = st.columns(2)
                         with ec1:
-                            edit_date = st.date_input("Дата вехи", value=m["milestone_date"], key=f"edit_date_{m_id}")
+                            edit_date = st.date_input("Дата метки", value=m["milestone_date"], key=f"edit_date_{m_id}")
                             type_keys = list(MILESTONE_TYPES.keys())
                             type_idx = type_keys.index(m["milestone_type"]) if m["milestone_type"] in type_keys else 0
                             edit_type = st.selectbox(
-                                "Тип вехи",
+                                "Тип метки",
                                 options=type_keys,
                                 format_func=lambda x: MILESTONE_TYPES[x],
                                 index=type_idx,
@@ -9708,14 +9708,14 @@ def render_efficiency_charts(
     show_milestones = True
     milestones_list = []
     if aggregation_level == CHART_LEVEL_CABINET:
-        show_milestones = st.toggle("Показывать вехи", value=True, key="toggle_show_milestones")
+        show_milestones = st.toggle("Показывать метки", value=True, key="toggle_show_milestones")
         if show_milestones and "report_date" in chart_df.columns and not chart_df["report_date"].dropna().empty:
             min_date = chart_df["report_date"].dropna().min()
             max_date = chart_df["report_date"].dropna().max()
             try:
                 milestones_list = list_milestones(date_from=min_date, date_to=max_date, include_inactive=False)
             except Exception:
-                logger.exception("Не удалось загрузить вехи кабинета для графика")
+                logger.exception("Не удалось загрузить метки кабинета для графика")
                 milestones_list = []
 
     st.markdown("### Динамика корзин")
@@ -9747,7 +9747,9 @@ def render_efficiency_charts(
                     max_y_val = float(a_max)
             m_layer = build_milestones_altair_layer(milestones_list, max_y_val=max_y_val)
             if m_layer is not None:
-                carts_chart = alt.layer(carts_chart, m_layer).resolve_scale(color="independent")
+                chart_children = list(carts_chart.layer) if hasattr(carts_chart, "layer") else [carts_chart]
+                milestone_children = list(m_layer.layer) if hasattr(m_layer, "layer") else [m_layer]
+                carts_chart = alt.layer(*chart_children, *milestone_children).resolve_scale(color="independent")
         st.altair_chart(carts_chart, width="stretch")
 
     if aggregation_level == CHART_LEVEL_CABINET:
